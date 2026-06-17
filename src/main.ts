@@ -39,6 +39,7 @@ import {
   SkillLayerSettings,
 } from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
+import { decideToggleAction } from "./viewToggle";
 
 /** Internal (non-public) command registry surface used to unregister commands. */
 interface CommandsApi {
@@ -71,7 +72,7 @@ export default class SkillLayerPlugin extends Plugin {
     );
 
     this.addRibbonIcon("layers", "Skill Layer: browse skills", () => {
-      void this.activateView();
+      void this.toggleView();
     });
 
     this.addCommand({
@@ -193,6 +194,31 @@ export default class SkillLayerPlugin extends Plugin {
     // A freshly created leaf's onOpen() runs the rescan itself.
     await leaf.setViewState({ type: SKILL_LAYER_VIEW, active: true });
     await workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Ribbon behavior: toggle the Skill Layer pane.
+   * - Not open                → open + reveal (via activateView).
+   * - Open but not active      → reveal/focus it (via activateView).
+   * - Open AND active/visible  → close (detach its leaves).
+   *
+   * The command-palette "Open skills browser" entry stays on activateView
+   * (pure open+reveal, never closes) — closing on a command named "Open"
+   * would be surprising. Only the ribbon toggles.
+   */
+  async toggleView(): Promise<void> {
+    const { workspace } = this.app;
+    const existing = workspace.getLeavesOfType(SKILL_LAYER_VIEW);
+    const activeView = workspace.getActiveViewOfType(SkillBrowserView);
+    const isActiveVisible =
+      activeView !== null && existing.includes(activeView.leaf);
+    const action = decideToggleAction(existing.length > 0, isActiveVisible);
+    if (action === "close") {
+      workspace.detachLeavesOfType(SKILL_LAYER_VIEW);
+      return;
+    }
+    // "open" and "reveal" both funnel through activateView (open+reveal+rescan).
+    await this.activateView();
   }
 
   // --- Pinning + per-skill icons -----------------------------------------

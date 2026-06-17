@@ -119,22 +119,33 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Don't let the actions column be compressed by the main column... */
   flex: 0 0 auto;
+  /* ...and pin its width so it never resizes when a button label toggles
+     (e.g. "Add to right-click menu" → "✓ Right-click menu") or the harness
+     value changes. Without this, the column (which stretches its children to
+     the widest control) shrank every control in lockstep whenever the widest
+     label got shorter. A fixed width keeps every row identical and stable. */
+  width: 14em;
 }
 
 .skill-layer-action {
   cursor: pointer;
   white-space: nowrap;
   font-size: var(--font-ui-smaller);
+  /* Size to the fixed column; never shrink along the column axis. */
+  flex-shrink: 0;
 }
 
 .skill-layer-action.is-pinned {
   color: var(--text-accent);
 }
 
-/* Per-skill harness selector dropdown in the row actions. */
+/* Per-skill harness selector dropdown in the row actions. Fills the fixed
+   column width and never shrinks, so it stays aligned with the buttons. */
 .skill-layer-harness-select {
-  max-width: 14em;
+  width: 100%;
+  flex-shrink: 0;
 }
 
 /* The pinned-icon glyph shown inline on the "Change icon" button. */

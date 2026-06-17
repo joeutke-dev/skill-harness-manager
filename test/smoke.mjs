@@ -41,6 +41,18 @@ const {
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
 
+// M5: the pure ribbon-toggle decision helper (no Obsidian, no side effects).
+const toggleOut = join(builtDir, "viewToggle.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "viewToggle.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: toggleOut,
+  logLevel: "silent",
+});
+const { decideToggleAction } = await import(pathToFileURL(toggleOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, cond, detail) {
@@ -297,6 +309,38 @@ console.log("\n[f] choice=claude → --harness as own two argv elements; prompt 
   check(
     "default choice argv shape unchanged: [bin, run, -p, prompt]",
     deepEq(argvDefault, [BIN, "run", "-p", prompt]),
+  );
+}
+
+// =====================================================================
+// (g) M5 ribbon toggle decision: open / reveal / close.
+// =====================================================================
+console.log("\n[g] Ribbon toggle decision (open / reveal / close)");
+{
+  // No leaf open → always open (the second arg is irrelevant).
+  eq("no leaf → open", decideToggleAction(false, false), "open");
+  eq("no leaf (active flag ignored) → open", decideToggleAction(false, true), "open");
+  // Open + active/visible → close.
+  eq("open & active/visible → close", decideToggleAction(true, true), "close");
+  // Open but not the active/visible leaf → reveal (bring to front).
+  eq("open but not active → reveal", decideToggleAction(true, false), "reveal");
+  // The toggle never returns anything other than the three known actions.
+  const all = [
+    decideToggleAction(false, false),
+    decideToggleAction(false, true),
+    decideToggleAction(true, false),
+    decideToggleAction(true, true),
+  ];
+  check(
+    "every outcome is one of open/reveal/close",
+    all.every((a) => a === "open" || a === "reveal" || a === "close"),
+  );
+  // Closing is reachable ONLY when the leaf both exists and is active/visible.
+  check(
+    "close requires exists && active/visible",
+    decideToggleAction(true, true) === "close" &&
+      decideToggleAction(true, false) !== "close" &&
+      decideToggleAction(false, true) !== "close",
   );
 }
 
