@@ -1,0 +1,273 @@
+/* Skill Layer — all styling lives here; no inline JS styles. */
+
+.skill-layer-view {
+  padding: 0 8px 16px;
+}
+
+.skill-layer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.skill-layer-title {
+  margin: 0;
+}
+
+.skill-layer-rescan {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.skill-layer-search {
+  width: 100%;
+  margin: 10px 0;
+}
+
+.skill-layer-count {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-bottom: 8px;
+}
+
+.skill-layer-empty {
+  color: var(--text-muted);
+  padding: 16px 4px;
+  text-align: center;
+}
+
+.skill-layer-group {
+  margin-bottom: 14px;
+}
+
+.skill-layer-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: uppercase;
+  font-size: var(--font-ui-smaller);
+  letter-spacing: 0.05em;
+  color: var(--text-accent);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+
+.skill-layer-group-name {
+  font-weight: var(--font-semibold);
+}
+
+.skill-layer-group-count {
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.skill-layer-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 6px;
+  border-radius: 6px;
+}
+
+.skill-layer-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.skill-layer-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.skill-layer-row-nameline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.skill-layer-row-name {
+  font-weight: var(--font-semibold);
+}
+
+.skill-layer-row-badge {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0 6px;
+}
+
+.skill-layer-row-desc {
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  margin: 2px 0;
+}
+
+.skill-layer-row-path {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  word-break: break-all;
+}
+
+.skill-layer-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.skill-layer-action {
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: var(--font-ui-smaller);
+}
+
+.skill-layer-action.is-pinned {
+  color: var(--text-accent);
+}
+
+/* The pinned-icon glyph shown inline on the "Change icon" button. */
+.skill-layer-action-icon {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.skill-layer-action-icon .svg-icon {
+  width: 1em;
+  height: 1em;
+}
+
+/* Icon picker suggestions: glyph + id. */
+.skill-layer-icon-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.skill-layer-icon-glyph {
+  display: inline-flex;
+}
+
+.skill-layer-icon-name {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.skill-layer-warn {
+  color: var(--text-warning);
+}
+
+/* --- Tagging ------------------------------------------------------------ */
+
+.skill-layer-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.skill-layer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+  user-select: none;
+}
+
+.skill-layer-chip-label {
+  cursor: pointer;
+}
+
+/* Frontmatter (authoritative, editable) chips read as solid/accented. */
+.skill-layer-chip.is-frontmatter {
+  border-color: var(--background-modifier-border-hover);
+}
+
+/* Description-origin chips are read-only: muted with a dotted border. */
+.skill-layer-chip.is-description {
+  color: var(--text-muted);
+  background: transparent;
+  border-style: dotted;
+}
+
+/* Derived folder chips are dimmer + dashed + italic to signal "auto, virtual". */
+.skill-layer-chip.is-folder {
+  color: var(--text-muted);
+  background: transparent;
+  border-style: dashed;
+  font-style: italic;
+}
+
+.skill-layer-chip.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.skill-layer-chip-x {
+  cursor: pointer;
+  font-weight: var(--font-bold);
+  opacity: 0.7;
+}
+
+.skill-layer-chip-x:hover {
+  opacity: 1;
+  color: var(--text-error);
+}
+
+.skill-layer-chip-add {
+  color: var(--text-muted);
+  border-style: dashed;
+  background: transparent;
+}
+
+.skill-layer-chip-add:hover {
+  color: var(--text-accent);
+}
+
+.skill-layer-addtag-input {
+  font-size: var(--font-ui-smaller);
+  width: 9em;
+  padding: 1px 6px;
+}
+
+.skill-layer-facet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.skill-layer-activefilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.skill-layer-activefilters-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.skill-layer-clearfilters {
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}

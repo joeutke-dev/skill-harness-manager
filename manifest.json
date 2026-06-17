@@ -1,0 +1,10 @@
+{
+  "id": "skill-layer",
+  "name": "Skill Layer",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Discover, browse, and pin AI skills (SKILL.md files) scattered across your vault, dot-folders like .claude/skills, and external desktop dirs. Visibility + consolidation layer — no bundled LLM.",
+  "author": "Joe Utke",
+  "authorUrl": "https://github.com/joeutke-dev",
+  "isDesktopOnly": true
+}

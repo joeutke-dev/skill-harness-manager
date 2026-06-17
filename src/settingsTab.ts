@@ -1,0 +1,278 @@
+import { App, PluginSettingTab, Setting, normalizePath } from "obsidian";
+import type SkillLayerPlugin from "./main";
+import { normalizeExternalRoot } from "./parse";
+import { RootKind, ScanRoot } from "./types";
+
+/** Guess the right code path for a freshly added root from its path string. */
+function inferKind(path: string): RootKind {
+  const trimmed = path.trim();
+  if (trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return "external"; // absolute filesystem path
+  }
+  // A leading-dot segment anywhere means the Vault API can't see it.
+  if (trimmed.split("/").some((seg) => seg.startsWith("."))) {
+    return "adapter";
+  }
+  return "vault";
+}
+
+export class SkillLayerSettingTab extends PluginSettingTab {
+  private plugin: SkillLayerPlugin;
+
+  constructor(app: App, plugin: SkillLayerPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    containerEl.createEl("h2", { text: "Skill Layer" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Discover, browse, and pin AI skills (SKILL.md files) across your vault, " +
+        "dot-folders like .claude/skills, and external desktop directories.",
+    });
+
+    // --- Scan roots -------------------------------------------------------
+    new Setting(containerEl)
+      .setName("Scan roots")
+      .setHeading()
+      .setDesc(
+        "Vault-relative paths (\"\" = vault root, .claude/skills, skills) or " +
+          "absolute desktop paths. The code path is inferred automatically.",
+      );
+
+    const settings = this.plugin.settings;
+
+    settings.scanRoots.forEach((root, index) => {
+      const setting = new Setting(containerEl)
+        .setName(root.path === "" ? "(vault root)" : root.path)
+        .setDesc(`Detection: ${root.kind}`);
+
+      setting.addToggle((toggle) =>
+        toggle
+          .setTooltip("Enable / disable this root")
+          .setValue(root.enabled)
+          .onChange(async (value) => {
+            root.enabled = value;
+            await this.plugin.saveSettings();
+            await this.plugin.rescan();
+          }),
+      );
+
+      setting.addExtraButton((btn) =>
+        btn
+          .setIcon("trash")
+          .setTooltip("Remove root")
+          .onClick(async () => {
+            settings.scanRoots.splice(index, 1);
+            await this.plugin.saveSettings();
+            await this.plugin.rescan();
+            this.display();
+          }),
+      );
+    });
+
+    // Add-a-root row.
+    let pendingPath = "";
+    new Setting(containerEl)
+      .setName("Add scan root")
+      .setDesc("Type a path and click Add.")
+      .addText((text) =>
+        text
+          .setPlaceholder(".claude/skills or /Users/me/skills")
+          .onChange((value) => {
+            pendingPath = value;
+          }),
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Add")
+          .setCta()
+          .onClick(async () => {
+            const raw = pendingPath.trim();
+            if (raw === "") return;
+            const kind = inferKind(raw);
+            // Normalize vault-relative paths; for external paths strip trailing
+            // slashes so the same root can't be added twice ("/a/skills" vs
+            // "/a/skills/") — but never mangle filesystem roots.
+            const path =
+              kind === "external" ? normalizeExternalRoot(raw) : normalizePath(raw);
+            const exists = settings.scanRoots.some(
+              (r) => r.path === path && r.kind === kind,
+            );
+            if (!exists) {
+              const newRoot: ScanRoot = { path, kind, enabled: true };
+              settings.scanRoots.push(newRoot);
+              await this.plugin.saveSettings();
+              await this.plugin.rescan();
+            }
+            this.display();
+          }),
+      );
+
+    if (!this.plugin.canScanExternal()) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description skill-layer-warn",
+        text:
+          "External absolute-path roots require the desktop app with filesystem " +
+          "access; they will be skipped in the current environment.",
+      });
+    }
+
+    // --- Launch behavior --------------------------------------------------
+    new Setting(containerEl).setName("Launch").setHeading();
+
+    new Setting(containerEl)
+      .setName("Invocation template")
+      .setDesc(
+        "The skill invocation string for the “Copy invocation” action (for manual " +
+          "REPL paste). Launch uses a natural-language prompt instead. " +
+          "Placeholders: {name} {path} {label}.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("/{name}")
+          .setValue(settings.invocationTemplate)
+          .onChange(async (value) => {
+            settings.invocationTemplate = value || "/{name}";
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Launch (the ribbon icon and a skill row’s “Launch”) spawns a one-shot, " +
+        "UI-visible omnigent run in the vault directory — view it in the omnigent " +
+        "UI. The plugin spawns only the omnigent binary, with array arguments and " +
+        "no shell. “Copy invocation” and “Open file” are unchanged.",
+    });
+
+    new Setting(containerEl)
+      .setName("Omnigent binary path")
+      .setDesc(
+        "Absolute path to the omnigent binary. Blank = auto-detect " +
+          "(~/.local/bin, /usr/local/bin, /opt/homebrew/bin).",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("(auto-detect)")
+          .setValue(settings.omnigentBinaryPath)
+          .onChange(async (value) => {
+            settings.omnigentBinaryPath = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Omnigent server URL")
+      .setDesc(
+        "Blank = local daemon (no --server). If set, the run is sent to this " +
+          "server so it appears in your remote omnigent UI.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("(local daemon)")
+          .setValue(settings.omnigentServerUrl)
+          .onChange(async (value) => {
+            settings.omnigentServerUrl = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Harness")
+      .setDesc("Blank = omnigent default. If set, passed as --harness.")
+      .addText((text) =>
+        text
+          .setPlaceholder("(default)")
+          .setValue(settings.omnigentHarness)
+          .onChange(async (value) => {
+            settings.omnigentHarness = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Append vault-anchor instruction")
+      .setDesc(
+        "Append a generic instruction to the launch prompt telling the run to " +
+          "operate in and write into this vault (no git worktree).",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.appendVaultAnchor).onChange(async (value) => {
+          settings.appendVaultAnchor = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    // The former global "Pinned ribbon icon" setting is gone — each pinned
+    // skill now picks its own Lucide icon from the Skill Layer browser ("Pin to
+    // ribbon…" / "Change icon"). Any old global value is read only as a
+    // one-time migration fallback for pre-existing pins.
+    new Setting(containerEl)
+      .setName("Pinned ribbon icons")
+      .setDesc(
+        "Each pinned skill chooses its own icon from the Skill Layer view — " +
+          'use "Pin to ribbon…" or "Change icon" on a skill row.',
+      );
+
+    // --- Tagging ----------------------------------------------------------
+    new Setting(containerEl).setName("Tagging").setHeading();
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Each skill shows tags from three sources: its frontmatter tags: field, " +
+        "#tag tokens in its description, and a dimmed virtual tag auto-derived " +
+        "from its folder. Click any chip to filter.",
+    });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Frontmatter tags: is the single authoritative place the UI writes. Only " +
+        "frontmatter chips have a remove ×; description and folder chips are " +
+        "read-only (edit the note to change a description #tag). “+ tag” adds to " +
+        "frontmatter — if a tag currently exists only in the description, adding " +
+        "it promotes it to the authoritative, natively-indexed frontmatter list.",
+    });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Writes happen ONLY on an explicit add/remove and never touch the " +
+        "description. In-vault frontmatter tags appear in Obsidian's native tag " +
+        "pane and search; external and dot-folder skills (e.g. .claude/skills) " +
+        "live outside the vault index, so only this plugin's tag layer applies " +
+        "to them. The body, line endings, and other frontmatter are preserved; " +
+        "the tags: field is normalized to a compact inline list.",
+    });
+
+    // --- Pinned skills ----------------------------------------------------
+    new Setting(containerEl).setName("Pinned skills").setHeading();
+    if (settings.pinnedSkillIds.length === 0) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "No skills pinned. Pin skills from the Skill Layer browser view.",
+      });
+    } else {
+      for (const id of [...settings.pinnedSkillIds]) {
+        const skill = this.plugin.getSkillById(id);
+        new Setting(containerEl)
+          .setName(skill?.name ?? "(missing skill)")
+          .setDesc(id)
+          .addButton((btn) =>
+            btn
+              .setButtonText("Unpin")
+              .setWarning()
+              .onClick(async () => {
+                await this.plugin.unpinById(id);
+                this.display();
+              }),
+          );
+      }
+    }
+  }
+}

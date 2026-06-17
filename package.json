@@ -1,0 +1,33 @@
+{
+  "name": "skill-layer-obsidian",
+  "version": "0.1.0",
+  "description": "Skill Layer — discover, browse, and pin AI skills (SKILL.md files) across your Obsidian vault, dot-folders, and external desktop directories.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "lint": "eslint . --ext .ts",
+    "smoke": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "ai",
+    "skills",
+    "claude",
+    "codex"
+  ],
+  "author": "Joe Utke",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.5",
+    "eslint": "^8.57.0",
+    "obsidian": "1.8.7",
+    "typescript": "^5.4.5"
+  }
+}
