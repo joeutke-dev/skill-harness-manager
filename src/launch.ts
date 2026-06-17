@@ -135,18 +135,19 @@ export function parseHarnessChoicesFromHelp(helpText: string): string[] {
 
 /**
  * The deduped effective harness TOKEN list (no sentinel): built-ins first, then
- * discovered, then custom, each not already present. This is the allowed set a
- * per-skill choice is checked against and the source for the dropdown options
- * (the view prepends the "omnigent" default sentinel). Pure / unit-testable.
+ * discovered, each not already present. This is the allowed set a per-skill
+ * choice is checked against and the source for the dropdown options (the view
+ * prepends the "omnigent" default sentinel). The list is populated ONLY from
+ * omnigent itself — the shipped built-ins and whatever discovery surfaces; there
+ * are no user-defined entries. Pure / unit-testable.
  */
 export function effectiveHarnessTokens(
   builtins: readonly string[],
   discovered: readonly string[],
-  custom: readonly string[],
 ): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const list of [builtins, discovered, custom]) {
+  for (const list of [builtins, discovered]) {
     for (const t of list) {
       if (!t || seen.has(t)) continue;
       seen.add(t);
@@ -163,11 +164,10 @@ export function effectiveHarnessTokens(
 export function effectiveHarnessOptions(
   builtins: readonly string[],
   discovered: readonly string[],
-  custom: readonly string[],
 ): string[] {
   return [
     OMNIGENT_HARNESS_SENTINEL,
-    ...effectiveHarnessTokens(builtins, discovered, custom),
+    ...effectiveHarnessTokens(builtins, discovered),
   ];
 }
 

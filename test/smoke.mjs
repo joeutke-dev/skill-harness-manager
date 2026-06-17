@@ -294,7 +294,7 @@ console.log("\n[e] Per-skill harness resolution (fail-closed against allowed set
 }
 
 // =====================================================================
-// (f) M6 argv shape: a discovered/custom token → `--harness <token>` as its
+// (f) M6 argv shape: a discovered token → `--harness <token>` as its
 //     own two elements; the prompt stays a single inert `-p` element; the
 //     default sentinel → no --harness, argv unchanged.
 // =====================================================================
@@ -404,18 +404,18 @@ console.log("\n[i] parseHarnessChoicesFromHelp on the real help excerpt");
 }
 
 // =====================================================================
-// (j) M6 effective harness list: dedupe + order (builtins, discovered,
-//     custom) and the sentinel-led option list.
+// (j) M7 effective harness list: dedupe + order (builtins, discovered ONLY —
+//     no custom term) and the sentinel-led option list.
 // =====================================================================
 console.log("\n[j] effectiveHarnessTokens / effectiveHarnessOptions dedupe + order");
 {
   const builtins = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
   const discovered = ["claude", "codex", "newharness"]; // overlaps + one new
-  const custom = ["codex", "myharness"]; // overlaps builtins/discovered + one new
-  const tokens = effectiveHarnessTokens(builtins, discovered, custom);
+
+  const tokens = effectiveHarnessTokens(builtins, discovered);
 
   check(
-    "tokens = builtins, then new discovered, then new custom (deduped, in order)",
+    "tokens = builtins, then new discovered (deduped, in order)",
     deepEq(tokens, [
       "claude",
       "claude-sdk",
@@ -424,20 +424,61 @@ console.log("\n[j] effectiveHarnessTokens / effectiveHarnessOptions dedupe + ord
       "open-responses",
       "pi",
       "newharness",
-      "myharness",
     ]),
   );
   check("no duplicate tokens", new Set(tokens).size === tokens.length);
   check("the `omnigent` sentinel is NOT a token", !tokens.includes("omnigent"));
 
-  const opts = effectiveHarnessOptions(builtins, discovered, custom);
+  const opts = effectiveHarnessOptions(builtins, discovered);
   eq("options are sentinel-led", opts[0], OMNIGENT_HARNESS_SENTINEL);
   check("options = sentinel + tokens", deepEq(opts, [OMNIGENT_HARNESS_SENTINEL, ...tokens]));
 
-  // Empty discovered/custom → just the builtins (dropdown never empty).
+  // Empty discovered → just the builtins (dropdown never empty).
   check(
-    "empty discovered+custom → builtins only",
-    deepEq(effectiveHarnessTokens(builtins, [], []), builtins),
+    "empty discovered → builtins only",
+    deepEq(effectiveHarnessTokens(builtins, []), builtins),
+  );
+}
+
+// =====================================================================
+// (k) M7 migration: a leftover `customHarnesses` in loaded settings is
+//     ignored — it is stripped on load and can NEVER widen the allowed set.
+// =====================================================================
+console.log("\n[k] leftover customHarnesses is ignored (no longer widens the allowed set)");
+{
+  const builtins = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
+
+  // Mirror main.ts loadSettings: merge a stale data.json (still carrying a
+  // `customHarnesses` array AND a per-skill token that was a custom value),
+  // then strip the dead key.
+  const DEFAULTS = { discoveredHarnesses: [], skillHarness: {} };
+  const persisted = {
+    discoveredHarnesses: ["newharness"],
+    skillHarness: { "/abs/skill.md": "mything" }, // a formerly-custom token
+    customHarnesses: ["mything"], // legacy key from an older install
+  };
+  const merged = Object.assign({}, DEFAULTS, persisted);
+  delete merged.customHarnesses;
+
+  check("customHarnesses is stripped on load", merged.customHarnesses === undefined);
+
+  // The effective set is now built only from builtins ∪ discovered — the
+  // formerly-custom token cannot reach it.
+  const tokens = effectiveHarnessTokens(builtins, merged.discoveredHarnesses);
+  check("discovered token still present", tokens.includes("newharness"));
+  check("formerly-custom 'mything' NOT in the effective set", !tokens.includes("mything"));
+
+  // And a per-skill token that was custom now fails closed to the global
+  // default at launch (resolveHarnessArg, allowed = the custom-free set).
+  eq(
+    "formerly-custom per-skill token → global fallback (blank)",
+    resolveHarnessArg(merged.skillHarness["/abs/skill.md"], "", tokens),
+    "",
+  );
+  eq(
+    "formerly-custom per-skill token → global fallback (set)",
+    resolveHarnessArg(merged.skillHarness["/abs/skill.md"], "codex", tokens),
+    "codex",
   );
 }
 

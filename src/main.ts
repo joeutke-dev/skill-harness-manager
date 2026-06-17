@@ -145,6 +145,15 @@ export default class SkillLayerPlugin extends Plugin {
       DEFAULT_SETTINGS,
       (await this.loadData()) as Partial<SkillLayerSettings> | null,
     );
+    // Migration (M7): user-defined custom harnesses were removed. A persisted
+    // `customHarnesses` array from an older install is ignored (it can no longer
+    // widen the effective allowed set) and stripped here so the next
+    // saveSettings writes a clean data.json. Any per-skill token that was a
+    // formerly-custom value is left as-is in `skillHarness`: it is simply no
+    // longer in the allowed set, so the dropdown shows that skill as the default
+    // and `resolveHarnessArg` fails closed to the global default at launch.
+    delete (this.settings as unknown as Record<string, unknown>)
+      .customHarnesses;
   }
 
   async saveSettings(): Promise<void> {
@@ -258,14 +267,15 @@ export default class SkillLayerPlugin extends Plugin {
   // --- Per-skill harness selector ----------------------------------------
   /**
    * The deduped effective harness TOKEN list (no "omnigent" sentinel): built-ins
-   * ∪ discovered ∪ custom. This is BOTH the allowed set a per-skill / custom
-   * token is validated against at launch and the source of the dropdown options.
+   * ∪ discovered. Populated ONLY from omnigent — the shipped built-ins and
+   * whatever `discoverHarnesses` surfaces; there are no user-defined entries.
+   * This is BOTH the allowed set a per-skill token is validated against at launch
+   * and the source of the dropdown options.
    */
   effectiveHarnessTokens(): string[] {
     return effectiveHarnessTokens(
       BUILTIN_HARNESSES,
       this.settings.discoveredHarnesses,
-      this.settings.customHarnesses,
     );
   }
 
@@ -301,35 +311,6 @@ export default class SkillLayerPlugin extends Plugin {
     } else {
       delete this.settings.skillHarness[id];
     }
-    await this.saveSettings();
-  }
-
-  /**
-   * Add a user-supplied custom harness token. Validates the strict charset and
-   * skips no-op additions (already a built-in or already custom). Returns a
-   * status the Settings UI turns into a Notice. Never enters any spawn argv.
-   */
-  async addCustomHarness(
-    raw: string,
-  ): Promise<"added" | "invalid" | "duplicate"> {
-    const token = (raw ?? "").trim();
-    if (!isValidHarnessToken(token)) return "invalid";
-    if (
-      (BUILTIN_HARNESSES as readonly string[]).includes(token) ||
-      this.settings.customHarnesses.includes(token)
-    ) {
-      return "duplicate";
-    }
-    this.settings.customHarnesses.push(token);
-    await this.saveSettings();
-    return "added";
-  }
-
-  /** Remove a previously-added custom harness token. */
-  async removeCustomHarness(token: string): Promise<void> {
-    this.settings.customHarnesses = this.settings.customHarnesses.filter(
-      (t) => t !== token,
-    );
     await this.saveSettings();
   }
 
@@ -751,7 +732,7 @@ export default class SkillLayerPlugin extends Plugin {
       contextPath,
     );
     // Per-skill harness, resolved fail-closed against the effective allowed set
-    // (built-ins ∪ discovered ∪ custom): the stored choice reaches --harness ONLY
+    // (built-ins ∪ discovered): the stored choice reaches --harness ONLY
     // if it passes isValidHarnessToken AND is a member of that set. The sentinel
     // "omnigent"/absent/any unrecognized value preserves today's behavior (the
     // global, usually blank → omit --harness). No free-form text ever flows here.

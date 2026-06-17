@@ -264,8 +264,8 @@ export class SkillBrowserView extends ItemView {
     // Per-skill harness selector. Each option is labeled by its invocation so
     // the effect is explicit: the default sentinel "omnigent" omits --harness,
     // while a token T launches `run --harness T`. Options are rendered from the
-    // EFFECTIVE list (built-ins ∪ discovered ∪ custom) so newly discovered or
-    // custom harnesses appear here. Selecting a value persists
+    // EFFECTIVE list (built-ins ∪ discovered) so newly discovered harnesses
+    // appear here. Selecting a value persists
     // settings.skillHarness[skill.id] (the default deletes the key to keep
     // data.json clean) through the same saveSettings path.
     const harnessSel = actions.createEl("select", {

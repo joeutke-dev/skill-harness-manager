@@ -99,12 +99,6 @@ export interface SkillLayerSettings {
    */
   skillHarness: Record<string, string>;
   /**
-   * User-added harness tokens (beyond the built-ins), entered in Settings. Each
-   * passes `isValidHarnessToken` before it is stored. Plugin-local state only —
-   * never written into any SKILL.md.
-   */
-  customHarnesses: string[];
-  /**
    * Harness tokens cached from the last successful `omnigent run --help` parse
    * (see `discoverHarnesses`). Refreshed on demand from Settings; never seeded
    * from user input. Plugin-local state only — never written into any SKILL.md.
@@ -140,7 +134,6 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   rightClickSkillIds: [],
   skillIcons: {},
   skillHarness: {},
-  customHarnesses: [],
   discoveredHarnesses: [],
   invocationTemplate: "/{name}",
   omnigentBinaryPath: "",

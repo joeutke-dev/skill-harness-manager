@@ -280,24 +280,24 @@ export class SkillLayerSettingTab extends PluginSettingTab {
   }
 
   /**
-   * The "Harnesses" settings section: refresh-from-omnigent (discovery), an
-   * add-custom-token control, and a read-only view of the current effective
-   * list. The per-skill selector in the browser view renders from the same
-   * effective list, so anything surfaced here appears there too.
+   * The "Harnesses" settings section: refresh-from-omnigent (discovery) and a
+   * read-only view of the current effective list. The list is populated ONLY
+   * from omnigent — the shipped built-ins plus whatever discovery surfaces;
+   * there is no user-defined entry. The per-skill selector in the browser view
+   * renders from the same effective list, so anything surfaced here appears
+   * there too.
    */
   private renderHarnessesSection(containerEl: HTMLElement): void {
-    const settings = this.plugin.settings;
-
     new Setting(containerEl).setName("Harnesses").setHeading();
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text:
-        "Per-skill harness tokens for the launch dropdown. The list is the " +
-        "built-ins, plus any tokens discovered from omnigent and any custom " +
-        "tokens you add. The “omnigent (default)” choice omits --harness; every " +
-        "other choice launches as run --harness <token>. A token reaches the " +
-        "command line only after passing a strict charset check; this is " +
-        "plugin-local and never written into any SKILL.md.",
+        "Per-skill harness tokens for the launch dropdown. The list comes only " +
+        "from omnigent: the shipped built-ins plus any tokens discovered from " +
+        "omnigent. The “omnigent (default)” choice omits --harness; every other " +
+        "choice launches as run --harness <token>. A token reaches the command " +
+        "line only after passing a strict charset check; this is plugin-local " +
+        "and never written into any SKILL.md.",
     });
 
     new Setting(containerEl)
@@ -323,55 +323,10 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           }),
       );
 
-    // Add a custom harness token.
-    let pendingToken = "";
-    new Setting(containerEl)
-      .setName("Add custom harness")
-      .setDesc("A harness token (letters, digits, . _ -; no leading dash).")
-      .addText((text) =>
-        text.setPlaceholder("my-harness").onChange((value) => {
-          pendingToken = value;
-        }),
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Add").onClick(async () => {
-          const result = await this.plugin.addCustomHarness(pendingToken);
-          if (result === "invalid") {
-            new Notice(
-              "Skill Layer: invalid harness token (use letters, digits, . _ - and no leading dash).",
-            );
-            return;
-          }
-          if (result === "duplicate") {
-            new Notice("Skill Layer: that harness is already in the list.");
-            return;
-          }
-          this.display();
-        }),
-      );
-
-    // Custom tokens each get a Remove control.
-    if (settings.customHarnesses.length > 0) {
-      for (const token of [...settings.customHarnesses]) {
-        new Setting(containerEl)
-          .setName(token)
-          .setDesc("Custom harness")
-          .addExtraButton((b) =>
-            b
-              .setIcon("trash")
-              .setTooltip("Remove custom harness")
-              .onClick(async () => {
-                await this.plugin.removeCustomHarness(token);
-                this.display();
-              }),
-          );
-      }
-    }
-
     // Read-only view of the current effective list (default sentinel + tokens),
-    // labeled by origin so the user sees exactly what's available.
+    // labeled by origin so the user sees exactly what's available. Every token
+    // is either a built-in or discovered from omnigent.
     const builtinSet = new Set<string>(BUILTIN_HARNESSES);
-    const discoveredSet = new Set(settings.discoveredHarnesses);
     const tokens = this.plugin.effectiveHarnessTokens();
     containerEl.createEl("p", {
       cls: "setting-item-description",
@@ -384,16 +339,9 @@ export class SkillLayerSettingTab extends PluginSettingTab {
       text: "omnigent (default)",
     });
     for (const token of tokens) {
-      const origin = builtinSet.has(token)
-        ? "is-builtin"
-        : discoveredSet.has(token)
-          ? "is-discovered"
-          : "is-frontmatter";
-      const originLabel = builtinSet.has(token)
-        ? "built-in"
-        : discoveredSet.has(token)
-          ? "discovered"
-          : "custom";
+      const isBuiltin = builtinSet.has(token);
+      const origin = isBuiltin ? "is-builtin" : "is-discovered";
+      const originLabel = isBuiltin ? "built-in" : "discovered";
       const chip = chips.createSpan({
         cls: `skill-layer-chip skill-layer-harness-chip ${origin}`,
         attr: { title: `${token} (${originLabel})` },
