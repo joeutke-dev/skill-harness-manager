@@ -37,7 +37,11 @@ const {
   isAllowedOmnigentPath,
   resolveOmnigentBinary,
   resolveHarnessArg,
-  CLAUDE_HARNESS_TOKEN,
+  isValidHarnessToken,
+  parseHarnessChoicesFromHelp,
+  effectiveHarnessTokens,
+  effectiveHarnessOptions,
+  OMNIGENT_HARNESS_SENTINEL,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
 
@@ -249,49 +253,68 @@ console.log("\n[M1] Binary allowlist + fail-closed resolution + PATH augment");
 }
 
 // =====================================================================
-// (e) M4 per-skill harness: resolveHarnessArg fail-closed mapping.
+// (e) M6 per-skill harness: resolveHarnessArg fail-closed against an
+//     allowed token set.
 // =====================================================================
-console.log("\n[e] Per-skill harness resolution (fail-closed)");
+console.log("\n[e] Per-skill harness resolution (fail-closed against allowed set)");
 {
-  eq("CLAUDE_HARNESS_TOKEN is `claude`", CLAUDE_HARNESS_TOKEN, "claude");
-  // "claude" → the hardcoded Claude token, regardless of the global value.
-  eq('choice "claude" → CLAUDE token', resolveHarnessArg("claude", ""), CLAUDE_HARNESS_TOKEN);
-  eq('choice "claude" → CLAUDE token even when global set', resolveHarnessArg("claude", "codex"), CLAUDE_HARNESS_TOKEN);
-  // "omnigent" / absent / unrecognized → the global value (today's behavior).
-  eq('choice "omnigent" → global value (blank)', resolveHarnessArg("omnigent", ""), "");
-  eq('choice "omnigent" → global value (set)', resolveHarnessArg("omnigent", "codex"), "codex");
-  eq("absent (undefined) → global value (blank)", resolveHarnessArg(undefined, ""), "");
-  eq("absent (undefined) → global value (set)", resolveHarnessArg(undefined, "codex"), "codex");
-  eq("unrecognized value → global value (fail-closed)", resolveHarnessArg("evil --rm", "codex"), "codex");
-  eq("unrecognized value with blank global → blank (omit --harness)", resolveHarnessArg("claude-sdk", ""), "");
-  // The raw stored string is NEVER passed through as free-form --harness text.
+  eq("OMNIGENT_HARNESS_SENTINEL is `omnigent`", OMNIGENT_HARNESS_SENTINEL, "omnigent");
+  const allowed = ["claude", "claude-sdk", "codex", "pi"];
+
+  // token-in-set → token (regardless of the global value).
+  eq("in-set token → token (blank global)", resolveHarnessArg("codex", "", allowed), "codex");
+  eq("in-set token → token (global set)", resolveHarnessArg("codex", "openai-agents", allowed), "codex");
+  eq("in-set token → token (multi-segment)", resolveHarnessArg("claude-sdk", "", allowed), "claude-sdk");
+
+  // sentinel / absent / empty → the global value (today's behavior).
+  eq('sentinel "omnigent" → global value (blank)', resolveHarnessArg("omnigent", "", allowed), "");
+  eq('sentinel "omnigent" → global value (set)', resolveHarnessArg("omnigent", "codex", allowed), "codex");
+  eq("absent (undefined) → global value (blank)", resolveHarnessArg(undefined, "", allowed), "");
+  eq("absent (undefined) → global value (set)", resolveHarnessArg(undefined, "codex", allowed), "codex");
+  eq("empty string → global value (set)", resolveHarnessArg("", "codex", allowed), "codex");
+
+  // valid-charset token NOT in the allowed set → global (FAIL-CLOSED).
+  eq("valid token not in set → global (fail-closed)", resolveHarnessArg("openai-agents", "codex", allowed), "codex");
+  eq("valid token not in set, blank global → blank", resolveHarnessArg("open-responses", "", allowed), "");
+
+  // invalid charset → global, even if (perversely) present in the allowed set.
+  eq("invalid charset → global (fail-closed)", resolveHarnessArg("evil; rm", "codex", allowed), "codex");
+  eq("invalid charset → blank global", resolveHarnessArg("a b", "", allowed), "");
+  check(
+    "invalid charset never returned even if in allowed set",
+    resolveHarnessArg("$(x)", "", ["$(x)"]) === "" &&
+      resolveHarnessArg("-x", "fallback", ["-x"]) === "fallback",
+  );
+  // Free-form attack strings never echo as the harness arg.
   check(
     "raw stored string is never echoed as the harness arg",
-    resolveHarnessArg("pwned", "") === "" && resolveHarnessArg("--server http://evil", "") === "",
+    resolveHarnessArg("--server http://evil", "", allowed) === "" &&
+      resolveHarnessArg("pwned", "", allowed) === "",
   );
 }
 
 // =====================================================================
-// (f) M4 argv shape: choice="claude" → `--harness claude` as its own two
-//     elements; the prompt stays a single inert `-p` element; argv shape is
-//     otherwise unchanged from the no-harness case.
+// (f) M6 argv shape: a discovered/custom token → `--harness <token>` as its
+//     own two elements; the prompt stays a single inert `-p` element; the
+//     default sentinel → no --harness, argv unchanged.
 // =====================================================================
-console.log("\n[f] choice=claude → --harness as own two argv elements; prompt stays one -p element");
+console.log("\n[f] discovered token → --harness as own two argv elements; prompt stays one -p element");
 {
   const prompt = buildLaunchPrompt("transcribe-meeting", VAULT, true);
-  // Mirror the main.ts call site: resolve first, then build argv.
-  const harness = resolveHarnessArg("claude", "");
+  // Mirror the main.ts call site: resolve against the effective set, then build.
+  const allowed = ["claude", "codex", "pi"];
+  const harness = resolveHarnessArg("codex", "", allowed);
   const argv = buildOmnigentArgv({ binaryPath: BIN, prompt, harness });
 
   check(
-    "argv shape: [bin, run, --harness, claude, -p, prompt]",
-    deepEq(argv, [BIN, "run", "--harness", CLAUDE_HARNESS_TOKEN, "-p", prompt]),
+    "argv shape: [bin, run, --harness, codex, -p, prompt]",
+    deepEq(argv, [BIN, "run", "--harness", "codex", "-p", prompt]),
   );
   eq("argv length == 6", argv.length, 6);
   // `--harness` and its token are TWO distinct, adjacent elements.
   const hi = argv.indexOf("--harness");
   check("`--harness` is its own element", hi !== -1);
-  eq("the token follows `--harness` as the next element", argv[hi + 1], CLAUDE_HARNESS_TOKEN);
+  eq("the token follows `--harness` as the next element", argv[hi + 1], "codex");
   // The prompt is a single inert element introduced by exactly one `-p`.
   const flagLike = argv.filter((x) => /^-/.test(x));
   check("only flag-like elements are `--harness` and `-p`", deepEq(flagLike, ["--harness", "-p"]));
@@ -299,16 +322,122 @@ console.log("\n[f] choice=claude → --harness as own two argv elements; prompt 
   eq("prompt is the final single element", argv[argv.length - 1], prompt);
   check("the prompt is not split (no metachar leak into other elements)", !argv.slice(0, -1).some((x) => x === prompt && x !== argv[argv.length - 1]));
 
-  // Fail-closed default ("omnigent", blank global) → no --harness, argv unchanged.
+  // Fail-closed default (sentinel, blank global) → no --harness, argv unchanged.
   const argvDefault = buildOmnigentArgv({
     binaryPath: BIN,
     prompt,
-    harness: resolveHarnessArg("omnigent", ""),
+    harness: resolveHarnessArg("omnigent", "", allowed),
   });
   check("default choice → no --harness token", argvDefault.indexOf("--harness") === -1);
   check(
     "default choice argv shape unchanged: [bin, run, -p, prompt]",
     deepEq(argvDefault, [BIN, "run", "-p", prompt]),
+  );
+}
+
+// =====================================================================
+// (h) M6 isValidHarnessToken charset gate.
+// =====================================================================
+console.log("\n[h] isValidHarnessToken strict charset");
+{
+  check("accept claude", isValidHarnessToken("claude"));
+  check("accept claude-sdk", isValidHarnessToken("claude-sdk"));
+  check("accept openai-agents", isValidHarnessToken("openai-agents"));
+  check("accept open-responses", isValidHarnessToken("open-responses"));
+  check("accept dotted/underscored token", isValidHarnessToken("a.b_c-1"));
+  check('reject "" (empty)', !isValidHarnessToken(""));
+  check('reject " x" (leading space)', !isValidHarnessToken(" x"));
+  check('reject "-x" (leading dash)', !isValidHarnessToken("-x"));
+  check('reject "a b" (space)', !isValidHarnessToken("a b"));
+  check('reject "a;b" (metachar)', !isValidHarnessToken("a;b"));
+  check('reject "$(x)" (command subst)', !isValidHarnessToken("$(x)"));
+  check("reject \"a'b\" (quote)", !isValidHarnessToken("a'b"));
+}
+
+// =====================================================================
+// (i) M6 parseHarnessChoicesFromHelp on the real `omnigent run --help` line.
+// =====================================================================
+console.log("\n[i] parseHarnessChoicesFromHelp on the real help excerpt");
+{
+  const SIX = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
+  // The exact grounding line.
+  const oneLine =
+    "Harness to use: 'claude' (alias for 'claude-sdk'), 'claude-sdk', 'codex', 'openai-agents', 'open-responses', or 'pi'.";
+  // ...as it actually appears after `--harness` in --help, wrapped across lines
+  // and surrounded by other options.
+  const HELP = [
+    "Usage: omnigent run [OPTIONS]",
+    "",
+    "Options:",
+    "  --server <URL>     Server to use.",
+    "  --harness <NAME>   " + "Harness to use: 'claude' (alias for 'claude-sdk'),",
+    "                     'claude-sdk', 'codex', 'openai-agents',",
+    "                     'open-responses', or 'pi'.",
+    "  -p, --prompt <P>   The prompt to run.",
+  ].join("\n");
+
+  check(
+    "single-line excerpt → exactly the 6 tokens (alias deduped, not double-counted)",
+    deepEq(parseHarnessChoicesFromHelp("--harness <NAME>  " + oneLine), SIX),
+  );
+  check(
+    "wrapped multi-line --help region → exactly the same 6 tokens",
+    deepEq(parseHarnessChoicesFromHelp(HELP), SIX),
+  );
+  // The REAL `omnigent run --help` (Click) hyphen-wraps `'open-responses'`
+  // across two lines; the parser must rejoin it, not drop the token.
+  const REAL = [
+    "  --tools TEXT          Client-side tool set name.",
+    "  --harness TEXT        Harness to use: 'claude' (alias for 'claude-sdk'),",
+    "                        'claude-sdk', 'codex', 'openai-agents', 'open-",
+    "                        responses', or 'pi'. Without AGENT, launches that",
+    "                        harness directly.",
+    "  --model TEXT          Model to use for the agent.",
+  ].join("\n");
+  check(
+    "real hyphen-wrapped --help → exactly the 6 tokens (open-responses rejoined)",
+    deepEq(parseHarnessChoicesFromHelp(REAL), SIX),
+  );
+  check("the `--server` line's text does not leak into harness tokens", !parseHarnessChoicesFromHelp(HELP).includes("URL"));
+  eq("no `--harness` present → empty", parseHarnessChoicesFromHelp("Usage: omnigent run\n  --server <URL>").length, 0);
+  eq("empty input → empty", parseHarnessChoicesFromHelp("").length, 0);
+}
+
+// =====================================================================
+// (j) M6 effective harness list: dedupe + order (builtins, discovered,
+//     custom) and the sentinel-led option list.
+// =====================================================================
+console.log("\n[j] effectiveHarnessTokens / effectiveHarnessOptions dedupe + order");
+{
+  const builtins = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
+  const discovered = ["claude", "codex", "newharness"]; // overlaps + one new
+  const custom = ["codex", "myharness"]; // overlaps builtins/discovered + one new
+  const tokens = effectiveHarnessTokens(builtins, discovered, custom);
+
+  check(
+    "tokens = builtins, then new discovered, then new custom (deduped, in order)",
+    deepEq(tokens, [
+      "claude",
+      "claude-sdk",
+      "codex",
+      "openai-agents",
+      "open-responses",
+      "pi",
+      "newharness",
+      "myharness",
+    ]),
+  );
+  check("no duplicate tokens", new Set(tokens).size === tokens.length);
+  check("the `omnigent` sentinel is NOT a token", !tokens.includes("omnigent"));
+
+  const opts = effectiveHarnessOptions(builtins, discovered, custom);
+  eq("options are sentinel-led", opts[0], OMNIGENT_HARNESS_SENTINEL);
+  check("options = sentinel + tokens", deepEq(opts, [OMNIGENT_HARNESS_SENTINEL, ...tokens]));
+
+  // Empty discovered/custom → just the builtins (dropdown never empty).
+  check(
+    "empty discovered+custom → builtins only",
+    deepEq(effectiveHarnessTokens(builtins, [], []), builtins),
   );
 }
 

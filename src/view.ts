@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { OMNIGENT_HARNESS_SENTINEL } from "./launch";
 import type SkillLayerPlugin from "./main";
-import { HarnessChoice, Skill } from "./types";
+import { Skill } from "./types";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
 
@@ -260,28 +261,30 @@ export class SkillBrowserView extends ItemView {
       this.renderList();
     });
 
-    // Per-skill harness selector. Default "omnigent" preserves the global
-    // behavior; "claude" launches via omnigent's Claude harness. Selecting a
-    // value persists settings.skillHarness[skill.id] (the default deletes the
-    // key to keep data.json clean) through the same saveSettings path.
+    // Per-skill harness selector. Each option is labeled by its invocation so
+    // the effect is explicit: the default sentinel "omnigent" omits --harness,
+    // while a token T launches `run --harness T`. Options are rendered from the
+    // EFFECTIVE list (built-ins ∪ discovered ∪ custom) so newly discovered or
+    // custom harnesses appear here. Selecting a value persists
+    // settings.skillHarness[skill.id] (the default deletes the key to keep
+    // data.json clean) through the same saveSettings path.
     const harnessSel = actions.createEl("select", {
       cls: "skill-layer-action skill-layer-harness-select",
       attr: { "aria-label": `Harness for ${skill.name}` },
     }) as HTMLSelectElement;
     harnessSel.createEl("option", {
-      text: "Harness: omnigent (default)",
-      value: "omnigent",
+      text: "omnigent (default — no --harness)",
+      value: OMNIGENT_HARNESS_SENTINEL,
     });
-    harnessSel.createEl("option", {
-      text: "Harness: claude",
-      value: "claude",
-    });
+    for (const token of this.plugin.effectiveHarnessTokens()) {
+      harnessSel.createEl("option", {
+        text: `${token} — run --harness ${token}`,
+        value: token,
+      });
+    }
     harnessSel.value = this.plugin.harnessFor(skill.id);
     harnessSel.addEventListener("change", async () => {
-      await this.plugin.setSkillHarness(
-        skill.id,
-        harnessSel.value as HarnessChoice,
-      );
+      await this.plugin.setSkillHarness(skill.id, harnessSel.value);
     });
 
     if (this.plugin.isPinned(skill.id)) {

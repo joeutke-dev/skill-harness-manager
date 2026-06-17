@@ -21,6 +21,10 @@ import {
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
+  effectiveHarnessTokens,
+  isValidHarnessToken,
+  OMNIGENT_HARNESS_SENTINEL,
+  parseHarnessChoicesFromHelp,
   resolveHarnessArg,
   resolveOmnigentBinary,
 } from "./launch";
@@ -33,8 +37,8 @@ import {
 import { SkillLayerSettingTab } from "./settingsTab";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import {
+  BUILTIN_HARNESSES,
   DEFAULT_SETTINGS,
-  HarnessChoice,
   Skill,
   SkillLayerSettings,
 } from "./types";
@@ -253,25 +257,177 @@ export default class SkillLayerPlugin extends Plugin {
 
   // --- Per-skill harness selector ----------------------------------------
   /**
-   * The stored harness choice for a skill, defaulting to "omnigent". Returned
-   * as a constrained `HarnessChoice` so the UI never sees a free-form value.
+   * The deduped effective harness TOKEN list (no "omnigent" sentinel): built-ins
+   * ∪ discovered ∪ custom. This is BOTH the allowed set a per-skill / custom
+   * token is validated against at launch and the source of the dropdown options.
    */
-  harnessFor(id: string): HarnessChoice {
-    return this.settings.skillHarness[id] === "claude" ? "claude" : "omnigent";
+  effectiveHarnessTokens(): string[] {
+    return effectiveHarnessTokens(
+      BUILTIN_HARNESSES,
+      this.settings.discoveredHarnesses,
+      this.settings.customHarnesses,
+    );
   }
 
   /**
-   * Persist a skill's harness choice. The default ("omnigent") deletes the key
-   * so data.json stays clean; anything else stores the constrained value. Uses
-   * the same saveSettings path as the icon/right-click controls.
+   * The stored harness choice (token) for a skill, defaulting to the "omnigent"
+   * sentinel. If the stored token is no longer in the effective set, fall back
+   * to the sentinel so the UI never shows an orphaned selection (launch already
+   * fails closed independently via `resolveHarnessArg`).
    */
-  async setSkillHarness(id: string, choice: HarnessChoice): Promise<void> {
-    if (choice === "omnigent") {
-      delete this.settings.skillHarness[id];
-    } else {
+  harnessFor(id: string): string {
+    const stored = this.settings.skillHarness[id];
+    if (!stored || stored === OMNIGENT_HARNESS_SENTINEL) {
+      return OMNIGENT_HARNESS_SENTINEL;
+    }
+    return this.effectiveHarnessTokens().includes(stored)
+      ? stored
+      : OMNIGENT_HARNESS_SENTINEL;
+  }
+
+  /**
+   * Persist a skill's harness choice (token). The default sentinel "omnigent"
+   * (or any value not in the effective set) deletes the key so data.json stays
+   * clean; a valid in-set token is stored. Uses the same saveSettings path as
+   * the icon/right-click controls.
+   */
+  async setSkillHarness(id: string, choice: string): Promise<void> {
+    const valid =
+      choice !== OMNIGENT_HARNESS_SENTINEL &&
+      isValidHarnessToken(choice) &&
+      this.effectiveHarnessTokens().includes(choice);
+    if (valid) {
       this.settings.skillHarness[id] = choice;
+    } else {
+      delete this.settings.skillHarness[id];
     }
     await this.saveSettings();
+  }
+
+  /**
+   * Add a user-supplied custom harness token. Validates the strict charset and
+   * skips no-op additions (already a built-in or already custom). Returns a
+   * status the Settings UI turns into a Notice. Never enters any spawn argv.
+   */
+  async addCustomHarness(
+    raw: string,
+  ): Promise<"added" | "invalid" | "duplicate"> {
+    const token = (raw ?? "").trim();
+    if (!isValidHarnessToken(token)) return "invalid";
+    if (
+      (BUILTIN_HARNESSES as readonly string[]).includes(token) ||
+      this.settings.customHarnesses.includes(token)
+    ) {
+      return "duplicate";
+    }
+    this.settings.customHarnesses.push(token);
+    await this.saveSettings();
+    return "added";
+  }
+
+  /** Remove a previously-added custom harness token. */
+  async removeCustomHarness(token: string): Promise<void> {
+    this.settings.customHarnesses = this.settings.customHarnesses.filter(
+      (t) => t !== token,
+    );
+    await this.saveSettings();
+  }
+
+  /**
+   * Discover harness tokens by spawning the allowlisted omnigent binary with the
+   * FIXED args `["run", "--help"]` (shell:false, NO user input in argv ever),
+   * capturing stdout, and parsing it with `parseHarnessChoicesFromHelp`. Valid
+   * tokens are cached (deduped) into `settings.discoveredHarnesses`. Fails closed:
+   * on missing binary / timeout / empty parse it leaves the existing discovered
+   * list untouched and surfaces a Notice (built-ins still cover the dropdown).
+   * Returns the count of discovered tokens (0 on any failure). 10s timeout.
+   */
+  async discoverHarnesses(): Promise<number> {
+    if (!this.detector.canScanExternal()) {
+      new Notice("Skill Layer: harness discovery requires the desktop app.");
+      return 0;
+    }
+    const resolution = resolveOmnigentBinary({
+      override: this.settings.omnigentBinaryPath,
+      homedir: os.homedir(),
+      exists: (p) => fs.existsSync(p),
+    });
+    if (resolution.status !== "ok") {
+      new Notice(
+        resolution.status === "invalid-override"
+          ? 'Skill Layer: invalid omnigent binary path (must be an absolute path to a binary named "omnigent"). Discovery aborted.'
+          : "Skill Layer: omnigent binary not found; cannot discover harnesses. Built-ins still available.",
+      );
+      return 0;
+    }
+    const binaryPath = resolution.path;
+
+    const env = {
+      ...process.env,
+      PATH: augmentPath(process.env.PATH, [
+        "/usr/local/bin",
+        `${os.homedir()}/.local/bin`,
+        "/opt/homebrew/bin",
+      ]),
+    };
+
+    const stdout = await new Promise<string | null>((resolve) => {
+      let child;
+      try {
+        // FIXED argv — no user input is ever interpolated here. shell:false.
+        child = spawn(binaryPath, ["run", "--help"], {
+          env,
+          shell: false,
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+      } catch (err) {
+        console.error("[skill-layer] harness discovery spawn threw:", err);
+        resolve(null);
+        return;
+      }
+      let out = "";
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = window.setTimeout(() => {
+        child.kill();
+        finish(null);
+      }, 10000);
+      // Bound captured output so a misbehaving binary can't balloon memory.
+      child.stdout?.on("data", (chunk: Buffer) => {
+        out = (out + chunk.toString()).slice(0, 65536);
+      });
+      child.on("error", (err) => {
+        console.error("[skill-layer] harness discovery error:", err);
+        finish(null);
+      });
+      child.on("exit", () => finish(out));
+    });
+
+    if (stdout === null) {
+      new Notice(
+        "Skill Layer: harness discovery failed (binary error or timeout). Built-ins still available.",
+      );
+      return 0;
+    }
+
+    const tokens = parseHarnessChoicesFromHelp(stdout).filter((t) =>
+      isValidHarnessToken(t),
+    );
+    if (tokens.length === 0) {
+      new Notice(
+        "Skill Layer: no harnesses parsed from omnigent --help. Built-ins still available.",
+      );
+      return 0;
+    }
+    // Dedupe (preserve order) before caching.
+    this.settings.discoveredHarnesses = Array.from(new Set(tokens));
+    await this.saveSettings();
+    return this.settings.discoveredHarnesses.length;
   }
 
   /**
@@ -594,12 +750,15 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.appendVaultAnchor,
       contextPath,
     );
-    // Per-skill harness, resolved fail-closed: only the literal "claude" maps to
-    // the hardcoded Claude token; "omnigent"/absent/any unrecognized value
-    // preserves today's behavior (the global, usually blank → omit --harness).
+    // Per-skill harness, resolved fail-closed against the effective allowed set
+    // (built-ins ∪ discovered ∪ custom): the stored choice reaches --harness ONLY
+    // if it passes isValidHarnessToken AND is a member of that set. The sentinel
+    // "omnigent"/absent/any unrecognized value preserves today's behavior (the
+    // global, usually blank → omit --harness). No free-form text ever flows here.
     const harness = resolveHarnessArg(
       this.settings.skillHarness[skill.id],
       this.settings.omnigentHarness,
+      this.effectiveHarnessTokens(),
     );
     const argv = buildOmnigentArgv({
       binaryPath,

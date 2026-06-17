@@ -71,26 +71,125 @@ export function buildOmnigentArgv(opts: {
 }
 
 /**
- * The exact `--harness` token omnigent expects for the Claude harness. Confirmed
- * via `omnigent run --help`: `--harness` accepts `'claude'` (documented as an
- * alias for `'claude-sdk'`), with the example `omnigent run --harness claude`.
+ * The default per-skill choice: a SENTINEL meaning "omit `--harness` entirely"
+ * (use omnigent's own default / the global override). It is NOT a harness token
+ * and is never passed as an argv value — it only selects the global behavior.
  */
-export const CLAUDE_HARNESS_TOKEN = "claude";
+export const OMNIGENT_HARNESS_SENTINEL = "omnigent";
+
+/**
+ * Strict validity test for a harness token that may reach the `--harness` argv
+ * element. Must be non-empty, start with an alphanumeric (NO leading dash so it
+ * can never be read as a flag), and otherwise contain only `A-Za-z0-9._-`. This
+ * rejects spaces, quotes, shell metacharacters, command substitution, and flag
+ * injection. Pure / unit-testable.
+ */
+export function isValidHarnessToken(s: string): boolean {
+  return typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s);
+}
+
+/**
+ * Parse the harness tokens advertised in `omnigent run --help`. The relevant
+ * line reads, e.g.:
+ *   `Harness to use: 'claude' (alias for 'claude-sdk'), 'claude-sdk', 'codex',
+ *    'openai-agents', 'open-responses', or 'pi'.`
+ * Strategy: for each `--harness` occurrence, slice from it up to the next
+ * option line (a newline followed by optional indent then `-`) or end of text,
+ * extract every single-quoted token, keep only valid tokens, and dedupe in
+ * first-seen order. The `(alias for 'claude-sdk')` parenthetical contributes a
+ * duplicate that the dedupe collapses, so the excerpt above yields exactly
+ * `[claude, claude-sdk, codex, openai-agents, open-responses, pi]`. The first
+ * occurrence that yields tokens wins (a bare usage-synopsis mention with no
+ * quoted tokens is skipped). Tolerant of wrapping/whitespace — including a
+ * token hyphen-wrapped across lines (`'open-\n   responses'`), which the real
+ * `--help` does and which is rejoined before extraction. Pure.
+ */
+export function parseHarnessChoicesFromHelp(helpText: string): string[] {
+  if (typeof helpText !== "string" || helpText.length === 0) return [];
+  const flagRe = /--harness/g;
+  let m: RegExpExecArray | null;
+  while ((m = flagRe.exec(helpText)) !== null) {
+    const start = m.index;
+    // End the region at the next option line (`\n` + optional indent + `-`),
+    // searched strictly after this `--harness` keyword so we don't stop on it.
+    const afterKeyword = start + "--harness".length;
+    const nextFlag = helpText.slice(afterKeyword).search(/\n[ \t]*-/);
+    const end = nextFlag === -1 ? helpText.length : afterKeyword + nextFlag;
+    // Rejoin CLI hyphen-wraps (`open-\n<indent>responses` → `open-responses`)
+    // so a token broken across lines is recovered intact before extraction.
+    const region = helpText.slice(start, end).replace(/-[ \t]*\r?\n[ \t]*/g, "-");
+    const seen = new Set<string>();
+    const tokens: string[] = [];
+    const quoteRe = /'([^']+)'/g;
+    let q: RegExpExecArray | null;
+    while ((q = quoteRe.exec(region)) !== null) {
+      const tok = q[1];
+      if (!isValidHarnessToken(tok) || seen.has(tok)) continue;
+      seen.add(tok);
+      tokens.push(tok);
+    }
+    if (tokens.length > 0) return tokens;
+  }
+  return [];
+}
+
+/**
+ * The deduped effective harness TOKEN list (no sentinel): built-ins first, then
+ * discovered, then custom, each not already present. This is the allowed set a
+ * per-skill choice is checked against and the source for the dropdown options
+ * (the view prepends the "omnigent" default sentinel). Pure / unit-testable.
+ */
+export function effectiveHarnessTokens(
+  builtins: readonly string[],
+  discovered: readonly string[],
+  custom: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of [builtins, discovered, custom]) {
+    for (const t of list) {
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * The full effective option list for the per-skill selector: the "omnigent"
+ * default sentinel first, then `effectiveHarnessTokens`. Pure / unit-testable.
+ */
+export function effectiveHarnessOptions(
+  builtins: readonly string[],
+  discovered: readonly string[],
+  custom: readonly string[],
+): string[] {
+  return [
+    OMNIGENT_HARNESS_SENTINEL,
+    ...effectiveHarnessTokens(builtins, discovered, custom),
+  ];
+}
 
 /**
  * Resolve a per-skill harness choice to the `--harness` string handed to
- * `buildOmnigentArgv`, FAILING CLOSED to today's behavior. Only the literal
- * `"claude"` is mapped to the hardcoded Claude token; the raw stored string is
- * NEVER passed through as free-form `--harness` text. Every other value —
- * `"omnigent"`, absent/undefined, or any unrecognized string — preserves the
- * existing global behavior by returning `globalHarness` (usually blank, so
- * `buildOmnigentArgv` omits `--harness`). Pure / unit-testable.
+ * `buildOmnigentArgv`, FAILING CLOSED to today's behavior. The default sentinel
+ * `"omnigent"`, absent/undefined, or empty → return `globalHarness` (usually
+ * blank, so `buildOmnigentArgv` omits `--harness`). Otherwise the choice is
+ * returned ONLY if it both passes `isValidHarnessToken` AND is a member of
+ * `allowedTokens`; any other value (invalid charset, or a valid-looking token
+ * not in the allowed set) fails closed to `globalHarness`. Free-form text never
+ * reaches `--harness`. Pure / unit-testable.
  */
 export function resolveHarnessArg(
   choice: string | undefined,
   globalHarness: string,
+  allowedTokens: readonly string[],
 ): string {
-  if (choice === "claude") return CLAUDE_HARNESS_TOKEN;
+  if (!choice || choice === OMNIGENT_HARNESS_SENTINEL) return globalHarness;
+  if (isValidHarnessToken(choice) && allowedTokens.includes(choice)) {
+    return choice;
+  }
   return globalHarness;
 }
 

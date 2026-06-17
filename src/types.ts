@@ -1,14 +1,22 @@
 // Shared types for the Skill Layer plugin.
 
 /**
- * The harness choices a per-skill selector may offer. `omnigent` is the
- * default (preserve today's global behavior — usually omit `--harness`);
- * `claude` maps to omnigent's Claude harness token. Any other / absent value
- * is treated as the default (fail-closed). Plugin-local state only — NEVER
- * written into any SKILL.md.
+ * The harness tokens omnigent ships built-in, per `omnigent run --help`
+ * (`'claude'` is documented as an alias for `'claude-sdk'`). These always
+ * populate the per-skill selector even before a `--help` discovery has run, so
+ * the dropdown is never empty. The "omnigent" DEFAULT is a SENTINEL (omit
+ * `--harness` entirely) — NOT a token — and lives separately
+ * (`OMNIGENT_HARNESS_SENTINEL` in launch.ts), so it is intentionally absent
+ * here. Plugin-local state only — NEVER written into any SKILL.md.
  */
-export const HARNESS_OPTIONS = ["omnigent", "claude"] as const;
-export type HarnessChoice = (typeof HARNESS_OPTIONS)[number];
+export const BUILTIN_HARNESSES = [
+  "claude",
+  "claude-sdk",
+  "codex",
+  "openai-agents",
+  "open-responses",
+  "pi",
+] as const;
 
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
@@ -82,12 +90,26 @@ export interface SkillLayerSettings {
   skillIcons: Record<string, string>;
   /**
    * Per-skill harness choice, keyed by skill id (the same stable path used in
-   * `skillIcons`/`pinnedSkillIds`). Absent key = default = "omnigent" (which
-   * preserves today's behavior, usually omitting `--harness`). The value is a
-   * constrained `HarnessChoice`; any unrecognized value resolves fail-closed to
-   * the default. Plugin-local state only — never written into any SKILL.md.
+   * `skillIcons`/`pinnedSkillIds`). The value is a harness TOKEN (e.g. "codex");
+   * absent key or the sentinel "omnigent" = default (preserves today's behavior,
+   * usually omitting `--harness`). At launch the stored token is re-validated by
+   * `resolveHarnessArg` against the effective allowed set and the strict charset,
+   * so any unrecognized or stale value resolves fail-closed to the global
+   * default. Plugin-local state only — never written into any SKILL.md.
    */
   skillHarness: Record<string, string>;
+  /**
+   * User-added harness tokens (beyond the built-ins), entered in Settings. Each
+   * passes `isValidHarnessToken` before it is stored. Plugin-local state only —
+   * never written into any SKILL.md.
+   */
+  customHarnesses: string[];
+  /**
+   * Harness tokens cached from the last successful `omnigent run --help` parse
+   * (see `discoverHarnesses`). Refreshed on demand from Settings; never seeded
+   * from user input. Plugin-local state only — never written into any SKILL.md.
+   */
+  discoveredHarnesses: string[];
   /**
    * Template for the skill invocation string (the `-p` prompt for launch, and
    * the "Copy invocation" clipboard text). Placeholders: {name} {path} {label}.
@@ -118,6 +140,8 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   rightClickSkillIds: [],
   skillIcons: {},
   skillHarness: {},
+  customHarnesses: [],
+  discoveredHarnesses: [],
   invocationTemplate: "/{name}",
   omnigentBinaryPath: "",
   omnigentServerUrl: "",

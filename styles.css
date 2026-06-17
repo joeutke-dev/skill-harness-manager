@@ -142,10 +142,37 @@
 }
 
 /* Per-skill harness selector dropdown in the row actions. Fills the fixed
-   column width and never shrinks, so it stays aligned with the buttons. */
+   column width and never shrinks, so it stays aligned with the buttons.
+   Center the closed-value text (text-align-last) and the option list
+   (text-align) so the dropdown reads centered within the fixed column. */
 .skill-layer-harness-select {
   width: 100%;
   flex-shrink: 0;
+  text-align: center;
+  text-align-last: center;
+}
+
+/* --- Settings: Harnesses section ---------------------------------------- */
+
+.skill-layer-harness-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 4px;
+  align-items: center;
+}
+
+.skill-layer-harness-chip {
+  font-family: var(--font-monospace);
+}
+
+/* Origin labels on the read-only effective-list chips. */
+.skill-layer-harness-chip.is-builtin {
+  border-style: solid;
+}
+
+.skill-layer-harness-chip.is-discovered {
+  border-style: dashed;
 }
 
 /* The pinned-icon glyph shown inline on the "Change icon" button. */
