@@ -1,5 +1,15 @@
 // Shared types for the Skill Layer plugin.
 
+/**
+ * The harness choices a per-skill selector may offer. `omnigent` is the
+ * default (preserve today's global behavior — usually omit `--harness`);
+ * `claude` maps to omnigent's Claude harness token. Any other / absent value
+ * is treated as the default (fail-closed). Plugin-local state only — NEVER
+ * written into any SKILL.md.
+ */
+export const HARNESS_OPTIONS = ["omnigent", "claude"] as const;
+export type HarnessChoice = (typeof HARNESS_OPTIONS)[number];
+
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
 
@@ -71,6 +81,14 @@ export interface SkillLayerSettings {
    */
   skillIcons: Record<string, string>;
   /**
+   * Per-skill harness choice, keyed by skill id (the same stable path used in
+   * `skillIcons`/`pinnedSkillIds`). Absent key = default = "omnigent" (which
+   * preserves today's behavior, usually omitting `--harness`). The value is a
+   * constrained `HarnessChoice`; any unrecognized value resolves fail-closed to
+   * the default. Plugin-local state only — never written into any SKILL.md.
+   */
+  skillHarness: Record<string, string>;
+  /**
    * Template for the skill invocation string (the `-p` prompt for launch, and
    * the "Copy invocation" clipboard text). Placeholders: {name} {path} {label}.
    */
@@ -99,6 +117,7 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   pinnedSkillIds: [],
   rightClickSkillIds: [],
   skillIcons: {},
+  skillHarness: {},
   invocationTemplate: "/{name}",
   omnigentBinaryPath: "",
   omnigentServerUrl: "",

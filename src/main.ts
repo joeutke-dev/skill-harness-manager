@@ -21,6 +21,7 @@ import {
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
+  resolveHarnessArg,
   resolveOmnigentBinary,
 } from "./launch";
 import {
@@ -31,7 +32,12 @@ import {
 } from "./parse";
 import { SkillLayerSettingTab } from "./settingsTab";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
-import { DEFAULT_SETTINGS, Skill, SkillLayerSettings } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  HarnessChoice,
+  Skill,
+  SkillLayerSettings,
+} from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
 
 /** Internal (non-public) command registry surface used to unregister commands. */
@@ -217,6 +223,29 @@ export default class SkillLayerPlugin extends Plugin {
         on ? "from" : "to"
       } the right-click menu.`,
     );
+  }
+
+  // --- Per-skill harness selector ----------------------------------------
+  /**
+   * The stored harness choice for a skill, defaulting to "omnigent". Returned
+   * as a constrained `HarnessChoice` so the UI never sees a free-form value.
+   */
+  harnessFor(id: string): HarnessChoice {
+    return this.settings.skillHarness[id] === "claude" ? "claude" : "omnigent";
+  }
+
+  /**
+   * Persist a skill's harness choice. The default ("omnigent") deletes the key
+   * so data.json stays clean; anything else stores the constrained value. Uses
+   * the same saveSettings path as the icon/right-click controls.
+   */
+  async setSkillHarness(id: string, choice: HarnessChoice): Promise<void> {
+    if (choice === "omnigent") {
+      delete this.settings.skillHarness[id];
+    } else {
+      this.settings.skillHarness[id] = choice;
+    }
+    await this.saveSettings();
   }
 
   /**
@@ -539,11 +568,18 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.appendVaultAnchor,
       contextPath,
     );
+    // Per-skill harness, resolved fail-closed: only the literal "claude" maps to
+    // the hardcoded Claude token; "omnigent"/absent/any unrecognized value
+    // preserves today's behavior (the global, usually blank → omit --harness).
+    const harness = resolveHarnessArg(
+      this.settings.skillHarness[skill.id],
+      this.settings.omnigentHarness,
+    );
     const argv = buildOmnigentArgv({
       binaryPath,
       prompt,
       serverUrl: this.settings.omnigentServerUrl,
-      harness: this.settings.omnigentHarness,
+      harness,
     });
 
     // GUI apps inherit a thin launchd PATH; the binary execs sub-tools, so

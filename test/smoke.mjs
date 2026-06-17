@@ -36,6 +36,8 @@ const {
   buildRightClickMenuItems,
   isAllowedOmnigentPath,
   resolveOmnigentBinary,
+  resolveHarnessArg,
+  CLAUDE_HARNESS_TOKEN,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
 
@@ -232,6 +234,70 @@ console.log("\n[M1] Binary allowlist + fail-closed resolution + PATH augment");
 
   const augmented = augmentPath("/usr/bin:/opt/homebrew/bin", ["/usr/local/bin", "/opt/homebrew/bin"]);
   eq("augmentPath appends new + de-dupes existing", augmented, "/usr/bin:/opt/homebrew/bin:/usr/local/bin");
+}
+
+// =====================================================================
+// (e) M4 per-skill harness: resolveHarnessArg fail-closed mapping.
+// =====================================================================
+console.log("\n[e] Per-skill harness resolution (fail-closed)");
+{
+  eq("CLAUDE_HARNESS_TOKEN is `claude`", CLAUDE_HARNESS_TOKEN, "claude");
+  // "claude" → the hardcoded Claude token, regardless of the global value.
+  eq('choice "claude" → CLAUDE token', resolveHarnessArg("claude", ""), CLAUDE_HARNESS_TOKEN);
+  eq('choice "claude" → CLAUDE token even when global set', resolveHarnessArg("claude", "codex"), CLAUDE_HARNESS_TOKEN);
+  // "omnigent" / absent / unrecognized → the global value (today's behavior).
+  eq('choice "omnigent" → global value (blank)', resolveHarnessArg("omnigent", ""), "");
+  eq('choice "omnigent" → global value (set)', resolveHarnessArg("omnigent", "codex"), "codex");
+  eq("absent (undefined) → global value (blank)", resolveHarnessArg(undefined, ""), "");
+  eq("absent (undefined) → global value (set)", resolveHarnessArg(undefined, "codex"), "codex");
+  eq("unrecognized value → global value (fail-closed)", resolveHarnessArg("evil --rm", "codex"), "codex");
+  eq("unrecognized value with blank global → blank (omit --harness)", resolveHarnessArg("claude-sdk", ""), "");
+  // The raw stored string is NEVER passed through as free-form --harness text.
+  check(
+    "raw stored string is never echoed as the harness arg",
+    resolveHarnessArg("pwned", "") === "" && resolveHarnessArg("--server http://evil", "") === "",
+  );
+}
+
+// =====================================================================
+// (f) M4 argv shape: choice="claude" → `--harness claude` as its own two
+//     elements; the prompt stays a single inert `-p` element; argv shape is
+//     otherwise unchanged from the no-harness case.
+// =====================================================================
+console.log("\n[f] choice=claude → --harness as own two argv elements; prompt stays one -p element");
+{
+  const prompt = buildLaunchPrompt("transcribe-meeting", VAULT, true);
+  // Mirror the main.ts call site: resolve first, then build argv.
+  const harness = resolveHarnessArg("claude", "");
+  const argv = buildOmnigentArgv({ binaryPath: BIN, prompt, harness });
+
+  check(
+    "argv shape: [bin, run, --harness, claude, -p, prompt]",
+    deepEq(argv, [BIN, "run", "--harness", CLAUDE_HARNESS_TOKEN, "-p", prompt]),
+  );
+  eq("argv length == 6", argv.length, 6);
+  // `--harness` and its token are TWO distinct, adjacent elements.
+  const hi = argv.indexOf("--harness");
+  check("`--harness` is its own element", hi !== -1);
+  eq("the token follows `--harness` as the next element", argv[hi + 1], CLAUDE_HARNESS_TOKEN);
+  // The prompt is a single inert element introduced by exactly one `-p`.
+  const flagLike = argv.filter((x) => /^-/.test(x));
+  check("only flag-like elements are `--harness` and `-p`", deepEq(flagLike, ["--harness", "-p"]));
+  eq("the lone `-p` immediately precedes the prompt", argv[argv.length - 2], "-p");
+  eq("prompt is the final single element", argv[argv.length - 1], prompt);
+  check("the prompt is not split (no metachar leak into other elements)", !argv.slice(0, -1).some((x) => x === prompt && x !== argv[argv.length - 1]));
+
+  // Fail-closed default ("omnigent", blank global) → no --harness, argv unchanged.
+  const argvDefault = buildOmnigentArgv({
+    binaryPath: BIN,
+    prompt,
+    harness: resolveHarnessArg("omnigent", ""),
+  });
+  check("default choice → no --harness token", argvDefault.indexOf("--harness") === -1);
+  check(
+    "default choice argv shape unchanged: [bin, run, -p, prompt]",
+    deepEq(argvDefault, [BIN, "run", "-p", prompt]),
+  );
 }
 
 // =====================================================================

@@ -132,6 +132,11 @@
   color: var(--text-accent);
 }
 
+/* Per-skill harness selector dropdown in the row actions. */
+.skill-layer-harness-select {
+  max-width: 14em;
+}
+
 /* The pinned-icon glyph shown inline on the "Change icon" button. */
 .skill-layer-action-icon {
   display: inline-flex;

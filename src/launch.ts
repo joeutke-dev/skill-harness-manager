@@ -71,6 +71,30 @@ export function buildOmnigentArgv(opts: {
 }
 
 /**
+ * The exact `--harness` token omnigent expects for the Claude harness. Confirmed
+ * via `omnigent run --help`: `--harness` accepts `'claude'` (documented as an
+ * alias for `'claude-sdk'`), with the example `omnigent run --harness claude`.
+ */
+export const CLAUDE_HARNESS_TOKEN = "claude";
+
+/**
+ * Resolve a per-skill harness choice to the `--harness` string handed to
+ * `buildOmnigentArgv`, FAILING CLOSED to today's behavior. Only the literal
+ * `"claude"` is mapped to the hardcoded Claude token; the raw stored string is
+ * NEVER passed through as free-form `--harness` text. Every other value —
+ * `"omnigent"`, absent/undefined, or any unrecognized string — preserves the
+ * existing global behavior by returning `globalHarness` (usually blank, so
+ * `buildOmnigentArgv` omits `--harness`). Pure / unit-testable.
+ */
+export function resolveHarnessArg(
+  choice: string | undefined,
+  globalHarness: string,
+): string {
+  if (choice === "claude") return CLAUDE_HARNESS_TOKEN;
+  return globalHarness;
+}
+
+/**
  * Ordered candidate absolute paths to probe for the omnigent binary:
  * user override first (if set), then the standard install locations.
  * `homedir` is injected so this stays pure/testable.

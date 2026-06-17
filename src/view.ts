@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type SkillLayerPlugin from "./main";
-import { Skill } from "./types";
+import { HarnessChoice, Skill } from "./types";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
 
@@ -258,6 +258,30 @@ export class SkillBrowserView extends ItemView {
     rcBtn.addEventListener("click", async () => {
       await this.plugin.toggleRightClick(skill);
       this.renderList();
+    });
+
+    // Per-skill harness selector. Default "omnigent" preserves the global
+    // behavior; "claude" launches via omnigent's Claude harness. Selecting a
+    // value persists settings.skillHarness[skill.id] (the default deletes the
+    // key to keep data.json clean) through the same saveSettings path.
+    const harnessSel = actions.createEl("select", {
+      cls: "skill-layer-action skill-layer-harness-select",
+      attr: { "aria-label": `Harness for ${skill.name}` },
+    }) as HTMLSelectElement;
+    harnessSel.createEl("option", {
+      text: "Harness: omnigent (default)",
+      value: "omnigent",
+    });
+    harnessSel.createEl("option", {
+      text: "Harness: claude",
+      value: "claude",
+    });
+    harnessSel.value = this.plugin.harnessFor(skill.id);
+    harnessSel.addEventListener("change", async () => {
+      await this.plugin.setSkillHarness(
+        skill.id,
+        harnessSel.value as HarnessChoice,
+      );
     });
 
     if (this.plugin.isPinned(skill.id)) {
