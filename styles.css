@@ -7,13 +7,9 @@
 .skill-layer-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   padding-top: 8px;
-}
-
-.skill-layer-title {
-  margin: 0;
 }
 
 .skill-layer-rescan {

@@ -99,6 +99,34 @@ export function buildSkillInvocation(skillName: string): string {
 }
 
 /**
+ * The agent-aware copyable CLI for the Skills-tab "Copy invocation" action. Where
+ * `buildSkillInvocation` is the bare REPL prompt (agent-agnostic), this reflects
+ * the per-skill AGENT selection so the copied command runs the skill under the
+ * chosen agent — mirroring `buildOmnigentArgv`'s subcommand/positional shape, but
+ * as a single shell-pasteable string using the `omnigent` bin NAME (not an
+ * absolute binary path, matching `buildAgentInvocation`):
+ *   - default → omnigent run -p '<prompt>'
+ *   - builtin → omnigent <name> -p '<prompt>'        (subcommand, NOT 'run')
+ *   - custom  → omnigent run '<abs path>' -p '<prompt>'
+ * `agent` MUST already be resolved fail-closed by `resolveAgentLaunch`, so a
+ * custom path is the validated absolute real path. The custom path and the prompt
+ * are each POSIX single-quote wrapped so spaces / shell metacharacters paste as
+ * one safe argument. Clipboard text only — pure / unit-testable.
+ */
+export function buildSkillCliInvocation(opts: {
+  skillName: string;
+  agent?: ResolvedAgent;
+}): string {
+  const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
+  const prompt = buildSkillInvocation(opts.skillName);
+  const subcommand = agent.mode === "builtin" ? agent.name : "run";
+  let cli = `${OMNIGENT_BIN_NAME} ${subcommand}`;
+  if (agent.mode === "custom") cli += ` ${shellSingleQuote(agent.path)}`;
+  cli += ` -p ${shellSingleQuote(prompt)}`;
+  return cli;
+}
+
+/**
  * POSIX single-quote shell escaping: wrap `s` in single quotes and escape any
  * embedded single quote as `'\''`. This makes a path containing spaces or shell
  * metacharacters safe to paste into a shell as one argument. Used only for the

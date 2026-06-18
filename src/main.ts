@@ -24,7 +24,7 @@ import {
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
-  buildSkillInvocation,
+  buildSkillCliInvocation,
   BUNDLE_CONFIG_NAME,
   CustomAgent,
   decodeAgentChoice,
@@ -98,12 +98,6 @@ export default class SkillLayerPlugin extends Plugin {
       callback: () => void this.activateView(),
     });
 
-    this.addCommand({
-      id: "rescan",
-      name: "Rescan skills",
-      callback: () => void this.rescan(true),
-    });
-
     this.addSettingTab(new SkillLayerSettingTab(this.app, this));
 
     // Hot-reload for Vault-API (non-dot) roots. `vault.on('modify')` fires on
@@ -112,7 +106,7 @@ export default class SkillLayerPlugin extends Plugin {
     // `metadataCache.on('changed')`, which fires after a fresh re-parse, and
     // the scan reads fresh file content anyway (see Detector.scanVaultRoot).
     // Dot-folder / external roots emit no events; they refresh on view open
-    // and via the manual Rescan command.
+    // and via the in-view Rescan / Refresh buttons.
     this.registerEvent(this.app.vault.on("create", () => this.scheduleRescan()));
     this.registerEvent(this.app.vault.on("modify", () => this.scheduleRescan()));
     this.registerEvent(this.app.vault.on("delete", () => this.scheduleRescan()));
@@ -642,13 +636,20 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /**
-   * Copy the skill's invocation string to the clipboard (row action). The
-   * invocation is the FIXED natural-language form `Use the <name> skill.` (M11
-   * removed the user-configurable template). It embeds no path, so no shell
-   * quoting is needed.
+   * Copy the skill's invocation to the clipboard (row action). The copied form is
+   * an agent-aware CLI that respects the per-skill "Run with" selection — the
+   * stored choice is re-validated fail-closed by the SAME `resolveAgentLaunch`
+   * gate `launchSkill` uses, so a stale/invalid custom agent silently degrades to
+   * the Default (`omnigent run …`) form. The custom path + prompt are shell-quoted
+   * (see `buildSkillCliInvocation`); the bin NAME `omnigent` is used, not a
+   * resolved absolute binary, so no binary/desktop capability gate is needed.
    */
   async copyInvocation(skill: Skill): Promise<void> {
-    const invocation = buildSkillInvocation(skill.name);
+    const agent = resolveAgentLaunch(this.settings.skillAgent[skill.id], {
+      scanDir: this.agentConfigDir() ?? "",
+      exists: (p) => fs.existsSync(p),
+    });
+    const invocation = buildSkillCliInvocation({ skillName: skill.name, agent });
     try {
       await navigator.clipboard.writeText(invocation);
       new Notice(`Copied invocation: ${invocation}`);

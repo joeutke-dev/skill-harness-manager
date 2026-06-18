@@ -64,7 +64,6 @@ export class SkillBrowserView extends ItemView {
     root.addClass("skill-layer-view");
 
     const header = root.createDiv({ cls: "skill-layer-header" });
-    header.createEl("h3", { text: "Skill Layer", cls: "skill-layer-title" });
 
     const rescanBtn = header.createEl("button", {
       cls: "skill-layer-rescan",
@@ -344,10 +343,6 @@ export class SkillBrowserView extends ItemView {
     const main = row.createDiv({ cls: "skill-layer-row-main" });
     const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
     nameLine.createSpan({ text: skill.name, cls: "skill-layer-row-name" });
-    nameLine.createSpan({
-      text: skill.detection,
-      cls: "skill-layer-row-badge",
-    });
 
     main.createDiv({ cls: "skill-layer-row-desc", text: skill.description });
     main.createDiv({ cls: "skill-layer-row-path", text: skill.path });
@@ -399,15 +394,14 @@ export class SkillBrowserView extends ItemView {
       this.renderList();
     });
 
-    // Per-skill AGENT selector ("Run with"). Each option is labeled by the
-    // omnigent invocation it produces, so the effect is explicit:
-    //   Default            → omnigent run -p …
-    //   a built-in agent   → omnigent <name> -p …      (subcommand, NOT run)
-    //   a custom agent      → omnigent run <config> -p … (config path is inert)
-    // Built-ins come from the hardcoded allowlist; custom agents are the
-    // dynamically-discovered YAML configs (label = name, tooltip = description).
-    // Selecting persists settings.skillAgent[skill.id] (Default deletes the key
-    // to keep data.json clean), re-validated fail-closed before storage.
+    // Per-skill AGENT selector ("Run with"). Options carry short NAME-only
+    // labels (Default / a built-in name / a custom-agent name); the underlying
+    // omnigent invocation each produces is documented on `buildOmnigentArgv` and
+    // surfaced via "Copy invocation". Built-ins come from the hardcoded
+    // allowlist; custom agents are the dynamically-discovered YAML configs
+    // (label = name, tooltip = description). Selecting persists
+    // settings.skillAgent[skill.id] (Default deletes the key to keep data.json
+    // clean), re-validated fail-closed before storage.
     const agentGroup = actions.createDiv({ cls: "skill-layer-agent-group" });
     agentGroup.createSpan({ cls: "skill-layer-agent-caption", text: "Run with" });
     const agentSel = agentGroup.createEl("select", {
@@ -415,12 +409,12 @@ export class SkillBrowserView extends ItemView {
       attr: { "aria-label": `Run with (agent) for ${skill.name}` },
     }) as HTMLSelectElement;
     agentSel.createEl("option", {
-      text: "Default — omnigent run",
+      text: "Default",
       value: AGENT_DEFAULT_VALUE,
     });
     for (const name of BUILTIN_AGENTS) {
       agentSel.createEl("option", {
-        text: `${name} — omnigent ${name}`,
+        text: name,
         value: `builtin:${name}`,
       });
     }
@@ -431,7 +425,7 @@ export class SkillBrowserView extends ItemView {
       }) as HTMLOptGroupElement;
       for (const agent of customAgents) {
         const opt = group.createEl("option", {
-          text: `${agent.name} — omnigent run <config>`,
+          text: agent.name,
           value: `custom:${agent.path}`,
         });
         if (agent.description) opt.setAttr("title", agent.description);

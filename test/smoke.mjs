@@ -67,6 +67,7 @@ const {
   AGENT_INVOCATION_PLACEHOLDER,
   buildAgentInvocation,
   buildSkillInvocation,
+  buildSkillCliInvocation,
   shellSingleQuote,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
@@ -990,6 +991,41 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
   eq("skill copy invocation == `Use the <name> skill.`", buildSkillInvocation("transcribe-meeting"), "Use the transcribe-meeting skill.");
   check("skill invocation has no leading slash (no REPL slash form)", !buildSkillInvocation("daily-note").startsWith("/"));
   check("skill invocation matches the launch-prompt base", buildLaunchPrompt("daily-note", VAULT, false) === buildSkillInvocation("daily-note"));
+
+  // --- M14: agent-aware Skills-tab "Copy invocation" CLI -------------------
+  // buildSkillCliInvocation reflects the per-skill agent (already resolved
+  // fail-closed by resolveAgentLaunch). Mirrors buildOmnigentArgv's shape but as
+  // a shell-pasteable string using the bin NAME; path + prompt are single-quoted.
+  eq(
+    "default agent → omnigent run -p '<prompt>'",
+    buildSkillCliInvocation({ skillName: "daily-note" }),
+    "omnigent run -p 'Use the daily-note skill.'",
+  );
+  eq(
+    "no agent arg falls back to the default form",
+    buildSkillCliInvocation({ skillName: "daily-note", agent: { mode: "default" } }),
+    "omnigent run -p 'Use the daily-note skill.'",
+  );
+  eq(
+    "builtin agent → omnigent <name> -p '<prompt>' (subcommand, NOT run)",
+    buildSkillCliInvocation({ skillName: "daily-note", agent: { mode: "builtin", name: "polly" } }),
+    "omnigent polly -p 'Use the daily-note skill.'",
+  );
+  check("builtin form does NOT use the 'run' subcommand", !buildSkillCliInvocation({ skillName: "x", agent: { mode: "builtin", name: "debby" } }).startsWith("omnigent run "));
+  eq(
+    "custom agent → omnigent run '<abs path>' -p '<prompt>'",
+    buildSkillCliInvocation({ skillName: "daily-note", agent: { mode: "custom", path: AGENT_PATH } }),
+    `omnigent run '${AGENT_PATH}' -p 'Use the daily-note skill.'`,
+  );
+  // A custom path with spaces/metachars stays a single quoted shell argument.
+  check(
+    "custom metachar path stays inside the single-quoted region",
+    !/run [^']*[;&|$`]/.test(buildSkillCliInvocation({ skillName: "x", agent: { mode: "custom", path: SPACEY } })),
+  );
+  check(
+    "custom form embeds the fully-quoted metachar path",
+    buildSkillCliInvocation({ skillName: "x", agent: { mode: "custom", path: SPACEY } }) === `omnigent run '${SPACEY}' -p 'Use the x skill.'`,
+  );
 
   // --- launch rejects an agent path that fails validation ------------------
   // safeCustomAgentRealPath is the SAME gate launch + copy use; null ⇒ no spawn.
