@@ -1,5 +1,4 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
-import { SKILL_LAYER_ICON } from "./icon";
 import { AGENT_DEFAULT_VALUE, BUILTIN_AGENTS } from "./launch";
 import type SkillLayerPlugin from "./main";
 import {
@@ -38,7 +37,7 @@ export class SkillBrowserView extends ItemView {
   }
 
   getIcon(): string {
-    return SKILL_LAYER_ICON;
+    return "layers";
   }
 
   async onOpen(): Promise<void> {
@@ -114,7 +113,7 @@ export class SkillBrowserView extends ItemView {
   /** Empty-state block: a muted lucide glyph above the explanatory copy. */
   private renderEmptyState(parent: HTMLElement, text: string): void {
     const empty = parent.createDiv({ cls: "skill-layer-empty" });
-    setIcon(empty.createSpan(), SKILL_LAYER_ICON);
+    setIcon(empty.createSpan(), "layers");
     empty.createSpan({ text });
   }
 

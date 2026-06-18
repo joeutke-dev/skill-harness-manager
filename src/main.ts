@@ -4,7 +4,6 @@ import * as fs from "fs";
 import * as os from "os";
 import * as nodePath from "path";
 import {
-  addIcon,
   FileSystemAdapter,
   Menu,
   Notice,
@@ -16,11 +15,10 @@ import {
 } from "obsidian";
 import { Detector } from "./detector";
 import {
+  DEFAULT_PINNED_ICON,
   elementHasSvg,
   pinAction,
   resolvePinnedIcon,
-  SKILL_LAYER_ICON,
-  SKILL_LAYER_ICON_SVG,
 } from "./icon";
 import { IconPickerModal } from "./iconPicker";
 import {
@@ -95,11 +93,7 @@ export default class SkillLayerPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new SkillBrowserView(leaf, this),
     );
 
-    // Register the custom squid brand glyph once before any icon use (ribbon,
-    // view tab, empty state, file-menu action all reference SKILL_LAYER_ICON).
-    addIcon(SKILL_LAYER_ICON, SKILL_LAYER_ICON_SVG);
-
-    this.addRibbonIcon(SKILL_LAYER_ICON, "Skill Layer: toggle skills browser", () => {
+    this.addRibbonIcon("layers", "Skill Layer: toggle skills browser", () => {
       void this.toggleView();
     });
 
@@ -429,7 +423,7 @@ export default class SkillLayerPlugin extends Plugin {
       menu.addItem((item) => {
         item
           .setTitle(it.title)
-          .setIcon(SKILL_LAYER_ICON)
+          .setIcon("layers")
           .onClick(() => {
             const skill = this.getSkillById(it.skillId);
             if (skill) void this.launchSkill(skill, it.contextPath);
@@ -484,6 +478,55 @@ export default class SkillLayerPlugin extends Plugin {
     new IconPickerModal(this.app, this.settings.skillIcons[skill.id], (iconId) => {
       void this.setSkillIcon(skill, iconId);
     }).open();
+  }
+
+  /** The effective default pinned-ribbon icon (user global, else the built-in). */
+  defaultPinnedIcon(): string {
+    return this.settings.pinnedIcon ?? DEFAULT_PINNED_ICON;
+  }
+
+  /**
+   * Open the picker for the GLOBAL default pinned-ribbon icon (the fallback used
+   * by any pinned skill that hasn't chosen its own icon). `onDone` lets the
+   * settings tab re-render its preview after a choice.
+   */
+  openDefaultIconPicker(onDone?: () => void): void {
+    new IconPickerModal(this.app, this.defaultPinnedIcon(), (iconId) => {
+      void this.setDefaultPinnedIcon(iconId, onDone);
+    }).open();
+  }
+
+  /** Set the global default pinned-ribbon icon; refresh fallback-driven ribbons. */
+  async setDefaultPinnedIcon(iconId: string, onDone?: () => void): Promise<void> {
+    if (!this.iconResolves(iconId)) {
+      new Notice(`Skill Layer: "${iconId}" is not a known icon.`);
+      return;
+    }
+    this.settings.pinnedIcon = iconId;
+    await this.saveSettings();
+    this.refreshAllPinnedRibbons();
+    this.refreshViews();
+    onDone?.();
+  }
+
+  /** Clear the global default back to the built-in fallback ("play"). */
+  async clearDefaultPinnedIcon(onDone?: () => void): Promise<void> {
+    delete this.settings.pinnedIcon;
+    await this.saveSettings();
+    this.refreshAllPinnedRibbons();
+    this.refreshViews();
+    onDone?.();
+  }
+
+  /**
+   * Rebuild every persisted pin's ribbon icon. Pins with their own
+   * `skillIcons[id]` keep it; pins relying on the fallback pick up the new global
+   * default. Used after the global default changes.
+   */
+  private refreshAllPinnedRibbons(): void {
+    for (const el of this.ribbonIcons.values()) el.remove();
+    this.ribbonIcons.clear();
+    this.recreatePinnedRibbons();
   }
 
   /**

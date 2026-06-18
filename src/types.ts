@@ -88,9 +88,10 @@ export interface SkillLayerSettings {
   /** Append the generic vault-anchor instruction to the launch prompt. */
   appendVaultAnchor: boolean;
   /**
-   * @deprecated Legacy global pinned-ribbon icon. No longer set by the UI;
-   * retained ONLY as a one-time migration fallback for pins created before
-   * per-skill icons existed. Optional so new installs omit it.
+   * Global default pinned-ribbon icon — the fallback used by any pinned skill
+   * that has no per-skill icon in `skillIcons`. Set via the settings selector
+   * (also the migration fallback for pins created before per-skill icons).
+   * Optional so new installs omit it and fall back to DEFAULT_PINNED_ICON.
    */
   pinnedIcon?: string;
 }

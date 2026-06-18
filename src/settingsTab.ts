@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, normalizePath } from "obsidian";
+import { App, PluginSettingTab, Setting, normalizePath, setIcon } from "obsidian";
 import type SkillLayerPlugin from "./main";
 import { normalizeExternalRoot } from "./parse";
 import { RootKind, ScanRoot } from "./types";
@@ -18,14 +18,15 @@ function inferKind(path: string): RootKind {
 
 /**
  * The Skill Layer settings page (M11: slimmed to install/storage config only).
- * It is exactly three things, in order:
+ * In order:
  *   1. Scan roots — the discovery dirs (enable/remove + add a root).
  *   2. Omnigent binary path — the install location.
- *   3. Append vault-anchor instruction — the one launch-behavior toggle.
+ *   3. Default pinned ribbon icon — the global fallback glyph for pins that
+ *      haven't chosen their own (per-skill picker still wins).
+ *   4. Append vault-anchor instruction — the one launch-behavior toggle.
  * Everything explanatory or duplicative of omnigent's own config / the M10
  * Agents tab / the browser view (plugin description, invocation template,
- * server URL, the Agents section, pinned-icon + tagging + pinned-skills text)
- * was removed.
+ * server URL, the Agents section, tagging + pinned-skills text) was removed.
  */
 export class SkillLayerSettingTab extends PluginSettingTab {
   private plugin: SkillLayerPlugin;
@@ -140,6 +141,36 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             settings.omnigentBinaryPath = value.trim();
             await this.plugin.saveSettings();
+          }),
+      );
+
+    // --- Default pinned ribbon icon ---------------------------------------
+    // A pinned skill normally picks its OWN icon ("Pin to ribbon…" / "Change
+    // icon" on a skill row, stored in skillIcons[id]). This global default is the
+    // fallback used when a pin has no per-skill icon (e.g. older/migrated pins).
+    const currentIcon = this.plugin.defaultPinnedIcon();
+    const isCustom = Boolean(settings.pinnedIcon);
+    new Setting(containerEl)
+      .setName("Default pinned ribbon icon")
+      .setDesc(
+        `Fallback Lucide icon for pinned skills without their own choice. ` +
+          `Current: ${currentIcon}${isCustom ? "" : " (built-in default)"}.`,
+      )
+      .addButton((btn) => {
+        btn.setTooltip("Choose a Lucide icon").onClick(() => {
+          this.plugin.openDefaultIconPicker(() => this.display());
+        });
+        // Preview the current glyph inside the button (icon-only).
+        setIcon(btn.buttonEl, currentIcon);
+      })
+      .addExtraButton((btn) =>
+        btn
+          .setIcon("rotate-ccw")
+          .setTooltip("Reset to the built-in default")
+          .setDisabled(!isCustom)
+          .onClick(async () => {
+            await this.plugin.clearDefaultPinnedIcon();
+            this.display();
           }),
       );
 
