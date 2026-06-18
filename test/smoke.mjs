@@ -651,6 +651,10 @@ console.log("\n[m] bundle-directory discovery + validation + argv (injected fs)"
   };
   const isFile = (p) => p in files;
   const isDirectory = (p) => dirs.has(p);
+  // No symlinks in this fake fs, so a regular-file (no-follow) check is the same
+  // as `isFile` here. The symlinked/directory config.yaml rejections are proven
+  // with real on-disk fixtures in section [o].
+  const isRegularFileNoFollow = isFile;
 
   // Discovery enumerates the bundle dir AND both loose files; ignores the
   // config-less subdir.
@@ -688,11 +692,14 @@ console.log("\n[m] bundle-directory discovery + validation + argv (injected fs)"
   // config-less subdir rejected; lexical gate accepts the extension-less bundle
   // candidate yet still rejects wrong extensions and `..` traversal.
   const id = (p) => p;
-  eq("safe: bundle dir (has config.yaml) → returns real dir path", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory }), BUNDLE_DIR);
-  eq("safe: subdir WITHOUT config.yaml → null", safeCustomAgentRealPath(NOCONFIG_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory }), null);
-  eq("safe: extension-less path with no dir/file → null", safeCustomAgentRealPath(`${SCAN_DIR}/ghost`, SCAN_DIR, { realpath: id, isFile, isDirectory }), null);
+  eq("safe: bundle dir (has config.yaml) → returns real dir path", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory, isRegularFileNoFollow }), BUNDLE_DIR);
+  eq("safe: subdir WITHOUT config.yaml → null", safeCustomAgentRealPath(NOCONFIG_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory, isRegularFileNoFollow }), null);
+  eq("safe: extension-less path with no dir/file → null", safeCustomAgentRealPath(`${SCAN_DIR}/ghost`, SCAN_DIR, { realpath: id, isFile, isDirectory, isRegularFileNoFollow }), null);
   eq("safe: bundle path containing `..` → null without touching fs", safeCustomAgentRealPath(`${SCAN_DIR}/sub/../vault-agent`, SCAN_DIR, { realpath: () => { throw new Error("should not be called"); }, isFile: () => { throw new Error("should not be called"); }, isDirectory: () => { throw new Error("should not be called"); } }), null);
-  eq("safe: bundle realpath escapes scan dir → null", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: (p) => (p === SCAN_DIR ? SCAN_DIR : `${VAULT}/evil/vault-agent`), isFile, isDirectory }), null);
+  eq("safe: bundle realpath escapes scan dir → null", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: (p) => (p === SCAN_DIR ? SCAN_DIR : `${VAULT}/evil/vault-agent`), isFile, isDirectory, isRegularFileNoFollow }), null);
+  // Bundle with a config.yaml that is NOT a directly-contained regular file
+  // (symlink / directory) → rejected: isRegularFileNoFollow returns false.
+  eq("safe: bundle config.yaml is a symlink → null (no-follow rejects)", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory, isRegularFileNoFollow: () => false }), null);
   check("lexical: extension-less bundle path accepted (candidate)", isValidCustomAgentPath(BUNDLE_DIR, SCAN_DIR));
   check("lexical: still rejects wrong-extension file (.txt)", !isValidCustomAgentPath(`${SCAN_DIR}/x.txt`, SCAN_DIR));
   check("lexical: rejects bundle path with `..` traversal", !isValidCustomAgentPath(`${SCAN_DIR}/sub/../vault-agent`, SCAN_DIR));
@@ -700,12 +707,12 @@ console.log("\n[m] bundle-directory discovery + validation + argv (injected fs)"
   // resolveAgentLaunch end-to-end for a bundle (injected fs).
   const resolvedBundle = resolveAgentLaunch(
     { kind: "custom", path: BUNDLE_DIR },
-    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory },
+    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory, isRegularFileNoFollow },
   );
   check("resolveAgentLaunch bundle → mode custom with the DIR path", deepEq(resolvedBundle, { mode: "custom", path: BUNDLE_DIR }));
   const resolvedNoConfig = resolveAgentLaunch(
     { kind: "custom", path: NOCONFIG_DIR },
-    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory },
+    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory, isRegularFileNoFollow },
   );
   check("resolveAgentLaunch config-less subdir → default", deepEq(resolvedNoConfig, { mode: "default" }));
 }
@@ -766,6 +773,59 @@ console.log("\n[n] real-fs bundle directory fixtures (default fs path)");
   check("symlinked bundle escaping scan dir → default", deepEq(rr(escapeDirLink), { mode: "default" }));
   check("broken bundle symlink → default (fail-closed, no throw)", deepEq(rr(brokenDirLink), { mode: "default" }));
   check("(fixture sanity) escape bundle realpath is outside scan dir", dirname(realpathSync(escapeDirLink)) !== realpathSync(scan));
+
+  rmSync(tmp, { recursive: true, force: true });
+}
+
+// =====================================================================
+// (o) REAL on-disk fixtures for the BLOCKING fix: a bundle's `config.yaml` must
+//     be a DIRECTLY-CONTAINED REGULAR FILE — a symlinked config.yaml (even to a
+//     real file in or out of the scan dir) or a config.yaml that is a DIRECTORY
+//     is rejected (fall back to Default). Uses the DEFAULT fs (lstat no-follow).
+// =====================================================================
+console.log("\n[o] real-fs bundle config.yaml must be a regular file (no-follow)");
+{
+  const tmp = mkdtempSync(join(tmpdir(), "skill-layer-cfgsym-"));
+  const scan = join(tmp, "agent-configs");
+  mkdirSync(scan, { recursive: true });
+
+  // Control: a normal bundle with a regular-file config.yaml → ACCEPTED.
+  const okBundle = join(scan, "ok-bundle");
+  mkdirSync(okBundle, { recursive: true });
+  writeFileSync(join(okBundle, "config.yaml"), "name: OK\n");
+
+  // A real config target INSIDE the scan dir (so the target is not the issue —
+  // only the fact that the bundle's config.yaml is a SYMLINK).
+  const innerTarget = join(scan, "inner-target.yaml");
+  writeFileSync(innerTarget, "name: InnerTarget\n");
+  // A real config target OUTSIDE the scan dir.
+  const outerTarget = join(tmp, "outer-target.yaml");
+  writeFileSync(outerTarget, "name: OuterTarget\n");
+
+  // Bundle whose config.yaml is a SYMLINK to a file INSIDE the scan dir.
+  const symInBundle = join(scan, "sym-in-bundle");
+  mkdirSync(symInBundle, { recursive: true });
+  symlinkSync(innerTarget, join(symInBundle, "config.yaml"));
+
+  // Bundle whose config.yaml is a SYMLINK to a file OUTSIDE the scan dir.
+  const symOutBundle = join(scan, "sym-out-bundle");
+  mkdirSync(symOutBundle, { recursive: true });
+  symlinkSync(outerTarget, join(symOutBundle, "config.yaml"));
+
+  // Bundle whose config.yaml is itself a DIRECTORY.
+  const dirCfgBundle = join(scan, "dir-cfg-bundle");
+  mkdirSync(join(dirCfgBundle, "config.yaml"), { recursive: true });
+
+  const rr = (p) => resolveAgentLaunch({ kind: "custom", path: p }, { scanDir: scan, exists: (q) => existsSync(q) });
+
+  check("regular-file config.yaml → ACCEPTED (no regression)", deepEq(rr(okBundle), { mode: "custom", path: realpathSync(okBundle) }));
+  check("config.yaml symlink → file INSIDE scan dir → REJECTED", deepEq(rr(symInBundle), { mode: "default" }));
+  check("config.yaml symlink → file OUTSIDE scan dir → REJECTED", deepEq(rr(symOutBundle), { mode: "default" }));
+  check("config.yaml is a DIRECTORY → REJECTED", deepEq(rr(dirCfgBundle), { mode: "default" }));
+  // Sanity: the symlinked config.yaml targets ARE real regular files — proving
+  // it is the no-follow check (not a missing/odd target) that rejects them.
+  check("(fixture sanity) inner symlink target is a regular file", statSync(join(symInBundle, "config.yaml")).isFile());
+  check("(fixture sanity) outer symlink target is a regular file", statSync(join(symOutBundle, "config.yaml")).isFile());
 
   rmSync(tmp, { recursive: true, force: true });
 }

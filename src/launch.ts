@@ -206,8 +206,13 @@ export const BUNDLE_CONFIG_NAME = "config.yaml";
  *        `.yaml`/`.yml` OR extension-less, lexical direct-child of scanDir);
  *   4.   the path exists (injected `exists`) and is EITHER
  *          (a) a regular FILE ending `.yaml`/`.yml`, OR
- *          (b) a DIRECTORY that directly contains a regular file `config.yaml`
- *              (the canonical bundle layout — `omnigent run <dir>`);
+ *          (b) a DIRECTORY that DIRECTLY CONTAINS a regular file `config.yaml`
+ *              (the canonical bundle layout — `omnigent run <dir>`). The
+ *              `config.yaml` must be a directly-contained REGULAR file — checked
+ *              with a NON-symlink-following stat (`isRegularFileNoFollow`), so a
+ *              symlinked `config.yaml` (which would let the bundle consume a
+ *              config from outside itself) or a `config.yaml` directory is
+ *              rejected;
  *        anything else (extension-less plain file, dir without `config.yaml`,
  *        special file) → null;
  *   5.   the symlink gap is closed — `realpath` of the candidate AND of scanDir
@@ -226,6 +231,7 @@ export function safeCustomAgentRealPath(
     realpath: (p: string) => string;
     isFile: (p: string) => boolean;
     isDirectory?: (p: string) => boolean;
+    isRegularFileNoFollow?: (p: string) => boolean;
   },
 ): string | null {
   if (!isValidCustomAgentPath(rawPath, scanDir)) return null;
@@ -237,7 +243,12 @@ export function safeCustomAgentRealPath(
     if (fsOps.isFile(p)) {
       kindOk = /\.ya?ml$/i.test(p);
     } else if (fsOps.isDirectory && fsOps.isDirectory(p)) {
-      kindOk = fsOps.isFile(nodePath.join(p, BUNDLE_CONFIG_NAME));
+      // The bundle's config.yaml must be a directly-contained REGULAR file:
+      // checked WITHOUT following the final symlink, so a symlinked config.yaml
+      // (escaping the bundle) or a config.yaml directory is rejected.
+      kindOk =
+        !!fsOps.isRegularFileNoFollow &&
+        fsOps.isRegularFileNoFollow(nodePath.join(p, BUNDLE_CONFIG_NAME));
     }
     if (!kindOk) return null;
     const real = fsOps.realpath(p);
@@ -270,6 +281,7 @@ export function resolveAgentLaunch(
     realpath?: (p: string) => string;
     isFile?: (p: string) => boolean;
     isDirectory?: (p: string) => boolean;
+    isRegularFileNoFollow?: (p: string) => boolean;
   },
 ): ResolvedAgent {
   if (!stored || typeof stored !== "object") return { mode: "default" };
@@ -288,6 +300,10 @@ export function resolveAgentLaunch(
       realpath: opts.realpath ?? ((p) => fs.realpathSync(p)),
       isFile: opts.isFile ?? ((p) => fs.statSync(p).isFile()),
       isDirectory: opts.isDirectory ?? ((p) => fs.statSync(p).isDirectory()),
+      // lstat does NOT follow the final symlink: a symlinked config.yaml yields
+      // isSymbolicLink (isFile()===false) and a directory yields isFile()===false.
+      isRegularFileNoFollow:
+        opts.isRegularFileNoFollow ?? ((p) => fs.lstatSync(p).isFile()),
     });
     return real ? { mode: "custom", path: real } : { mode: "default" };
   }
