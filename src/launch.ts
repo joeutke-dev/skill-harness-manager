@@ -1,8 +1,11 @@
-// Pure launch-construction helpers (no Obsidian imports; only node `path` for
-// absolute/basename checks) — the argv builder, binary allowlist/resolution,
-// and PATH augmentation are all unit-testable. The actual spawn (impure) lives
-// in main.ts and consumes these.
+// Launch-construction helpers (no Obsidian imports) — the argv builder, binary
+// allowlist/resolution, and PATH augmentation are all unit-testable. The actual
+// spawn (impure) lives in main.ts and consumes these. The custom-agent path
+// gate additionally needs `fs` for its symlink-aware (realpath) containment
+// check; those fs calls are injectable so the resolver stays unit-testable, and
+// default to the real `fs` so existing call sites need no change.
 
+import * as fs from "fs";
 import * as nodePath from "path";
 
 /** The only binary this milestone (M1) is allowed to spawn. */
@@ -144,23 +147,73 @@ export function isAllowedBuiltinAgent(name: unknown): name is BuiltinAgentName {
 }
 
 /**
- * Strict validity test for a custom agent config path that may reach argv as the
- * single positional after `run`. Must be: a non-empty string, an ABSOLUTE path
- * (so it can never be read as a flag — leading-dash safe by construction), a
- * direct child of `scanDir` (no traversal, no nesting), and ending in
- * `.yaml`/`.yml`. Existence is checked separately (it requires the filesystem).
+ * The LEXICAL half of the custom-agent path gate (no filesystem). A path passes
+ * only if: it is a non-empty string; the RAW string contains NO `..` path
+ * segment (rejected up front, before any resolve — so traversal *syntax* that
+ * would lexically collapse back into the dir, e.g. `<scanDir>/sub/../evil.yaml`
+ * or `<scanDir>/../agent-configs/evil.yaml`, is refused outright); it is an
+ * ABSOLUTE path (so it can never be read as a flag — leading-dash safe by
+ * construction); it ends in `.yaml`/`.yml`; and it is a direct child of
+ * `scanDir`. Existence + a symlink-aware (realpath) containment check are
+ * applied separately by `safeCustomAgentRealPath` (they require the filesystem).
  * Pure / unit-testable.
  */
 export function isValidCustomAgentPath(p: unknown, scanDir: string): boolean {
   if (typeof p !== "string" || p.length === 0) return false;
   if (typeof scanDir !== "string" || scanDir.length === 0) return false;
+  // 1. Reject ANY `..` segment in the RAW string, before resolve() can collapse
+  // it. `resolve()` flattens `..` lexically, so a syntax like `sub/../evil.yaml`
+  // would otherwise survive — the contract forbids traversal syntax entirely.
+  if (rawPathHasDotDot(p)) return false;
   if (!nodePath.isAbsolute(p)) return false;
   if (!/\.ya?ml$/i.test(p)) return false;
-  // Direct child of the scan dir only: resolving collapses any `..`, so a
-  // traversal attempt (`…/agent-configs/../../etc/x.yaml`) lands its dirname
-  // outside scanDir and is rejected.
+  // Direct child of the scan dir only (lexical). With `..` already rejected,
+  // resolve() only normalizes separators / `.` segments here.
   const resolved = nodePath.resolve(p);
   return nodePath.dirname(resolved) === nodePath.resolve(scanDir);
+}
+
+/** True if the raw path string contains a `..` segment (any separator). */
+function rawPathHasDotDot(p: string): boolean {
+  return p.split(/[\\/]+/).some((seg) => seg === "..");
+}
+
+/**
+ * The FULL custom-agent path gate, fail-closed and defense-in-depth. Returns the
+ * real (symlink-resolved) absolute path ONLY if every check holds, else null
+ * (caller falls back to Default); NEVER throws. Checks, in order:
+ *   1–3. lexical gate (`isValidCustomAgentPath`: no `..` syntax, absolute,
+ *        `.yaml`/`.yml`, lexical direct-child of scanDir);
+ *   4.   the file exists AND is a regular file (injected `exists` + `isFile`);
+ *   5.   the symlink gap is closed — `realpath` of the candidate AND of scanDir
+ *        are computed, and the candidate's real dirname must equal the real
+ *        scanDir (a real, direct child of the real scan dir).
+ * A broken symlink / ENOENT / any throw from the fs ops resolves to null. fs
+ * ops are injected so this stays unit-testable; the real `fs` is the default.
+ */
+export function safeCustomAgentRealPath(
+  rawPath: unknown,
+  scanDir: string,
+  fsOps: {
+    exists?: (p: string) => boolean;
+    realpath: (p: string) => string;
+    isFile: (p: string) => boolean;
+  },
+): string | null {
+  if (!isValidCustomAgentPath(rawPath, scanDir)) return null;
+  const p = rawPath as string;
+  try {
+    if (fsOps.exists && !fsOps.exists(p)) return null;
+    if (!fsOps.isFile(p)) return null;
+    const real = fsOps.realpath(p);
+    const realDir = fsOps.realpath(scanDir);
+    // Real, direct child of the real scan dir — closes the symlink gap that the
+    // lexical check alone (which never follows links) would miss.
+    if (nodePath.dirname(real) !== realDir) return null;
+    return real;
+  } catch {
+    return null; // ENOENT / broken symlink / any fs throw → fail closed.
+  }
 }
 
 /**
@@ -175,7 +228,12 @@ export function isValidCustomAgentPath(p: unknown, scanDir: string): boolean {
  */
 export function resolveAgentLaunch(
   stored: SkillAgent | undefined | null,
-  opts: { scanDir: string; exists: (p: string) => boolean },
+  opts: {
+    scanDir: string;
+    exists: (p: string) => boolean;
+    realpath?: (p: string) => string;
+    isFile?: (p: string) => boolean;
+  },
 ): ResolvedAgent {
   if (!stored || typeof stored !== "object") return { mode: "default" };
   if (stored.kind === "builtin") {
@@ -184,13 +242,16 @@ export function resolveAgentLaunch(
       : { mode: "default" };
   }
   if (stored.kind === "custom") {
-    if (
-      isValidCustomAgentPath(stored.path, opts.scanDir) &&
-      opts.exists(stored.path)
-    ) {
-      return { mode: "custom", path: stored.path };
-    }
-    return { mode: "default" };
+    // Fail-closed, symlink-aware containment check. fs ops default to the real
+    // `fs` (so the unchanged main.ts call site is correct at runtime) and are
+    // injectable for tests. The emitted path is the real (resolved) absolute
+    // path — the single inert positional after `run`.
+    const real = safeCustomAgentRealPath(stored.path, opts.scanDir, {
+      exists: opts.exists,
+      realpath: opts.realpath ?? ((p) => fs.realpathSync(p)),
+      isFile: opts.isFile ?? ((p) => fs.statSync(p).isFile()),
+    });
+    return real ? { mode: "custom", path: real } : { mode: "default" };
   }
   // 'default' or any unrecognized kind.
   return { mode: "default" };

@@ -19,7 +19,17 @@
 import esbuild from "esbuild";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join } from "path";
-import { mkdirSync } from "fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  symlinkSync,
+  existsSync,
+  statSync,
+  realpathSync,
+  rmSync,
+} from "fs";
+import { tmpdir } from "os";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const builtDir = join(here, ".built");
@@ -44,6 +54,7 @@ const {
   resolveAgentLaunch,
   isAllowedBuiltinAgent,
   isValidCustomAgentPath,
+  safeCustomAgentRealPath,
   parseAgentConfigYaml,
   discoverCustomAgents,
   encodeAgentChoice,
@@ -272,9 +283,17 @@ const GOOD_YML = `${SCAN_DIR}/other.yml`;
 // =====================================================================
 console.log("\n[e] Per-skill agent resolution (fail-closed for each kind)");
 {
-  const yes = () => true;
   const no = () => false;
-  const r = (stored, exists = yes) => resolveAgentLaunch(stored, { scanDir: SCAN_DIR, exists });
+  // Inject fs mocks: identity realpath (lexical path === real path) + isFile so
+  // the fake fixture paths resolve without touching the real filesystem. (The
+  // real-fs / symlink behavior is exercised with on-disk fixtures in [l].)
+  const r = (stored, opts = {}) =>
+    resolveAgentLaunch(stored, {
+      scanDir: SCAN_DIR,
+      exists: opts.exists ?? (() => true),
+      isFile: opts.isFile ?? (() => true),
+      realpath: opts.realpath ?? ((p) => p),
+    });
 
   // default / absent / unknown → default.
   check("{kind:'default'} → mode default", deepEq(r({ kind: "default" }), { mode: "default" }));
@@ -292,16 +311,20 @@ console.log("\n[e] Per-skill agent resolution (fail-closed for each kind)");
   check("builtin case-mismatch 'Polly' → default", deepEq(r({ kind: "builtin", name: "Polly" }), { mode: "default" }));
   check("builtin missing name → default", deepEq(r({ kind: "builtin" }), { mode: "default" }));
 
-  // custom: must validate against the scan dir AND exist.
-  check("custom good .yaml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YAML }, yes), { mode: "custom", path: GOOD_YAML }));
-  check("custom good .yml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YML }, yes), { mode: "custom", path: GOOD_YML }));
-  check("custom good path but NOT exists → default (fail-closed)", deepEq(r({ kind: "custom", path: GOOD_YAML }, no), { mode: "default" }));
-  check("custom path OUTSIDE scan dir → default", deepEq(r({ kind: "custom", path: `${VAULT}/elsewhere/x.yaml` }, yes), { mode: "default" }));
-  check("custom path traversal escape → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/../../etc/x.yaml` }, yes), { mode: "default" }));
-  check("custom relative path → default", deepEq(r({ kind: "custom", path: "x.yaml" }, yes), { mode: "default" }));
-  check("custom wrong extension → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/x.txt` }, yes), { mode: "default" }));
-  check("custom nested subdir (not direct child) → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/sub/x.yaml` }, yes), { mode: "default" }));
-  check("custom empty path → default", deepEq(r({ kind: "custom", path: "" }, yes), { mode: "default" }));
+  // custom: must validate against the scan dir AND exist as a regular file.
+  check("custom good .yaml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YAML }), { mode: "custom", path: GOOD_YAML }));
+  check("custom good .yml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YML }), { mode: "custom", path: GOOD_YML }));
+  check("custom good path but NOT a regular file → default (fail-closed)", deepEq(r({ kind: "custom", path: GOOD_YAML }, { isFile: no }), { mode: "default" }));
+  check("custom good path but NOT exists → default (fail-closed)", deepEq(r({ kind: "custom", path: GOOD_YAML }, { exists: no }), { mode: "default" }));
+  check("custom realpath escapes scan dir → default (symlink gap closed)", deepEq(r({ kind: "custom", path: GOOD_YAML }, { realpath: (p) => (p === SCAN_DIR ? SCAN_DIR : `${VAULT}/evil/secret.yaml`) }), { mode: "default" }));
+  check("custom realpath throws → default (broken symlink)", deepEq(r({ kind: "custom", path: GOOD_YAML }, { realpath: () => { throw new Error("ENOENT"); } }), { mode: "default" }));
+  check("custom path OUTSIDE scan dir → default", deepEq(r({ kind: "custom", path: `${VAULT}/elsewhere/x.yaml` }), { mode: "default" }));
+  check("custom path traversal escape → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/../../etc/x.yaml` }), { mode: "default" }));
+  check("custom path '..' that lexically lands in-dir → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/sub/../evil.yaml` }), { mode: "default" }));
+  check("custom relative path → default", deepEq(r({ kind: "custom", path: "x.yaml" }), { mode: "default" }));
+  check("custom wrong extension → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/x.txt` }), { mode: "default" }));
+  check("custom nested subdir (not direct child) → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/sub/x.yaml` }), { mode: "default" }));
+  check("custom empty path → default", deepEq(r({ kind: "custom", path: "" }), { mode: "default" }));
 }
 
 // =====================================================================
@@ -367,12 +390,28 @@ console.log("\n[h] isAllowedBuiltinAgent + isValidCustomAgentPath gates");
   check("accept .YAML (case-insensitive ext)", isValidCustomAgentPath(`${SCAN_DIR}/A.YAML`, SCAN_DIR));
   check("reject path OUTSIDE scan dir", !isValidCustomAgentPath(`${VAULT}/x.yaml`, SCAN_DIR));
   check("reject traversal escape", !isValidCustomAgentPath(`${SCAN_DIR}/../../etc/x.yaml`, SCAN_DIR));
+  // Raw `..` syntax is rejected BEFORE resolve() can lexically collapse it back
+  // into the scan dir — even when the collapse would land in-dir.
+  check("reject `..` that lexically lands in-dir (sub/../evil.yaml)", !isValidCustomAgentPath(`${SCAN_DIR}/sub/../evil.yaml`, SCAN_DIR));
+  check("reject `../agent-configs/evil.yaml` re-entry syntax", !isValidCustomAgentPath(`${SCAN_DIR}/../agent-configs/evil.yaml`, SCAN_DIR));
+  check("reject leading `..` segment", !isValidCustomAgentPath(`${SCAN_DIR}/../evil.yaml`, SCAN_DIR));
   check("reject nested subdir (direct child only)", !isValidCustomAgentPath(`${SCAN_DIR}/sub/x.yaml`, SCAN_DIR));
   check("reject relative path", !isValidCustomAgentPath("x.yaml", SCAN_DIR));
   check("reject wrong extension", !isValidCustomAgentPath(`${SCAN_DIR}/x.txt`, SCAN_DIR));
   check("reject empty path", !isValidCustomAgentPath("", SCAN_DIR));
   check("reject empty scan dir", !isValidCustomAgentPath(GOOD_YAML, ""));
   check("reject non-string path", !isValidCustomAgentPath(undefined, SCAN_DIR));
+
+  // safeCustomAgentRealPath (full gate, fs ops injected) — never throws.
+  const id = (p) => p;
+  eq("safe: accept → returns real path", safeCustomAgentRealPath(GOOD_YAML, SCAN_DIR, { realpath: id, isFile: () => true }), GOOD_YAML);
+  eq("safe: not a regular file → null", safeCustomAgentRealPath(GOOD_YAML, SCAN_DIR, { realpath: id, isFile: () => false }), null);
+  eq("safe: exists=false → null", safeCustomAgentRealPath(GOOD_YAML, SCAN_DIR, { exists: () => false, realpath: id, isFile: () => true }), null);
+  eq("safe: real dirname escapes → null", safeCustomAgentRealPath(GOOD_YAML, SCAN_DIR, { realpath: (p) => (p === SCAN_DIR ? SCAN_DIR : `${VAULT}/evil/x.yaml`), isFile: () => true }), null);
+  eq("safe: realpath throws → null (no throw escapes)", safeCustomAgentRealPath(GOOD_YAML, SCAN_DIR, { realpath: () => { throw new Error("ENOENT"); }, isFile: () => true }), null);
+  eq("safe: lexical-invalid (raw ..) → null without touching fs", safeCustomAgentRealPath(`${SCAN_DIR}/sub/../evil.yaml`, SCAN_DIR, { realpath: () => { throw new Error("should not be called"); }, isFile: () => { throw new Error("should not be called"); } }), null);
+  // Symlink within the scan dir → emit the resolved (real) in-dir target.
+  eq("safe: in-dir symlink → returns resolved target", safeCustomAgentRealPath(`${SCAN_DIR}/alias.yaml`, SCAN_DIR, { realpath: (p) => (p === `${SCAN_DIR}/alias.yaml` ? GOOD_YAML : p), isFile: () => true }), GOOD_YAML);
 }
 
 // =====================================================================
@@ -529,6 +568,56 @@ console.log("\n[g] Ribbon toggle decision (open / reveal / close)");
       decideToggleAction(true, false) !== "close" &&
       decideToggleAction(false, true) !== "close",
   );
+}
+
+// =====================================================================
+// (l) REAL on-disk symlink fixtures: resolveAgentLaunch with the DEFAULT fs
+//     (no injected realpath/isFile) — proves the symlink gap is closed end to
+//     end and that broken/escaping links fall back to Default; never throws.
+// =====================================================================
+console.log("\n[l] real-fs symlink fixtures (default fs path)");
+{
+  const tmp = mkdtempSync(join(tmpdir(), "skill-layer-agents-"));
+  const scan = join(tmp, "agent-configs");
+  mkdirSync(scan, { recursive: true });
+  // A real, plain config file (the no-regression acceptance case).
+  const realFile = join(scan, "agent.yaml");
+  writeFileSync(realFile, "name: Real\n");
+  // A directory outside the scan dir holding a secret config.
+  const outside = join(tmp, "outside");
+  mkdirSync(outside, { recursive: true });
+  const secret = join(outside, "secret.yaml");
+  writeFileSync(secret, "name: Secret\n");
+  // A direct-child symlink whose real target escapes the scan dir.
+  const escapeLink = join(scan, "escape.yaml");
+  symlinkSync(secret, escapeLink);
+  // A direct-child broken symlink (target does not exist).
+  const brokenLink = join(scan, "broken.yaml");
+  symlinkSync(join(tmp, "nope.yaml"), brokenLink);
+  // A direct-child symlink to the real in-dir file (legitimate).
+  const aliasLink = join(scan, "alias.yaml");
+  symlinkSync(realFile, aliasLink);
+
+  // Use the DEFAULT fs ops (no realpath/isFile injection); exists = real fs.
+  const rr = (p) =>
+    resolveAgentLaunch(
+      { kind: "custom", path: p },
+      { scanDir: scan, exists: (q) => existsSync(q) },
+    );
+
+  // macOS tmpdir is itself a symlink (/var → /private/var); the gate realpaths
+  // BOTH sides, so a legitimate real child still matches.
+  check("real plain file → ACCEPTED (no regression)", deepEq(rr(realFile), { mode: "custom", path: realpathSync(realFile) }));
+  check("in-dir symlink → ACCEPTED, emits resolved in-dir target", deepEq(rr(aliasLink), { mode: "custom", path: realpathSync(realFile) }));
+  check("symlink whose realpath ESCAPES scan dir → default", deepEq(rr(escapeLink), { mode: "default" }));
+  check("broken symlink → default (fail-closed, no throw)", deepEq(rr(brokenLink), { mode: "default" }));
+  check("(fixture sanity) escape link realpath is outside scan dir", dirname(realpathSync(escapeLink)) !== realpathSync(scan));
+
+  // statSync follows symlinks, so confirm a real escaping target is a regular
+  // file — i.e. it is the realpath gate (not the isFile gate) that rejects it.
+  check("(fixture sanity) escape target is a regular file", statSync(escapeLink).isFile());
+
+  rmSync(tmp, { recursive: true, force: true });
 }
 
 // =====================================================================
