@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as nodePath from "path";
 import {
+  addIcon,
   FileSystemAdapter,
   Menu,
   Notice,
@@ -14,7 +15,13 @@ import {
   setIcon,
 } from "obsidian";
 import { Detector } from "./detector";
-import { elementHasSvg, pinAction, resolvePinnedIcon } from "./icon";
+import {
+  elementHasSvg,
+  pinAction,
+  resolvePinnedIcon,
+  SKILL_LAYER_ICON,
+  SKILL_LAYER_ICON_SVG,
+} from "./icon";
 import { IconPickerModal } from "./iconPicker";
 import {
   AGENT_CONFIG_SUBDIR,
@@ -88,7 +95,11 @@ export default class SkillLayerPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new SkillBrowserView(leaf, this),
     );
 
-    this.addRibbonIcon("layers", "Skill Layer: toggle skills browser", () => {
+    // Register the custom squid brand glyph once before any icon use (ribbon,
+    // view tab, empty state, file-menu action all reference SKILL_LAYER_ICON).
+    addIcon(SKILL_LAYER_ICON, SKILL_LAYER_ICON_SVG);
+
+    this.addRibbonIcon(SKILL_LAYER_ICON, "Skill Layer: toggle skills browser", () => {
       void this.toggleView();
     });
 
@@ -418,7 +429,7 @@ export default class SkillLayerPlugin extends Plugin {
       menu.addItem((item) => {
         item
           .setTitle(it.title)
-          .setIcon("layers")
+          .setIcon(SKILL_LAYER_ICON)
           .onClick(() => {
             const skill = this.getSkillById(it.skillId);
             if (skill) void this.launchSkill(skill, it.contextPath);
