@@ -44,7 +44,15 @@ directories, presents them with descriptions in one browser view, and lets you
   path), with array arguments and `shell: false`, and the invocation is passed
   as a single inert `-p` element. Any files the run writes land in the real
   vault (its `cwd`); the plugin itself writes nothing. Configure the binary
-  path, server URL, harness, and vault-anchor suffix in settings.
+  path, server URL, and vault-anchor suffix in settings.
+- **Per-skill agent ("Run with"):** each skill row has a dropdown that ties the
+  skill to a specific omnigent agent. **Default** launches `omnigent run`; a
+  built-in agent (`polly`, `debby`) launches the `omnigent <name>` subcommand; a
+  custom agent launches `omnigent run <config.yaml>` with the config path as a
+  single inert positional. Custom agents are discovered from
+  `.omnigent/agent-configs` (`*.yaml`/`*.yml`); the stored choice is re-validated
+  fail-closed at launch (built-in allowlist; config path must still exist inside
+  that directory). omnigent itself picks the harness.
 - **Open file / Copy invocation:** a row's **Open file** opens the `SKILL.md`;
   **Copy invocation** copies the invocation string to the clipboard (the
   pre-launch behavior, kept as its own action).

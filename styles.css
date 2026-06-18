@@ -122,7 +122,7 @@
   /* Don't let the actions column be compressed by the main column... */
   flex: 0 0 auto;
   /* ...and pin its width so it never resizes when a button label toggles
-     (e.g. "Add to right-click menu" → "✓ Right-click menu") or the harness
+     (e.g. "Add to right-click menu" → "✓ Right-click menu") or the agent
      value changes. Without this, the column (which stretches its children to
      the widest control) shrank every control in lockstep whenever the widest
      label got shorter. A fixed width keeps every row identical and stable. */
@@ -141,20 +141,20 @@
   color: var(--text-accent);
 }
 
-/* Per-skill harness selector dropdown in the row actions. Fills the fixed
-   column width and never shrinks, so it stays aligned with the buttons.
+/* Per-skill AGENT selector ("Run with") dropdown in the row actions. Fills the
+   fixed column width and never shrinks, so it stays aligned with the buttons.
    Center the closed-value text (text-align-last) and the option list
    (text-align) so the dropdown reads centered within the fixed column. */
-.skill-layer-harness-select {
+.skill-layer-agent-select {
   width: 100%;
   flex-shrink: 0;
   text-align: center;
   text-align-last: center;
 }
 
-/* --- Settings: Harnesses section ---------------------------------------- */
+/* --- Settings: Agents section ------------------------------------------- */
 
-.skill-layer-harness-chips {
+.skill-layer-agent-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -162,16 +162,16 @@
   align-items: center;
 }
 
-.skill-layer-harness-chip {
+.skill-layer-agent-chip {
   font-family: var(--font-monospace);
 }
 
-/* Origin labels on the read-only effective-list chips. */
-.skill-layer-harness-chip.is-builtin {
+/* Origin labels on the informational agent chips. */
+.skill-layer-agent-chip.is-builtin {
   border-style: solid;
 }
 
-.skill-layer-harness-chip.is-discovered {
+.skill-layer-agent-chip.is-custom {
   border-style: dashed;
 }
 

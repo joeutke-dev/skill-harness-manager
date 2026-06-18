@@ -10,6 +10,11 @@
 //     allowlist + fail-closed resolution, PATH augmentation.
 //   M3 additions: right-click prompt (Context line), inert-path argv shape under
 //     hostile paths, non-context prompt unchanged, menu gating by enablement.
+//   M8 per-skill AGENT selector (replaces the harness selector): fail-closed
+//     resolveAgentLaunch for each kind, built-in allowlist + custom-path
+//     containment gates, YAML scalar reader, custom-agent discovery (incl.
+//     missing-dir → zero), encode/decode, argv shape per launch form, and the
+//     migration that strips every legacy harness key.
 
 import esbuild from "esbuild";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -36,12 +41,15 @@ const {
   buildRightClickMenuItems,
   isAllowedOmnigentPath,
   resolveOmnigentBinary,
-  resolveHarnessArg,
-  isValidHarnessToken,
-  parseHarnessChoicesFromHelp,
-  effectiveHarnessTokens,
-  effectiveHarnessOptions,
-  OMNIGENT_HARNESS_SENTINEL,
+  resolveAgentLaunch,
+  isAllowedBuiltinAgent,
+  isValidCustomAgentPath,
+  parseAgentConfigYaml,
+  discoverCustomAgents,
+  encodeAgentChoice,
+  decodeAgentChoice,
+  BUILTIN_AGENTS,
+  AGENT_DEFAULT_VALUE,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
 
@@ -179,23 +187,25 @@ console.log("\n[b] Hostile path stays inert inside the single -p element");
   const flagLike = argvHostile.filter((x) => /^-/.test(x));
   check("the only flag-like argv element is `-p`", flagLike.length === 1 && flagLike[0] === "-p");
 
-  // With server+harness configured, those become their OWN elements (known
-  // flags), but the hostile path STILL stays contained in the prompt only.
+  // With a server + a custom agent configured, those become their OWN elements,
+  // but the hostile CONTEXT path STILL stays contained in the prompt only (the
+  // custom config path is a separate, distinct inert element).
+  const cfg = `${VAULT}/.omnigent/agent-configs/my-agent.yaml`;
   const argvWithFlags = buildOmnigentArgv({
     binaryPath: BIN,
     prompt: buildLaunchPrompt("transcribe-meeting", VAULT, true, hostile),
     serverUrl: "https://omni.example",
-    harness: "claude",
+    agent: { mode: "custom", path: cfg },
   });
   check(
-    "configured flags shape: [bin, run, --server, <url>, --harness, <h>, -p, prompt]",
-    deepEq(argvWithFlags.slice(0, 6), [BIN, "run", "--server", "https://omni.example", "--harness", "claude"]) &&
-      argvWithFlags[6] === "-p" &&
-      argvWithFlags.length === 8,
+    "configured shape: [bin, run, --server, <url>, <config>, -p, prompt]",
+    deepEq(argvWithFlags.slice(0, 5), [BIN, "run", "--server", "https://omni.example", cfg]) &&
+      argvWithFlags[5] === "-p" &&
+      argvWithFlags.length === 7,
   );
   check(
-    "hostile path still contained ONLY in the prompt element when flags set",
-    argvWithFlags[7].includes(hostile) && !argvWithFlags.slice(0, 7).some((x) => x.includes(hostile)),
+    "hostile context path still contained ONLY in the prompt element when flags set",
+    argvWithFlags[6].includes(hostile) && !argvWithFlags.slice(0, 6).some((x) => x.includes(hostile)),
   );
 }
 
@@ -252,233 +262,240 @@ console.log("\n[M1] Binary allowlist + fail-closed resolution + PATH augment");
   eq("augmentPath appends new + de-dupes existing", augmented, "/usr/bin:/opt/homebrew/bin:/usr/local/bin");
 }
 
+// Shared fixtures for the per-skill AGENT selector tests.
+const SCAN_DIR = `${VAULT}/.omnigent/agent-configs`;
+const GOOD_YAML = `${SCAN_DIR}/my-agent.yaml`;
+const GOOD_YML = `${SCAN_DIR}/other.yml`;
+
 // =====================================================================
-// (e) M6 per-skill harness: resolveHarnessArg fail-closed against an
-//     allowed token set.
+// (e) resolveAgentLaunch fail-closed resolution for each kind.
 // =====================================================================
-console.log("\n[e] Per-skill harness resolution (fail-closed against allowed set)");
+console.log("\n[e] Per-skill agent resolution (fail-closed for each kind)");
 {
-  eq("OMNIGENT_HARNESS_SENTINEL is `omnigent`", OMNIGENT_HARNESS_SENTINEL, "omnigent");
-  const allowed = ["claude", "claude-sdk", "codex", "pi"];
+  const yes = () => true;
+  const no = () => false;
+  const r = (stored, exists = yes) => resolveAgentLaunch(stored, { scanDir: SCAN_DIR, exists });
 
-  // token-in-set → token (regardless of the global value).
-  eq("in-set token → token (blank global)", resolveHarnessArg("codex", "", allowed), "codex");
-  eq("in-set token → token (global set)", resolveHarnessArg("codex", "openai-agents", allowed), "codex");
-  eq("in-set token → token (multi-segment)", resolveHarnessArg("claude-sdk", "", allowed), "claude-sdk");
+  // default / absent / unknown → default.
+  check("{kind:'default'} → mode default", deepEq(r({ kind: "default" }), { mode: "default" }));
+  check("undefined → mode default", deepEq(r(undefined), { mode: "default" }));
+  check("null → mode default", deepEq(r(null), { mode: "default" }));
+  check("unknown kind → mode default", deepEq(r({ kind: "bogus" }), { mode: "default" }));
+  check("non-object → mode default", deepEq(r("default"), { mode: "default" }));
 
-  // sentinel / absent / empty → the global value (today's behavior).
-  eq('sentinel "omnigent" → global value (blank)', resolveHarnessArg("omnigent", "", allowed), "");
-  eq('sentinel "omnigent" → global value (set)', resolveHarnessArg("omnigent", "codex", allowed), "codex");
-  eq("absent (undefined) → global value (blank)", resolveHarnessArg(undefined, "", allowed), "");
-  eq("absent (undefined) → global value (set)", resolveHarnessArg(undefined, "codex", allowed), "codex");
-  eq("empty string → global value (set)", resolveHarnessArg("", "codex", allowed), "codex");
+  // builtin: only the hardcoded allowlist resolves; everything else fails closed.
+  check("builtin polly → mode builtin polly", deepEq(r({ kind: "builtin", name: "polly" }), { mode: "builtin", name: "polly" }));
+  check("builtin debby → mode builtin debby", deepEq(r({ kind: "builtin", name: "debby" }), { mode: "builtin", name: "debby" }));
+  check("builtin bad name 'evil' → default (fail-closed)", deepEq(r({ kind: "builtin", name: "evil" }), { mode: "default" }));
+  check("builtin 'run' (not an agent) → default", deepEq(r({ kind: "builtin", name: "run" }), { mode: "default" }));
+  check("builtin metachar name → default", deepEq(r({ kind: "builtin", name: "polly; rm -rf" }), { mode: "default" }));
+  check("builtin case-mismatch 'Polly' → default", deepEq(r({ kind: "builtin", name: "Polly" }), { mode: "default" }));
+  check("builtin missing name → default", deepEq(r({ kind: "builtin" }), { mode: "default" }));
 
-  // valid-charset token NOT in the allowed set → global (FAIL-CLOSED).
-  eq("valid token not in set → global (fail-closed)", resolveHarnessArg("openai-agents", "codex", allowed), "codex");
-  eq("valid token not in set, blank global → blank", resolveHarnessArg("open-responses", "", allowed), "");
-
-  // invalid charset → global, even if (perversely) present in the allowed set.
-  eq("invalid charset → global (fail-closed)", resolveHarnessArg("evil; rm", "codex", allowed), "codex");
-  eq("invalid charset → blank global", resolveHarnessArg("a b", "", allowed), "");
-  check(
-    "invalid charset never returned even if in allowed set",
-    resolveHarnessArg("$(x)", "", ["$(x)"]) === "" &&
-      resolveHarnessArg("-x", "fallback", ["-x"]) === "fallback",
-  );
-  // Free-form attack strings never echo as the harness arg.
-  check(
-    "raw stored string is never echoed as the harness arg",
-    resolveHarnessArg("--server http://evil", "", allowed) === "" &&
-      resolveHarnessArg("pwned", "", allowed) === "",
-  );
+  // custom: must validate against the scan dir AND exist.
+  check("custom good .yaml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YAML }, yes), { mode: "custom", path: GOOD_YAML }));
+  check("custom good .yml + exists → mode custom", deepEq(r({ kind: "custom", path: GOOD_YML }, yes), { mode: "custom", path: GOOD_YML }));
+  check("custom good path but NOT exists → default (fail-closed)", deepEq(r({ kind: "custom", path: GOOD_YAML }, no), { mode: "default" }));
+  check("custom path OUTSIDE scan dir → default", deepEq(r({ kind: "custom", path: `${VAULT}/elsewhere/x.yaml` }, yes), { mode: "default" }));
+  check("custom path traversal escape → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/../../etc/x.yaml` }, yes), { mode: "default" }));
+  check("custom relative path → default", deepEq(r({ kind: "custom", path: "x.yaml" }, yes), { mode: "default" }));
+  check("custom wrong extension → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/x.txt` }, yes), { mode: "default" }));
+  check("custom nested subdir (not direct child) → default", deepEq(r({ kind: "custom", path: `${SCAN_DIR}/sub/x.yaml` }, yes), { mode: "default" }));
+  check("custom empty path → default", deepEq(r({ kind: "custom", path: "" }, yes), { mode: "default" }));
 }
 
 // =====================================================================
-// (f) M6 argv shape: a discovered token → `--harness <token>` as its
-//     own two elements; the prompt stays a single inert `-p` element; the
-//     default sentinel → no --harness, argv unchanged.
+// (f) argv shape for each launch form (Default / builtin / custom), with
+//     and without --server; the prompt stays a single inert `-p` element.
 // =====================================================================
-console.log("\n[f] discovered token → --harness as own two argv elements; prompt stays one -p element");
+console.log("\n[f] argv shape for each launch form (Default / polly / custom)");
 {
   const prompt = buildLaunchPrompt("transcribe-meeting", VAULT, true);
-  // Mirror the main.ts call site: resolve against the effective set, then build.
-  const allowed = ["claude", "codex", "pi"];
-  const harness = resolveHarnessArg("codex", "", allowed);
-  const argv = buildOmnigentArgv({ binaryPath: BIN, prompt, harness });
 
-  check(
-    "argv shape: [bin, run, --harness, codex, -p, prompt]",
-    deepEq(argv, [BIN, "run", "--harness", "codex", "-p", prompt]),
-  );
-  eq("argv length == 6", argv.length, 6);
-  // `--harness` and its token are TWO distinct, adjacent elements.
-  const hi = argv.indexOf("--harness");
-  check("`--harness` is its own element", hi !== -1);
-  eq("the token follows `--harness` as the next element", argv[hi + 1], "codex");
-  // The prompt is a single inert element introduced by exactly one `-p`.
-  const flagLike = argv.filter((x) => /^-/.test(x));
-  check("only flag-like elements are `--harness` and `-p`", deepEq(flagLike, ["--harness", "-p"]));
-  eq("the lone `-p` immediately precedes the prompt", argv[argv.length - 2], "-p");
-  eq("prompt is the final single element", argv[argv.length - 1], prompt);
-  check("the prompt is not split (no metachar leak into other elements)", !argv.slice(0, -1).some((x) => x === prompt && x !== argv[argv.length - 1]));
+  // Default → `omnigent run -p <prompt>` (also the no-agent fallback).
+  const argvDefault = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "default" } });
+  check("Default shape: [bin, run, -p, prompt]", deepEq(argvDefault, [BIN, "run", "-p", prompt]));
+  check("omitting agent == Default shape", deepEq(buildOmnigentArgv({ binaryPath: BIN, prompt }), [BIN, "run", "-p", prompt]));
 
-  // Fail-closed default (sentinel, blank global) → no --harness, argv unchanged.
-  const argvDefault = buildOmnigentArgv({
-    binaryPath: BIN,
-    prompt,
-    harness: resolveHarnessArg("omnigent", "", allowed),
-  });
-  check("default choice → no --harness token", argvDefault.indexOf("--harness") === -1);
-  check(
-    "default choice argv shape unchanged: [bin, run, -p, prompt]",
-    deepEq(argvDefault, [BIN, "run", "-p", prompt]),
-  );
+  // Built-in → `omnigent <name> -p <prompt>` (subcommand form, NOT run).
+  const argvPolly = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "builtin", name: "polly" } });
+  check("polly shape: [bin, polly, -p, prompt]", deepEq(argvPolly, [BIN, "polly", "-p", prompt]));
+  check("built-in form does NOT contain `run`", argvPolly.indexOf("run") === -1);
+  const argvDebby = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "builtin", name: "debby" } });
+  check("debby shape: [bin, debby, -p, prompt]", deepEq(argvDebby, [BIN, "debby", "-p", prompt]));
+
+  // Custom → `omnigent run <config> -p <prompt>`; config is a single inert element.
+  const argvCustom = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "custom", path: GOOD_YAML } });
+  check("custom shape: [bin, run, <config>, -p, prompt]", deepEq(argvCustom, [BIN, "run", GOOD_YAML, "-p", prompt]));
+  eq("custom config is a single argv element after run", argvCustom[2], GOOD_YAML);
+  check("custom config never becomes a flag (absolute path)", !/^-/.test(argvCustom[2]));
+
+  // No `--harness` is EVER emitted (omnigent picks the harness).
+  check("no --harness token in any form", ![argvDefault, argvPolly, argvCustom].some((a) => a.includes("--harness")));
+
+  // With --server set, the flag is its own two elements in every form; the
+  // prompt stays the single final `-p` element.
+  const url = "https://omni.example";
+  const sd = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "default" } });
+  const sp = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "builtin", name: "polly" } });
+  const sc = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "custom", path: GOOD_YAML } });
+  check("Default+server: [bin, run, --server, url, -p, prompt]", deepEq(sd, [BIN, "run", "--server", url, "-p", prompt]));
+  check("polly+server: [bin, polly, --server, url, -p, prompt]", deepEq(sp, [BIN, "polly", "--server", url, "-p", prompt]));
+  check("custom+server: [bin, run, --server, url, <config>, -p, prompt]", deepEq(sc, [BIN, "run", "--server", url, GOOD_YAML, "-p", prompt]));
+  for (const [n, a] of [["Default", sd], ["polly", sp], ["custom", sc]]) {
+    eq(`${n}: prompt is the final element`, a[a.length - 1], prompt);
+    eq(`${n}: the lone -p precedes the prompt`, a[a.length - 2], "-p");
+  }
 }
 
 // =====================================================================
-// (h) M6 isValidHarnessToken charset gate.
+// (h) Allowlist + custom-path validity gates.
 // =====================================================================
-console.log("\n[h] isValidHarnessToken strict charset");
+console.log("\n[h] isAllowedBuiltinAgent + isValidCustomAgentPath gates");
 {
-  check("accept claude", isValidHarnessToken("claude"));
-  check("accept claude-sdk", isValidHarnessToken("claude-sdk"));
-  check("accept openai-agents", isValidHarnessToken("openai-agents"));
-  check("accept open-responses", isValidHarnessToken("open-responses"));
-  check("accept dotted/underscored token", isValidHarnessToken("a.b_c-1"));
-  check('reject "" (empty)', !isValidHarnessToken(""));
-  check('reject " x" (leading space)', !isValidHarnessToken(" x"));
-  check('reject "-x" (leading dash)', !isValidHarnessToken("-x"));
-  check('reject "a b" (space)', !isValidHarnessToken("a b"));
-  check('reject "a;b" (metachar)', !isValidHarnessToken("a;b"));
-  check('reject "$(x)" (command subst)', !isValidHarnessToken("$(x)"));
-  check("reject \"a'b\" (quote)", !isValidHarnessToken("a'b"));
+  check("BUILTIN_AGENTS == [polly, debby]", deepEq([...BUILTIN_AGENTS], ["polly", "debby"]));
+  check("allow polly", isAllowedBuiltinAgent("polly"));
+  check("allow debby", isAllowedBuiltinAgent("debby"));
+  check("reject 'run'", !isAllowedBuiltinAgent("run"));
+  check("reject 'evil'", !isAllowedBuiltinAgent("evil"));
+  check("reject '' (empty)", !isAllowedBuiltinAgent(""));
+  check("reject case-variant 'Polly'", !isAllowedBuiltinAgent("Polly"));
+  check("reject non-string", !isAllowedBuiltinAgent(123) && !isAllowedBuiltinAgent(undefined));
+
+  check("accept good .yaml direct child", isValidCustomAgentPath(GOOD_YAML, SCAN_DIR));
+  check("accept good .yml direct child", isValidCustomAgentPath(GOOD_YML, SCAN_DIR));
+  check("accept .YAML (case-insensitive ext)", isValidCustomAgentPath(`${SCAN_DIR}/A.YAML`, SCAN_DIR));
+  check("reject path OUTSIDE scan dir", !isValidCustomAgentPath(`${VAULT}/x.yaml`, SCAN_DIR));
+  check("reject traversal escape", !isValidCustomAgentPath(`${SCAN_DIR}/../../etc/x.yaml`, SCAN_DIR));
+  check("reject nested subdir (direct child only)", !isValidCustomAgentPath(`${SCAN_DIR}/sub/x.yaml`, SCAN_DIR));
+  check("reject relative path", !isValidCustomAgentPath("x.yaml", SCAN_DIR));
+  check("reject wrong extension", !isValidCustomAgentPath(`${SCAN_DIR}/x.txt`, SCAN_DIR));
+  check("reject empty path", !isValidCustomAgentPath("", SCAN_DIR));
+  check("reject empty scan dir", !isValidCustomAgentPath(GOOD_YAML, ""));
+  check("reject non-string path", !isValidCustomAgentPath(undefined, SCAN_DIR));
 }
 
 // =====================================================================
-// (i) M6 parseHarnessChoicesFromHelp on the real `omnigent run --help` line.
+// (i) parseAgentConfigYaml: top-level name/description only, safe scalars.
 // =====================================================================
-console.log("\n[i] parseHarnessChoicesFromHelp on the real help excerpt");
+console.log("\n[i] parseAgentConfigYaml top-level scalar reader");
 {
-  const SIX = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
-  // The exact grounding line.
-  const oneLine =
-    "Harness to use: 'claude' (alias for 'claude-sdk'), 'claude-sdk', 'codex', 'openai-agents', 'open-responses', or 'pi'.";
-  // ...as it actually appears after `--harness` in --help, wrapped across lines
-  // and surrounded by other options.
-  const HELP = [
-    "Usage: omnigent run [OPTIONS]",
-    "",
-    "Options:",
-    "  --server <URL>     Server to use.",
-    "  --harness <NAME>   " + "Harness to use: 'claude' (alias for 'claude-sdk'),",
-    "                     'claude-sdk', 'codex', 'openai-agents',",
-    "                     'open-responses', or 'pi'.",
-    "  -p, --prompt <P>   The prompt to run.",
-  ].join("\n");
+  const basic = parseAgentConfigYaml("name: my-agent\ndescription: Does things\n");
+  check("reads name + description", deepEq(basic, { name: "my-agent", description: "Does things" }));
 
-  check(
-    "single-line excerpt → exactly the 6 tokens (alias deduped, not double-counted)",
-    deepEq(parseHarnessChoicesFromHelp("--harness <NAME>  " + oneLine), SIX),
-  );
-  check(
-    "wrapped multi-line --help region → exactly the same 6 tokens",
-    deepEq(parseHarnessChoicesFromHelp(HELP), SIX),
-  );
-  // The REAL `omnigent run --help` (Click) hyphen-wraps `'open-responses'`
-  // across two lines; the parser must rejoin it, not drop the token.
-  const REAL = [
-    "  --tools TEXT          Client-side tool set name.",
-    "  --harness TEXT        Harness to use: 'claude' (alias for 'claude-sdk'),",
-    "                        'claude-sdk', 'codex', 'openai-agents', 'open-",
-    "                        responses', or 'pi'. Without AGENT, launches that",
-    "                        harness directly.",
-    "  --model TEXT          Model to use for the agent.",
-  ].join("\n");
-  check(
-    "real hyphen-wrapped --help → exactly the 6 tokens (open-responses rejoined)",
-    deepEq(parseHarnessChoicesFromHelp(REAL), SIX),
-  );
-  check("the `--server` line's text does not leak into harness tokens", !parseHarnessChoicesFromHelp(HELP).includes("URL"));
-  eq("no `--harness` present → empty", parseHarnessChoicesFromHelp("Usage: omnigent run\n  --server <URL>").length, 0);
-  eq("empty input → empty", parseHarnessChoicesFromHelp("").length, 0);
+  const quoted = parseAgentConfigYaml(`name: "quoted name"\ndescription: 'single q'\n`);
+  check("strips double + single quotes", deepEq(quoted, { name: "quoted name", description: "single q" }));
+
+  const commented = parseAgentConfigYaml("name: agent # trailing comment\n");
+  eq("drops inline comment on unquoted scalar", commented.name, "agent");
+
+  const nested = parseAgentConfigYaml("tools:\n  name: nested-ignored\nfoo: bar\n");
+  check("ignores nested (indented) keys", deepEq(nested, { name: null, description: null }));
+
+  const firstWins = parseAgentConfigYaml("name: first\nname: second\n");
+  eq("first top-level name wins", firstWins.name, "first");
+
+  const missingName = parseAgentConfigYaml("description: only a description\n");
+  check("missing name → null (caller falls back to filename stem)", missingName.name === null && missingName.description === "only a description");
+
+  check("empty text → both null", deepEq(parseAgentConfigYaml(""), { name: null, description: null }));
+  check("non-string → both null", deepEq(parseAgentConfigYaml(undefined), { name: null, description: null }));
 }
 
 // =====================================================================
-// (j) M7 effective harness list: dedupe + order (builtins, discovered ONLY —
-//     no custom term) and the sentinel-led option list.
+// (j) discoverCustomAgents: extension filter, name fallback, sorting,
+//     missing dir → zero agents, isFile gating. (fs callbacks injected.)
 // =====================================================================
-console.log("\n[j] effectiveHarnessTokens / effectiveHarnessOptions dedupe + order");
+console.log("\n[j] discoverCustomAgents (injected fs)");
 {
-  const builtins = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
-  const discovered = ["claude", "codex", "newharness"]; // overlaps + one new
-
-  const tokens = effectiveHarnessTokens(builtins, discovered);
-
-  check(
-    "tokens = builtins, then new discovered (deduped, in order)",
-    deepEq(tokens, [
-      "claude",
-      "claude-sdk",
-      "codex",
-      "openai-agents",
-      "open-responses",
-      "pi",
-      "newharness",
-    ]),
-  );
-  check("no duplicate tokens", new Set(tokens).size === tokens.length);
-  check("the `omnigent` sentinel is NOT a token", !tokens.includes("omnigent"));
-
-  const opts = effectiveHarnessOptions(builtins, discovered);
-  eq("options are sentinel-led", opts[0], OMNIGENT_HARNESS_SENTINEL);
-  check("options = sentinel + tokens", deepEq(opts, [OMNIGENT_HARNESS_SENTINEL, ...tokens]));
-
-  // Empty discovered → just the builtins (dropdown never empty).
-  check(
-    "empty discovered → builtins only",
-    deepEq(effectiveHarnessTokens(builtins, []), builtins),
-  );
-}
-
-// =====================================================================
-// (k) M7 migration: a leftover `customHarnesses` in loaded settings is
-//     ignored — it is stripped on load and can NEVER widen the allowed set.
-// =====================================================================
-console.log("\n[k] leftover customHarnesses is ignored (no longer widens the allowed set)");
-{
-  const builtins = ["claude", "claude-sdk", "codex", "openai-agents", "open-responses", "pi"];
-
-  // Mirror main.ts loadSettings: merge a stale data.json (still carrying a
-  // `customHarnesses` array AND a per-skill token that was a custom value),
-  // then strip the dead key.
-  const DEFAULTS = { discoveredHarnesses: [], skillHarness: {} };
-  const persisted = {
-    discoveredHarnesses: ["newharness"],
-    skillHarness: { "/abs/skill.md": "mything" }, // a formerly-custom token
-    customHarnesses: ["mything"], // legacy key from an older install
+  const files = {
+    [`${SCAN_DIR}/b.yaml`]: "name: Beta\ndescription: the beta\n",
+    [`${SCAN_DIR}/a.yml`]: "name: Alpha\n",
+    [`${SCAN_DIR}/c.yaml`]: "description: no name here\n", // → stem fallback
+    [`${SCAN_DIR}/notes.txt`]: "name: ignored\n", // wrong ext → skipped
   };
-  const merged = Object.assign({}, DEFAULTS, persisted);
-  delete merged.customHarnesses;
+  const readdir = (dir) => {
+    if (dir !== SCAN_DIR) throw new Error("ENOENT");
+    return ["b.yaml", "a.yml", "c.yaml", "notes.txt"];
+  };
+  const readFile = (p) => {
+    if (!(p in files)) throw new Error("ENOENT");
+    return files[p];
+  };
 
-  check("customHarnesses is stripped on load", merged.customHarnesses === undefined);
-
-  // The effective set is now built only from builtins ∪ discovered — the
-  // formerly-custom token cannot reach it.
-  const tokens = effectiveHarnessTokens(builtins, merged.discoveredHarnesses);
-  check("discovered token still present", tokens.includes("newharness"));
-  check("formerly-custom 'mything' NOT in the effective set", !tokens.includes("mything"));
-
-  // And a per-skill token that was custom now fails closed to the global
-  // default at launch (resolveHarnessArg, allowed = the custom-free set).
-  eq(
-    "formerly-custom per-skill token → global fallback (blank)",
-    resolveHarnessArg(merged.skillHarness["/abs/skill.md"], "", tokens),
-    "",
+  const agents = discoverCustomAgents({ dir: SCAN_DIR, readdir, readFile });
+  check(
+    "sorted by filename, .txt filtered out",
+    deepEq(agents.map((a) => a.path), [`${SCAN_DIR}/a.yml`, `${SCAN_DIR}/b.yaml`, `${SCAN_DIR}/c.yaml`]),
   );
-  eq(
-    "formerly-custom per-skill token → global fallback (set)",
-    resolveHarnessArg(merged.skillHarness["/abs/skill.md"], "codex", tokens),
-    "codex",
+  check("name from yaml", agents.find((a) => a.path.endsWith("a.yml")).name === "Alpha");
+  check("description carried through", agents.find((a) => a.path.endsWith("b.yaml")).description === "the beta");
+  check("missing name → filename stem fallback", agents.find((a) => a.path.endsWith("c.yaml")).name === "c");
+  check("agent with no description omits the field", agents.find((a) => a.path.endsWith("a.yml")).description === undefined);
+
+  // Missing directory → zero agents (readdir throws), never an error.
+  const missing = discoverCustomAgents({ dir: `${VAULT}/.omnigent/does-not-exist`, readdir, readFile });
+  eq("missing dir → zero agents", missing.length, 0);
+  // Null dir (no vault base) → zero agents.
+  eq("null dir → zero agents", discoverCustomAgents({ dir: null, readdir, readFile }).length, 0);
+
+  // isFile gate: a directory entry that is not a file is skipped.
+  const isFile = (p) => !p.endsWith("a.yml");
+  const filtered = discoverCustomAgents({ dir: SCAN_DIR, readdir, readFile, isFile });
+  check("isFile=false entries are skipped", !filtered.some((a) => a.path.endsWith("a.yml")) && filtered.length === 2);
+}
+
+// =====================================================================
+// (k) encode/decode round-trip + migration strips ALL old harness keys.
+// =====================================================================
+console.log("\n[k] agent encode/decode + migration strips legacy harness keys");
+{
+  // Encode / decode the flat <select> value.
+  eq("encode null → default", encodeAgentChoice(null), AGENT_DEFAULT_VALUE);
+  eq("encode {default} → default", encodeAgentChoice({ kind: "default" }), AGENT_DEFAULT_VALUE);
+  eq("encode builtin", encodeAgentChoice({ kind: "builtin", name: "polly" }), "builtin:polly");
+  eq("encode custom", encodeAgentChoice({ kind: "custom", path: GOOD_YAML }), `custom:${GOOD_YAML}`);
+  check("decode default", deepEq(decodeAgentChoice("default"), { kind: "default" }));
+  check("decode builtin", deepEq(decodeAgentChoice("builtin:polly"), { kind: "builtin", name: "polly" }));
+  check("decode custom (path with no truncation)", deepEq(decodeAgentChoice(`custom:${GOOD_YAML}`), { kind: "custom", path: GOOD_YAML }));
+  check("decode unknown → default", deepEq(decodeAgentChoice("garbage"), { kind: "default" }));
+  // Round-trip every kind.
+  for (const v of [{ kind: "default" }, { kind: "builtin", name: "debby" }, { kind: "custom", path: GOOD_YML }]) {
+    check(`round-trip ${JSON.stringify(v)}`, deepEq(decodeAgentChoice(encodeAgentChoice(v)), v));
+  }
+
+  // Mirror main.ts loadSettings migration: a stale data.json carrying every
+  // legacy harness key (global + per-skill machinery) gets them stripped, while
+  // everything else — including the new skillAgent map — is preserved.
+  const persisted = {
+    skillHarness: { "/abs/skill.md": "codex" },
+    discoveredHarnesses: ["newharness"],
+    customHarnesses: ["mything"],
+    omnigentHarness: "claude",
+    skillAgent: { "/abs/skill.md": { kind: "builtin", name: "polly" } },
+    pinnedSkillIds: ["/abs/skill.md"],
+    invocationTemplate: "/{name}",
+  };
+  const merged = Object.assign({}, persisted);
+  for (const key of ["skillHarness", "discoveredHarnesses", "customHarnesses", "omnigentHarness"]) {
+    delete merged[key];
+  }
+  check("skillHarness stripped", merged.skillHarness === undefined);
+  check("discoveredHarnesses stripped", merged.discoveredHarnesses === undefined);
+  check("customHarnesses stripped", merged.customHarnesses === undefined);
+  check("omnigentHarness stripped", merged.omnigentHarness === undefined);
+  check("skillAgent preserved", deepEq(merged.skillAgent, { "/abs/skill.md": { kind: "builtin", name: "polly" } }));
+  check("unrelated settings preserved", deepEq(merged.pinnedSkillIds, ["/abs/skill.md"]) && merged.invocationTemplate === "/{name}");
+
+  // A skill that previously had a harness selected reverts to the Default agent
+  // (it has no skillAgent entry → resolveAgentLaunch yields mode default).
+  const reverted = Object.assign({}, persisted);
+  for (const key of ["skillHarness", "discoveredHarnesses", "customHarnesses", "omnigentHarness", "skillAgent"]) {
+    delete reverted[key];
+  }
+  check(
+    "former harness skill with no agent entry → Default",
+    deepEq(resolveAgentLaunch(reverted.skillAgent?.["/abs/skill.md"], { scanDir: SCAN_DIR, exists: () => true }), { mode: "default" }),
   );
 }
 

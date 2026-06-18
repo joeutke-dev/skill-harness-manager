@@ -17,16 +17,20 @@ import { Detector } from "./detector";
 import { elementHasSvg, pinAction, resolvePinnedIcon } from "./icon";
 import { IconPickerModal } from "./iconPicker";
 import {
+  AGENT_CONFIG_SUBDIR,
   augmentPath,
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
-  effectiveHarnessTokens,
-  isValidHarnessToken,
-  OMNIGENT_HARNESS_SENTINEL,
-  parseHarnessChoicesFromHelp,
-  resolveHarnessArg,
+  CustomAgent,
+  decodeAgentChoice,
+  discoverCustomAgents,
+  encodeAgentChoice,
+  isAllowedBuiltinAgent,
+  isValidCustomAgentPath,
+  resolveAgentLaunch,
   resolveOmnigentBinary,
+  SkillAgent,
 } from "./launch";
 import {
   coerceFrontmatterTags,
@@ -36,12 +40,7 @@ import {
 } from "./parse";
 import { SkillLayerSettingTab } from "./settingsTab";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
-import {
-  BUILTIN_HARNESSES,
-  DEFAULT_SETTINGS,
-  Skill,
-  SkillLayerSettings,
-} from "./types";
+import { DEFAULT_SETTINGS, Skill, SkillLayerSettings } from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
 import { decideToggleAction } from "./viewToggle";
 
@@ -63,6 +62,9 @@ export default class SkillLayerPlugin extends Plugin {
   private pinnedCommandIds = new Map<string, string>();
   /** Local command ids currently in use, to guarantee no id collisions. */
   private usedCommandLocalIds = new Set<string>();
+
+  /** Cached custom agents discovered from `<vault>/.omnigent/agent-configs`. */
+  private customAgents: CustomAgent[] = [];
 
   private rescanTimer: number | null = null;
 
@@ -145,15 +147,22 @@ export default class SkillLayerPlugin extends Plugin {
       DEFAULT_SETTINGS,
       (await this.loadData()) as Partial<SkillLayerSettings> | null,
     );
-    // Migration (M7): user-defined custom harnesses were removed. A persisted
-    // `customHarnesses` array from an older install is ignored (it can no longer
-    // widen the effective allowed set) and stripped here so the next
-    // saveSettings writes a clean data.json. Any per-skill token that was a
-    // formerly-custom value is left as-is in `skillHarness`: it is simply no
-    // longer in the allowed set, so the dropdown shows that skill as the default
-    // and `resolveHarnessArg` fails closed to the global default at launch.
-    delete (this.settings as unknown as Record<string, unknown>)
-      .customHarnesses;
+    // Migration: the harness selector (the M1 global `--harness` plus the M4–M7
+    // per-skill harness machinery) is replaced by the per-skill AGENT selector;
+    // omnigent now picks the harness itself. Strip every legacy harness key
+    // fail-closed (a plain `delete` cannot throw) so a stale data.json can never
+    // reintroduce harness behavior. A skill that had a harness selected simply
+    // reverts to the Default agent (it has no `skillAgent` entry). Everything
+    // else in data.json is preserved by the Object.assign above.
+    const raw = this.settings as unknown as Record<string, unknown>;
+    for (const key of [
+      "skillHarness",
+      "discoveredHarnesses",
+      "customHarnesses",
+      "omnigentHarness",
+    ]) {
+      delete raw[key];
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -176,6 +185,8 @@ export default class SkillLayerPlugin extends Plugin {
   /** Re-run detection and refresh any open browser view. */
   async rescan(notify = false): Promise<void> {
     this.skills = await this.detector.scan();
+    // Keep the custom-agent dropdown in step with on-disk config changes.
+    this.scanCustomAgents();
     for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
       const view = leaf.view;
       if (view instanceof SkillBrowserView) view.refresh();
@@ -264,151 +275,99 @@ export default class SkillLayerPlugin extends Plugin {
     );
   }
 
-  // --- Per-skill harness selector ----------------------------------------
+  // --- Per-skill AGENT selector ------------------------------------------
   /**
-   * The deduped effective harness TOKEN list (no "omnigent" sentinel): built-ins
-   * ∪ discovered. Populated ONLY from omnigent — the shipped built-ins and
-   * whatever `discoverHarnesses` surfaces; there are no user-defined entries.
-   * This is BOTH the allowed set a per-skill token is validated against at launch
-   * and the source of the dropdown options.
+   * The absolute custom-agent config directory (`<vault>/.omnigent/agent-configs`),
+   * or null when the vault base path can't be resolved (e.g. mobile). This is
+   * BOTH the scan dir for discovery and the containment boundary every stored
+   * custom path is re-validated against at launch.
    */
-  effectiveHarnessTokens(): string[] {
-    return effectiveHarnessTokens(
-      BUILTIN_HARNESSES,
-      this.settings.discoveredHarnesses,
-    );
+  agentConfigDir(): string | null {
+    const base = this.detector.vaultBasePath();
+    if (!base) return null;
+    return nodePath.join(base, AGENT_CONFIG_SUBDIR);
+  }
+
+  /** The cached, discovered custom agents (display metadata for the dropdown). */
+  getCustomAgents(): CustomAgent[] {
+    return this.customAgents;
   }
 
   /**
-   * The stored harness choice (token) for a skill, defaulting to the "omnigent"
-   * sentinel. If the stored token is no longer in the effective set, fall back
-   * to the sentinel so the UI never shows an orphaned selection (launch already
-   * fails closed independently via `resolveHarnessArg`).
+   * Re-scan `<vault>/.omnigent/agent-configs` for `*.yaml`/`*.yml` custom agents
+   * into the cache (no view refresh). A missing directory yields zero agents (no
+   * error). All filesystem access is wrapped so this never throws.
    */
-  harnessFor(id: string): string {
-    const stored = this.settings.skillHarness[id];
-    if (!stored || stored === OMNIGENT_HARNESS_SENTINEL) {
-      return OMNIGENT_HARNESS_SENTINEL;
-    }
-    return this.effectiveHarnessTokens().includes(stored)
-      ? stored
-      : OMNIGENT_HARNESS_SENTINEL;
-  }
-
-  /**
-   * Persist a skill's harness choice (token). The default sentinel "omnigent"
-   * (or any value not in the effective set) deletes the key so data.json stays
-   * clean; a valid in-set token is stored. Uses the same saveSettings path as
-   * the icon/right-click controls.
-   */
-  async setSkillHarness(id: string, choice: string): Promise<void> {
-    const valid =
-      choice !== OMNIGENT_HARNESS_SENTINEL &&
-      isValidHarnessToken(choice) &&
-      this.effectiveHarnessTokens().includes(choice);
-    if (valid) {
-      this.settings.skillHarness[id] = choice;
-    } else {
-      delete this.settings.skillHarness[id];
-    }
-    await this.saveSettings();
-  }
-
-  /**
-   * Discover harness tokens by spawning the allowlisted omnigent binary with the
-   * FIXED args `["run", "--help"]` (shell:false, NO user input in argv ever),
-   * capturing stdout, and parsing it with `parseHarnessChoicesFromHelp`. Valid
-   * tokens are cached (deduped) into `settings.discoveredHarnesses`. Fails closed:
-   * on missing binary / timeout / empty parse it leaves the existing discovered
-   * list untouched and surfaces a Notice (built-ins still cover the dropdown).
-   * Returns the count of discovered tokens (0 on any failure). 10s timeout.
-   */
-  async discoverHarnesses(): Promise<number> {
-    if (!this.detector.canScanExternal()) {
-      new Notice("Skill Layer: harness discovery requires the desktop app.");
-      return 0;
-    }
-    const resolution = resolveOmnigentBinary({
-      override: this.settings.omnigentBinaryPath,
-      homedir: os.homedir(),
-      exists: (p) => fs.existsSync(p),
+  private scanCustomAgents(): void {
+    this.customAgents = discoverCustomAgents({
+      dir: this.agentConfigDir(),
+      readdir: (d) => fs.readdirSync(d),
+      readFile: (p) => fs.readFileSync(p, "utf8"),
+      isFile: (p) => {
+        try {
+          return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      },
     });
-    if (resolution.status !== "ok") {
-      new Notice(
-        resolution.status === "invalid-override"
-          ? 'Skill Layer: invalid omnigent binary path (must be an absolute path to a binary named "omnigent"). Discovery aborted.'
-          : "Skill Layer: omnigent binary not found; cannot discover harnesses. Built-ins still available.",
-      );
-      return 0;
+  }
+
+  /** Re-scan custom agents AND refresh open views (the Settings "Refresh" path). */
+  refreshCustomAgents(): void {
+    this.scanCustomAgents();
+    this.refreshViews();
+  }
+
+  /**
+   * The <select> option value reflecting a skill's stored agent choice, used to
+   * preselect the dropdown. Falls back to Default when the stored value is not a
+   * currently-selectable option (unknown built-in, or a custom path no longer in
+   * the discovered set) so the UI never shows an orphaned selection — launch
+   * already fails closed independently via `resolveAgentLaunch`.
+   */
+  agentOptionValue(id: string): string {
+    const stored = this.settings.skillAgent[id];
+    if (!stored || typeof stored !== "object") return encodeAgentChoice(null);
+    if (stored.kind === "builtin") {
+      return isAllowedBuiltinAgent(stored.name)
+        ? encodeAgentChoice(stored)
+        : encodeAgentChoice(null);
     }
-    const binaryPath = resolution.path;
+    if (stored.kind === "custom") {
+      return this.customAgents.some((a) => a.path === stored.path)
+        ? encodeAgentChoice(stored)
+        : encodeAgentChoice(null);
+    }
+    return encodeAgentChoice(null);
+  }
 
-    const env = {
-      ...process.env,
-      PATH: augmentPath(process.env.PATH, [
-        "/usr/local/bin",
-        `${os.homedir()}/.local/bin`,
-        "/opt/homebrew/bin",
-      ]),
-    };
-
-    const stdout = await new Promise<string | null>((resolve) => {
-      let child;
-      try {
-        // FIXED argv — no user input is ever interpolated here. shell:false.
-        child = spawn(binaryPath, ["run", "--help"], {
-          env,
-          shell: false,
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-      } catch (err) {
-        console.error("[skill-layer] harness discovery spawn threw:", err);
-        resolve(null);
-        return;
+  /**
+   * Persist a skill's agent choice from the dropdown's encoded option value. The
+   * value is decoded then VALIDATED before storing: a built-in name must be in
+   * the hardcoded allowlist; a custom path must pass `isValidCustomAgentPath`
+   * against the scan dir AND be one of the currently-discovered agents. Anything
+   * else (incl. Default) deletes the key so data.json stays clean. Launch
+   * re-validates independently, so storage is defense-in-depth, not the gate.
+   */
+  async setSkillAgent(id: string, encoded: string): Promise<void> {
+    const choice = decodeAgentChoice(encoded);
+    let store: SkillAgent | null = null;
+    if (choice.kind === "builtin" && isAllowedBuiltinAgent(choice.name)) {
+      store = { kind: "builtin", name: choice.name };
+    } else if (choice.kind === "custom") {
+      const dir = this.agentConfigDir();
+      const known = this.customAgents.some((a) => a.path === choice.path);
+      if (dir && known && isValidCustomAgentPath(choice.path, dir)) {
+        store = { kind: "custom", path: choice.path };
       }
-      let out = "";
-      let settled = false;
-      const finish = (value: string | null) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = window.setTimeout(() => {
-        child.kill();
-        finish(null);
-      }, 10000);
-      // Bound captured output so a misbehaving binary can't balloon memory.
-      child.stdout?.on("data", (chunk: Buffer) => {
-        out = (out + chunk.toString()).slice(0, 65536);
-      });
-      child.on("error", (err) => {
-        console.error("[skill-layer] harness discovery error:", err);
-        finish(null);
-      });
-      child.on("exit", () => finish(out));
-    });
-
-    if (stdout === null) {
-      new Notice(
-        "Skill Layer: harness discovery failed (binary error or timeout). Built-ins still available.",
-      );
-      return 0;
     }
-
-    const tokens = parseHarnessChoicesFromHelp(stdout).filter((t) =>
-      isValidHarnessToken(t),
-    );
-    if (tokens.length === 0) {
-      new Notice(
-        "Skill Layer: no harnesses parsed from omnigent --help. Built-ins still available.",
-      );
-      return 0;
+    if (store) {
+      this.settings.skillAgent[id] = store;
+    } else {
+      delete this.settings.skillAgent[id];
     }
-    // Dedupe (preserve order) before caching.
-    this.settings.discoveredHarnesses = Array.from(new Set(tokens));
     await this.saveSettings();
-    return this.settings.discoveredHarnesses.length;
   }
 
   /**
@@ -731,21 +690,21 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.appendVaultAnchor,
       contextPath,
     );
-    // Per-skill harness, resolved fail-closed against the effective allowed set
-    // (built-ins ∪ discovered): the stored choice reaches --harness ONLY
-    // if it passes isValidHarnessToken AND is a member of that set. The sentinel
-    // "omnigent"/absent/any unrecognized value preserves today's behavior (the
-    // global, usually blank → omit --harness). No free-form text ever flows here.
-    const harness = resolveHarnessArg(
-      this.settings.skillHarness[skill.id],
-      this.settings.omnigentHarness,
-      this.effectiveHarnessTokens(),
-    );
+    // Per-skill AGENT, resolved fail-closed: a built-in name reaches argv as an
+    // omnigent SUBCOMMAND only if it is in the hardcoded allowlist; a custom
+    // config path reaches argv as a single inert positional after `run` only if
+    // it still exists inside the scan dir and ends in .yaml/.yml. Anything else
+    // (absent / unknown kind / bad name / bad path) → the Default agent
+    // (`omnigent run …`). No display label/description ever flows to argv.
+    const agent = resolveAgentLaunch(this.settings.skillAgent[skill.id], {
+      scanDir: this.agentConfigDir() ?? "",
+      exists: (p) => fs.existsSync(p),
+    });
     const argv = buildOmnigentArgv({
       binaryPath,
       prompt,
       serverUrl: this.settings.omnigentServerUrl,
-      harness,
+      agent,
     });
 
     // GUI apps inherit a thin launchd PATH; the binary execs sub-tools, so

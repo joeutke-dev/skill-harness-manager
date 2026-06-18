@@ -1,22 +1,6 @@
 // Shared types for the Skill Layer plugin.
 
-/**
- * The harness tokens omnigent ships built-in, per `omnigent run --help`
- * (`'claude'` is documented as an alias for `'claude-sdk'`). These always
- * populate the per-skill selector even before a `--help` discovery has run, so
- * the dropdown is never empty. The "omnigent" DEFAULT is a SENTINEL (omit
- * `--harness` entirely) — NOT a token — and lives separately
- * (`OMNIGENT_HARNESS_SENTINEL` in launch.ts), so it is intentionally absent
- * here. Plugin-local state only — NEVER written into any SKILL.md.
- */
-export const BUILTIN_HARNESSES = [
-  "claude",
-  "claude-sdk",
-  "codex",
-  "openai-agents",
-  "open-responses",
-  "pi",
-] as const;
+import type { SkillAgent } from "./launch";
 
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
@@ -89,21 +73,16 @@ export interface SkillLayerSettings {
    */
   skillIcons: Record<string, string>;
   /**
-   * Per-skill harness choice, keyed by skill id (the same stable path used in
-   * `skillIcons`/`pinnedSkillIds`). The value is a harness TOKEN (e.g. "codex");
-   * absent key or the sentinel "omnigent" = default (preserves today's behavior,
-   * usually omitting `--harness`). At launch the stored token is re-validated by
-   * `resolveHarnessArg` against the effective allowed set and the strict charset,
-   * so any unrecognized or stale value resolves fail-closed to the global
-   * default. Plugin-local state only — never written into any SKILL.md.
+   * Per-skill AGENT choice, keyed by skill id (the same stable path used in
+   * `skillIcons`/`pinnedSkillIds`). The value is a discriminated object
+   * (`{kind:'default'}` | `{kind:'builtin',name}` | `{kind:'custom',path}`); an
+   * absent key = the Default agent. At launch the stored value is re-validated
+   * fail-closed by `resolveAgentLaunch` (built-in name must be in the hardcoded
+   * allowlist; custom path must still exist inside the scan dir and end in
+   * .yaml/.yml), so any unrecognized or stale value resolves to Default. Plugin-
+   * local state only — never written into any SKILL.md.
    */
-  skillHarness: Record<string, string>;
-  /**
-   * Harness tokens cached from the last successful `omnigent run --help` parse
-   * (see `discoverHarnesses`). Refreshed on demand from Settings; never seeded
-   * from user input. Plugin-local state only — never written into any SKILL.md.
-   */
-  discoveredHarnesses: string[];
+  skillAgent: Record<string, SkillAgent>;
   /**
    * Template for the skill invocation string (the `-p` prompt for launch, and
    * the "Copy invocation" clipboard text). Placeholders: {name} {path} {label}.
@@ -113,8 +92,6 @@ export interface SkillLayerSettings {
   omnigentBinaryPath: string;
   /** Omnigent server URL; blank = local daemon (omit --server). */
   omnigentServerUrl: string;
-  /** Harness override; blank = omnigent default (omit --harness). */
-  omnigentHarness: string;
   /** Append the generic vault-anchor instruction to the launch prompt. */
   appendVaultAnchor: boolean;
   /**
@@ -133,11 +110,9 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   pinnedSkillIds: [],
   rightClickSkillIds: [],
   skillIcons: {},
-  skillHarness: {},
-  discoveredHarnesses: [],
+  skillAgent: {},
   invocationTemplate: "/{name}",
   omnigentBinaryPath: "",
   omnigentServerUrl: "",
-  omnigentHarness: "",
   appendVaultAnchor: true,
 };

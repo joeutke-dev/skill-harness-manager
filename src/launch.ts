@@ -51,146 +51,275 @@ export function buildLaunchPrompt(
 
 /**
  * Build the omnigent one-shot argv array (UI-visible run; exits on its own).
- * Shape: [bin, 'run', ('--server' url)?, ('--harness' h)?, '-p', prompt].
- * No '--no-session' (that path is ephemeral / not UI-visible). The prompt is a
- * single inert element.
+ * The per-skill AGENT selection (already resolved fail-closed by
+ * `resolveAgentLaunch`) determines the subcommand and any positional:
+ *   - default  → [bin, 'run', ('--server' url)?, '-p', prompt]
+ *   - builtin  → [bin, <name>, ('--server' url)?, '-p', prompt]  (subcommand, NOT 'run')
+ *   - custom   → [bin, 'run', ('--server' url)?, <abs yaml path>, '-p', prompt]
+ * For a custom agent the config path is emitted as a SINGLE inert argv element
+ * after `run` — never split, never its own flag (the resolver guarantees it is
+ * an absolute path, so it can never be read as an option). No '--no-session'
+ * (that path is ephemeral / not UI-visible). The prompt is a single inert
+ * element. No `--harness` is ever emitted: omnigent picks the harness itself.
  */
 export function buildOmnigentArgv(opts: {
   binaryPath: string;
   prompt: string;
   serverUrl?: string;
-  harness?: string;
+  agent?: ResolvedAgent;
 }): string[] {
-  const argv = [opts.binaryPath, "run"];
+  const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
+  const subcommand = agent.mode === "builtin" ? agent.name : "run";
+  const argv = [opts.binaryPath, subcommand];
   const server = opts.serverUrl?.trim();
   if (server) argv.push("--server", server);
-  const harness = opts.harness?.trim();
-  if (harness) argv.push("--harness", harness);
+  // The custom config path is a single inert positional after `run`. The
+  // resolver has already proven it absolute + inside the scan dir + .yaml/.yml,
+  // so it can never split or become a flag.
+  if (agent.mode === "custom") argv.push(agent.path);
   argv.push("-p", opts.prompt);
   return argv;
 }
 
-/**
- * The default per-skill choice: a SENTINEL meaning "omit `--harness` entirely"
- * (use omnigent's own default / the global override). It is NOT a harness token
- * and is never passed as an argv value — it only selects the global behavior.
- */
-export const OMNIGENT_HARNESS_SENTINEL = "omnigent";
+// =====================================================================
+// Per-skill AGENT selector (replaces the M1–M7 harness selector).
+//
+// A skill is tied to a specific omnigent AGENT; omnigent itself picks the
+// harness. The stored, per-skill choice is a discriminated value:
+//   { kind: 'default' }                       → `omnigent run -p "<prompt>"`
+//   { kind: 'builtin', name: 'polly'|'debby'} → `omnigent <name> -p "<prompt>"`
+//   { kind: 'custom',  path: '<abs yaml>' }   → `omnigent run <abs yaml> -p "<prompt>"`
+// At LAUNCH the stored value is re-validated fail-closed by `resolveAgentLaunch`
+// before anything reaches argv. Plugin-local state only — NEVER written into any
+// SKILL.md, and the display label/description of a custom agent NEVER reaches
+// argv (only its validated absolute path does, as one inert element).
+// =====================================================================
 
 /**
- * Strict validity test for a harness token that may reach the `--harness` argv
- * element. Must be non-empty, start with an alphanumeric (NO leading dash so it
- * can never be read as a flag), and otherwise contain only `A-Za-z0-9._-`. This
- * rejects spaces, quotes, shell metacharacters, command substitution, and flag
- * injection. Pure / unit-testable.
+ * The hardcoded built-in agent allowlist. These launch via an omnigent
+ * SUBCOMMAND (`omnigent polly …`, NOT `omnigent run …`). This is the ONLY set a
+ * stored `{kind:'builtin'}` name is permitted against at launch; anything else
+ * fails closed to the Default agent.
  */
-export function isValidHarnessToken(s: string): boolean {
-  return typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s);
+export const BUILTIN_AGENTS = ["polly", "debby"] as const;
+export type BuiltinAgentName = (typeof BUILTIN_AGENTS)[number];
+
+/** The vault-relative directory custom agent YAML configs are scanned from. */
+export const AGENT_CONFIG_SUBDIR = ".omnigent/agent-configs";
+
+/**
+ * The per-skill stored choice (a discriminated union). Persisted verbatim in
+ * data.json under `skillAgent[skillId]`. Absent key = Default.
+ */
+export type SkillAgent =
+  | { kind: "default" }
+  | { kind: "builtin"; name: string }
+  | { kind: "custom"; path: string };
+
+/**
+ * The resolved, validated launch form consumed by `buildOmnigentArgv`. Only
+ * ever produced by `resolveAgentLaunch`, which fails closed.
+ */
+export type ResolvedAgent =
+  | { mode: "default" }
+  | { mode: "builtin"; name: BuiltinAgentName }
+  | { mode: "custom"; path: string };
+
+/** A discovered custom agent (display metadata + the only argv-bound field, path). */
+export interface CustomAgent {
+  /** Absolute path to the YAML config — the ONLY field that can reach argv. */
+  path: string;
+  /** Display label (top-level `name:`, else the filename stem). Never argv. */
+  name: string;
+  /** Optional tooltip (top-level `description:`). Never argv. */
+  description?: string;
+}
+
+/** Membership test for the hardcoded built-in agent allowlist. */
+export function isAllowedBuiltinAgent(name: unknown): name is BuiltinAgentName {
+  return (
+    typeof name === "string" &&
+    (BUILTIN_AGENTS as readonly string[]).includes(name)
+  );
 }
 
 /**
- * Parse the harness tokens advertised in `omnigent run --help`. The relevant
- * line reads, e.g.:
- *   `Harness to use: 'claude' (alias for 'claude-sdk'), 'claude-sdk', 'codex',
- *    'openai-agents', 'open-responses', or 'pi'.`
- * Strategy: for each `--harness` occurrence, slice from it up to the next
- * option line (a newline followed by optional indent then `-`) or end of text,
- * extract every single-quoted token, keep only valid tokens, and dedupe in
- * first-seen order. The `(alias for 'claude-sdk')` parenthetical contributes a
- * duplicate that the dedupe collapses, so the excerpt above yields exactly
- * `[claude, claude-sdk, codex, openai-agents, open-responses, pi]`. The first
- * occurrence that yields tokens wins (a bare usage-synopsis mention with no
- * quoted tokens is skipped). Tolerant of wrapping/whitespace — including a
- * token hyphen-wrapped across lines (`'open-\n   responses'`), which the real
- * `--help` does and which is rejoined before extraction. Pure.
+ * Strict validity test for a custom agent config path that may reach argv as the
+ * single positional after `run`. Must be: a non-empty string, an ABSOLUTE path
+ * (so it can never be read as a flag — leading-dash safe by construction), a
+ * direct child of `scanDir` (no traversal, no nesting), and ending in
+ * `.yaml`/`.yml`. Existence is checked separately (it requires the filesystem).
+ * Pure / unit-testable.
  */
-export function parseHarnessChoicesFromHelp(helpText: string): string[] {
-  if (typeof helpText !== "string" || helpText.length === 0) return [];
-  const flagRe = /--harness/g;
-  let m: RegExpExecArray | null;
-  while ((m = flagRe.exec(helpText)) !== null) {
-    const start = m.index;
-    // End the region at the next option line (`\n` + optional indent + `-`),
-    // searched strictly after this `--harness` keyword so we don't stop on it.
-    const afterKeyword = start + "--harness".length;
-    const nextFlag = helpText.slice(afterKeyword).search(/\n[ \t]*-/);
-    const end = nextFlag === -1 ? helpText.length : afterKeyword + nextFlag;
-    // Rejoin CLI hyphen-wraps (`open-\n<indent>responses` → `open-responses`)
-    // so a token broken across lines is recovered intact before extraction.
-    const region = helpText.slice(start, end).replace(/-[ \t]*\r?\n[ \t]*/g, "-");
-    const seen = new Set<string>();
-    const tokens: string[] = [];
-    const quoteRe = /'([^']+)'/g;
-    let q: RegExpExecArray | null;
-    while ((q = quoteRe.exec(region)) !== null) {
-      const tok = q[1];
-      if (!isValidHarnessToken(tok) || seen.has(tok)) continue;
-      seen.add(tok);
-      tokens.push(tok);
-    }
-    if (tokens.length > 0) return tokens;
+export function isValidCustomAgentPath(p: unknown, scanDir: string): boolean {
+  if (typeof p !== "string" || p.length === 0) return false;
+  if (typeof scanDir !== "string" || scanDir.length === 0) return false;
+  if (!nodePath.isAbsolute(p)) return false;
+  if (!/\.ya?ml$/i.test(p)) return false;
+  // Direct child of the scan dir only: resolving collapses any `..`, so a
+  // traversal attempt (`…/agent-configs/../../etc/x.yaml`) lands its dirname
+  // outside scanDir and is rejected.
+  const resolved = nodePath.resolve(p);
+  return nodePath.dirname(resolved) === nodePath.resolve(scanDir);
+}
+
+/**
+ * Resolve a per-skill stored agent choice to the validated launch form, FAILING
+ * CLOSED to the Default agent. The only value that can reach argv as a flag-able
+ * token is a built-in name that is in the hardcoded allowlist; the only value
+ * that can reach argv as a positional is a custom path that passes
+ * `isValidCustomAgentPath` AND still exists. Anything else — unknown kind,
+ * missing value, bad built-in name, custom path outside the scan dir / wrong
+ * extension / non-existent — resolves to `{ mode: 'default' }`. `exists` is
+ * injected so this stays pure / unit-testable. NEVER consults a display label.
+ */
+export function resolveAgentLaunch(
+  stored: SkillAgent | undefined | null,
+  opts: { scanDir: string; exists: (p: string) => boolean },
+): ResolvedAgent {
+  if (!stored || typeof stored !== "object") return { mode: "default" };
+  if (stored.kind === "builtin") {
+    return isAllowedBuiltinAgent(stored.name)
+      ? { mode: "builtin", name: stored.name }
+      : { mode: "default" };
   }
-  return [];
+  if (stored.kind === "custom") {
+    if (
+      isValidCustomAgentPath(stored.path, opts.scanDir) &&
+      opts.exists(stored.path)
+    ) {
+      return { mode: "custom", path: stored.path };
+    }
+    return { mode: "default" };
+  }
+  // 'default' or any unrecognized kind.
+  return { mode: "default" };
 }
 
 /**
- * The deduped effective harness TOKEN list (no sentinel): built-ins first, then
- * discovered, each not already present. This is the allowed set a per-skill
- * choice is checked against and the source for the dropdown options (the view
- * prepends the "omnigent" default sentinel). The list is populated ONLY from
- * omnigent itself — the shipped built-ins and whatever discovery surfaces; there
- * are no user-defined entries. Pure / unit-testable.
+ * Minimal, safe top-level scalar reader for a custom agent YAML config. Reads
+ * ONLY the first top-level `name:` and `description:` (column-0 keys); nested or
+ * indented keys are ignored. Surrounding quotes are stripped and a trailing
+ * inline `#` comment on an unquoted scalar is dropped. This intentionally does
+ * NOT pull a full YAML dependency — it never executes anything and only ever
+ * yields two display strings (which never reach argv). Pure / unit-testable.
  */
-export function effectiveHarnessTokens(
-  builtins: readonly string[],
-  discovered: readonly string[],
-): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const list of [builtins, discovered]) {
-    for (const t of list) {
-      if (!t || seen.has(t)) continue;
-      seen.add(t);
-      out.push(t);
-    }
+export function parseAgentConfigYaml(text: string): {
+  name: string | null;
+  description: string | null;
+} {
+  const out: { name: string | null; description: string | null } = {
+    name: null,
+    description: null,
+  };
+  if (typeof text !== "string") return out;
+  for (const line of text.split(/\r?\n/)) {
+    // Top-level keys only — any leading whitespace means it is nested.
+    if (/^[ \t]/.test(line)) continue;
+    const m = /^([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (!m) continue;
+    const key = m[1];
+    if (key !== "name" && key !== "description") continue;
+    if (out[key] !== null) continue; // first occurrence wins
+    const val = unquoteScalar(m[2].trim());
+    out[key] = val.length ? val : null;
   }
   return out;
 }
 
-/**
- * The full effective option list for the per-skill selector: the "omnigent"
- * default sentinel first, then `effectiveHarnessTokens`. Pure / unit-testable.
- */
-export function effectiveHarnessOptions(
-  builtins: readonly string[],
-  discovered: readonly string[],
-): string[] {
-  return [
-    OMNIGENT_HARNESS_SENTINEL,
-    ...effectiveHarnessTokens(builtins, discovered),
-  ];
+/** Strip matching surrounding quotes, else drop a trailing ` #` inline comment. */
+function unquoteScalar(s: string): string {
+  if (
+    s.length >= 2 &&
+    ((s[0] === '"' && s[s.length - 1] === '"') ||
+      (s[0] === "'" && s[s.length - 1] === "'"))
+  ) {
+    return s.slice(1, -1);
+  }
+  const hash = s.indexOf(" #");
+  return hash === -1 ? s : s.slice(0, hash).trim();
 }
 
 /**
- * Resolve a per-skill harness choice to the `--harness` string handed to
- * `buildOmnigentArgv`, FAILING CLOSED to today's behavior. The default sentinel
- * `"omnigent"`, absent/undefined, or empty → return `globalHarness` (usually
- * blank, so `buildOmnigentArgv` omits `--harness`). Otherwise the choice is
- * returned ONLY if it both passes `isValidHarnessToken` AND is a member of
- * `allowedTokens`; any other value (invalid charset, or a valid-looking token
- * not in the allowed set) fails closed to `globalHarness`. Free-form text never
- * reaches `--harness`. Pure / unit-testable.
+ * Discover the custom agents in `dir` (the absolute
+ * `<vaultBase>/.omnigent/agent-configs`). Only `*.yaml`/`*.yml` direct children
+ * are considered; each is parsed for its top-level `name:` (display, else the
+ * filename stem) and optional `description:` (tooltip). If `dir` is null or does
+ * not exist (readdir throws), yields ZERO agents — never an error. fs callbacks
+ * are injected so this stays pure / unit-testable. Results are sorted by
+ * filename for stable ordering.
  */
-export function resolveHarnessArg(
-  choice: string | undefined,
-  globalHarness: string,
-  allowedTokens: readonly string[],
-): string {
-  if (!choice || choice === OMNIGENT_HARNESS_SENTINEL) return globalHarness;
-  if (isValidHarnessToken(choice) && allowedTokens.includes(choice)) {
-    return choice;
+export function discoverCustomAgents(opts: {
+  dir: string | null;
+  readdir: (dir: string) => string[];
+  readFile: (path: string) => string;
+  isFile?: (path: string) => boolean;
+}): CustomAgent[] {
+  if (!opts.dir) return [];
+  let entries: string[];
+  try {
+    entries = opts.readdir(opts.dir);
+  } catch {
+    return []; // missing dir → zero agents (no error)
   }
-  return globalHarness;
+  const out: CustomAgent[] = [];
+  for (const entry of [...entries].sort()) {
+    if (!/\.ya?ml$/i.test(entry)) continue;
+    const abs = nodePath.join(opts.dir, entry);
+    if (opts.isFile) {
+      let ok = false;
+      try {
+        ok = opts.isFile(abs);
+      } catch {
+        ok = false;
+      }
+      if (!ok) continue;
+    }
+    let text: string;
+    try {
+      text = opts.readFile(abs);
+    } catch {
+      continue;
+    }
+    const meta = parseAgentConfigYaml(text);
+    const stem = entry.replace(/\.ya?ml$/i, "");
+    const name = meta.name && meta.name.trim() ? meta.name.trim() : stem;
+    out.push({
+      path: abs,
+      name,
+      ...(meta.description ? { description: meta.description } : {}),
+    });
+  }
+  return out;
+}
+
+// --- UI encode/decode for the per-skill <select> value -----------------
+// The dropdown is a flat <select>; its option values are strings. These map the
+// discriminated `SkillAgent` to/from that flat string. Decoding is UNVALIDATED
+// (the builtin name / custom path are taken verbatim) — validation happens at
+// store time and again, authoritatively, at launch (`resolveAgentLaunch`).
+
+export const AGENT_DEFAULT_VALUE = "default";
+
+/** Encode a stored choice to its <select> option value. */
+export function encodeAgentChoice(agent: SkillAgent | undefined | null): string {
+  if (!agent || typeof agent !== "object") return AGENT_DEFAULT_VALUE;
+  if (agent.kind === "builtin") return `builtin:${agent.name}`;
+  if (agent.kind === "custom") return `custom:${agent.path}`;
+  return AGENT_DEFAULT_VALUE;
+}
+
+/** Decode a <select> option value back to a (still-unvalidated) choice. */
+export function decodeAgentChoice(value: string): SkillAgent {
+  if (typeof value === "string") {
+    if (value.startsWith("builtin:")) {
+      return { kind: "builtin", name: value.slice("builtin:".length) };
+    }
+    if (value.startsWith("custom:")) {
+      return { kind: "custom", path: value.slice("custom:".length) };
+    }
+  }
+  return { kind: "default" };
 }
 
 /**

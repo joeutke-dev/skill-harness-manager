@@ -1,5 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
-import { OMNIGENT_HARNESS_SENTINEL } from "./launch";
+import { AGENT_DEFAULT_VALUE, BUILTIN_AGENTS } from "./launch";
 import type SkillLayerPlugin from "./main";
 import { Skill } from "./types";
 
@@ -261,30 +261,45 @@ export class SkillBrowserView extends ItemView {
       this.renderList();
     });
 
-    // Per-skill harness selector. Each option is labeled by its invocation so
-    // the effect is explicit: the default sentinel "omnigent" omits --harness,
-    // while a token T launches `run --harness T`. Options are rendered from the
-    // EFFECTIVE list (built-ins ∪ discovered) so newly discovered harnesses
-    // appear here. Selecting a value persists
-    // settings.skillHarness[skill.id] (the default deletes the key to keep
-    // data.json clean) through the same saveSettings path.
-    const harnessSel = actions.createEl("select", {
-      cls: "skill-layer-action skill-layer-harness-select",
-      attr: { "aria-label": `Harness for ${skill.name}` },
+    // Per-skill AGENT selector ("Run with"). Each option is labeled by the
+    // omnigent invocation it produces, so the effect is explicit:
+    //   Default            → omnigent run -p …
+    //   a built-in agent   → omnigent <name> -p …      (subcommand, NOT run)
+    //   a custom agent      → omnigent run <config> -p … (config path is inert)
+    // Built-ins come from the hardcoded allowlist; custom agents are the
+    // dynamically-discovered YAML configs (label = name, tooltip = description).
+    // Selecting persists settings.skillAgent[skill.id] (Default deletes the key
+    // to keep data.json clean), re-validated fail-closed before storage.
+    const agentSel = actions.createEl("select", {
+      cls: "skill-layer-action skill-layer-agent-select",
+      attr: { "aria-label": `Run with (agent) for ${skill.name}` },
     }) as HTMLSelectElement;
-    harnessSel.createEl("option", {
-      text: "omnigent (default — no --harness)",
-      value: OMNIGENT_HARNESS_SENTINEL,
+    agentSel.createEl("option", {
+      text: "Default — omnigent run",
+      value: AGENT_DEFAULT_VALUE,
     });
-    for (const token of this.plugin.effectiveHarnessTokens()) {
-      harnessSel.createEl("option", {
-        text: `${token} — run --harness ${token}`,
-        value: token,
+    for (const name of BUILTIN_AGENTS) {
+      agentSel.createEl("option", {
+        text: `${name} — omnigent ${name}`,
+        value: `builtin:${name}`,
       });
     }
-    harnessSel.value = this.plugin.harnessFor(skill.id);
-    harnessSel.addEventListener("change", async () => {
-      await this.plugin.setSkillHarness(skill.id, harnessSel.value);
+    const customAgents = this.plugin.getCustomAgents();
+    if (customAgents.length > 0) {
+      const group = agentSel.createEl("optgroup", {
+        attr: { label: "Custom agents" },
+      }) as HTMLOptGroupElement;
+      for (const agent of customAgents) {
+        const opt = group.createEl("option", {
+          text: `${agent.name} — omnigent run <config>`,
+          value: `custom:${agent.path}`,
+        });
+        if (agent.description) opt.setAttr("title", agent.description);
+      }
+    }
+    agentSel.value = this.plugin.agentOptionValue(skill.id);
+    agentSel.addEventListener("change", async () => {
+      await this.plugin.setSkillAgent(skill.id, agentSel.value);
     });
 
     if (this.plugin.isPinned(skill.id)) {

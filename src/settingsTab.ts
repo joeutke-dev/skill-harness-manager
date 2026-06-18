@@ -1,7 +1,8 @@
 import { App, Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
+import { BUILTIN_AGENTS } from "./launch";
 import type SkillLayerPlugin from "./main";
 import { normalizeExternalRoot } from "./parse";
-import { BUILTIN_HARNESSES, RootKind, ScanRoot } from "./types";
+import { RootKind, ScanRoot } from "./types";
 
 /** Guess the right code path for a freshly added root from its path string. */
 function inferKind(path: string): RootKind {
@@ -185,19 +186,6 @@ export class SkillLayerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Harness")
-      .setDesc("Blank = omnigent default. If set, passed as --harness.")
-      .addText((text) =>
-        text
-          .setPlaceholder("(default)")
-          .setValue(settings.omnigentHarness)
-          .onChange(async (value) => {
-            settings.omnigentHarness = value.trim();
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
       .setName("Append vault-anchor instruction")
       .setDesc(
         "Append a generic instruction to the launch prompt telling the run to " +
@@ -210,8 +198,8 @@ export class SkillLayerSettingTab extends PluginSettingTab {
         }),
       );
 
-    // --- Harnesses --------------------------------------------------------
-    this.renderHarnessesSection(containerEl);
+    // --- Agents -----------------------------------------------------------
+    this.renderAgentsSection(containerEl);
 
     // The former global "Pinned ribbon icon" setting is gone — each pinned
     // skill now picks its own Lucide icon from the Skill Layer browser ("Pin to
@@ -280,73 +268,89 @@ export class SkillLayerSettingTab extends PluginSettingTab {
   }
 
   /**
-   * The "Harnesses" settings section: refresh-from-omnigent (discovery) and a
-   * read-only view of the current effective list. The list is populated ONLY
-   * from omnigent — the shipped built-ins plus whatever discovery surfaces;
-   * there is no user-defined entry. The per-skill selector in the browser view
-   * renders from the same effective list, so anything surfaced here appears
-   * there too.
+   * The "Agents" settings section: the per-skill "Run with" dropdown ties a
+   * skill to a specific omnigent AGENT (omnigent then picks the harness). Shows
+   * the built-in set (Default + the hardcoded allowlist) and the dynamically
+   * discovered custom agents from `<vault>/.omnigent/agent-configs`, plus a
+   * "Refresh agents" button that re-scans that directory. This is plugin-local
+   * and never written into any SKILL.md.
    */
-  private renderHarnessesSection(containerEl: HTMLElement): void {
-    new Setting(containerEl).setName("Harnesses").setHeading();
+  private renderAgentsSection(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Agents").setHeading();
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text:
-        "Per-skill harness tokens for the launch dropdown. The list comes only " +
-        "from omnigent: the shipped built-ins plus any tokens discovered from " +
-        "omnigent. The “omnigent (default)” choice omits --harness; every other " +
-        "choice launches as run --harness <token>. A token reaches the command " +
-        "line only after passing a strict charset check; this is plugin-local " +
-        "and never written into any SKILL.md.",
+        "Each skill row has a “Run with” dropdown that ties the skill to a " +
+        "specific omnigent agent; omnigent itself then picks the harness. " +
+        "“Default” launches omnigent run; a built-in agent launches as the " +
+        "omnigent <name> subcommand; a custom agent launches omnigent run " +
+        "<config.yaml>. Custom agents are discovered from " +
+        ".omnigent/agent-configs in your vault. Only a built-in name from the " +
+        "hardcoded allowlist or a validated config path inside that directory " +
+        "ever reaches the command line.",
     });
 
+    // Built-in set (informational): Default + the hardcoded allowlist.
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Built-in agents (always available):",
+    });
+    const builtinChips = containerEl.createDiv({
+      cls: "skill-layer-agent-chips",
+    });
+    builtinChips.createSpan({
+      cls: "skill-layer-chip skill-layer-agent-chip is-builtin",
+      text: "Default (omnigent run)",
+    });
+    for (const name of BUILTIN_AGENTS) {
+      builtinChips.createSpan({
+        cls: "skill-layer-chip skill-layer-agent-chip is-builtin",
+        attr: { title: `omnigent ${name}` },
+        text: name,
+      });
+    }
+
+    // Discovered custom agents.
+    const customAgents = this.plugin.getCustomAgents();
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        customAgents.length > 0
+          ? "Custom agents (discovered in .omnigent/agent-configs):"
+          : "No custom agents found in .omnigent/agent-configs.",
+    });
+    if (customAgents.length > 0) {
+      const customChips = containerEl.createDiv({
+        cls: "skill-layer-agent-chips",
+      });
+      for (const agent of customAgents) {
+        const chip = customChips.createSpan({
+          cls: "skill-layer-chip skill-layer-agent-chip is-custom",
+          attr: { title: agent.description ? `${agent.description}\n${agent.path}` : agent.path },
+        });
+        chip.setText(agent.name);
+      }
+    }
+
     new Setting(containerEl)
-      .setName("Refresh from omnigent")
+      .setName("Refresh agents")
       .setDesc(
-        "Run `omnigent run --help` and cache the harness tokens it advertises. " +
-          "Built-ins remain available if discovery fails.",
+        "Re-scan .omnigent/agent-configs for custom agent YAML configs.",
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Refresh from omnigent")
+          .setButtonText("Refresh agents")
           .setCta()
-          .onClick(async () => {
-            const count = await this.plugin.discoverHarnesses();
-            if (count > 0) {
-              new Notice(
-                `Skill Layer: discovered ${count} harness${
-                  count === 1 ? "" : "es"
-                } from omnigent.`,
-              );
-            }
+          .onClick(() => {
+            this.plugin.refreshCustomAgents();
+            const count = this.plugin.getCustomAgents().length;
+            new Notice(
+              `Skill Layer: found ${count} custom agent${
+                count === 1 ? "" : "s"
+              }.`,
+            );
             this.display();
           }),
       );
-
-    // Read-only view of the current effective list (default sentinel + tokens),
-    // labeled by origin so the user sees exactly what's available. Every token
-    // is either a built-in or discovered from omnigent.
-    const builtinSet = new Set<string>(BUILTIN_HARNESSES);
-    const tokens = this.plugin.effectiveHarnessTokens();
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "Effective list (shown in each skill's harness dropdown):",
-    });
-    const chips = containerEl.createDiv({ cls: "skill-layer-harness-chips" });
-    // The default sentinel always leads the dropdown.
-    chips.createSpan({
-      cls: "skill-layer-chip skill-layer-harness-chip",
-      text: "omnigent (default)",
-    });
-    for (const token of tokens) {
-      const isBuiltin = builtinSet.has(token);
-      const origin = isBuiltin ? "is-builtin" : "is-discovered";
-      const originLabel = isBuiltin ? "built-in" : "discovered";
-      const chip = chips.createSpan({
-        cls: `skill-layer-chip skill-layer-harness-chip ${origin}`,
-        attr: { title: `${token} (${originLabel})` },
-      });
-      chip.setText(token);
-    }
   }
 }
