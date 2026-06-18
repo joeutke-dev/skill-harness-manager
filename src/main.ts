@@ -48,6 +48,12 @@ import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import { DEFAULT_SETTINGS, Skill, SkillLayerSettings } from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
 import { decideToggleAction } from "./viewToggle";
+import {
+  canOpenInYamlViewer,
+  detectYamlViewerEnabled,
+  resolveVaultTFile,
+  YAML_VIEWER_VIEW_TYPE,
+} from "./yamlViewer";
 
 /** Internal (non-public) command registry surface used to unregister commands. */
 interface CommandsApi {
@@ -847,6 +853,11 @@ export default class SkillLayerPlugin extends Plugin {
     } catch {
       // stat failed — fall through; shell.openPath will Notice with the path.
     }
+    // Prefer the YAML Viewer community plugin when it's installed+enabled AND
+    // the config resolves to an in-vault TFile. Anything else (viewer absent,
+    // non-YAML, dot-folder/external path with no TFile) returns false here so we
+    // fall through to the unchanged OS-default-app path below.
+    if (await this.openInYamlViewer(fileToOpen)) return;
     try {
       const result: string = await shell.openPath(fileToOpen);
       if (result) {
@@ -855,6 +866,66 @@ export default class SkillLayerPlugin extends Plugin {
     } catch (err) {
       console.error("[skill-layer] openPath (agent) failed:", err);
       new Notice(`Could not open agent config. Path: ${fileToOpen}`);
+    }
+  }
+
+  /**
+   * True iff the "YAML Viewer" community plugin (id `yaml-viewer`) is installed
+   * AND enabled. Reads the untyped community-plugins API via a narrow local cast
+   * (no global type loosening); the predicate itself lives in the pure module.
+   */
+  private isYamlViewerEnabled(): boolean {
+    const plugins = (this.app as { plugins?: unknown }).plugins;
+    return detectYamlViewerEnabled(plugins);
+  }
+
+  /**
+   * Map an absolute filesystem path to the in-vault `TFile` it names, or null.
+   * Returns null when the vault adapter isn't a `FileSystemAdapter`, when the
+   * path is outside the vault, or when it doesn't index to a `TFile` (e.g. a
+   * non-indexed dot-folder like `.omnigent/...` or an external scan root).
+   */
+  private pathToVaultTFile(absPath: string): TFile | null {
+    const adapter = this.app.vault.adapter;
+    const basePath =
+      adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null;
+    return resolveVaultTFile<TAbstractFile>(basePath, absPath, {
+      relative: (from, to) => nodePath.relative(from, to),
+      isAbsolute: (p) => nodePath.isAbsolute(p),
+      sep: nodePath.sep,
+      getAbstractFileByPath: (vaultPath) =>
+        this.app.vault.getAbstractFileByPath(vaultPath),
+      isTFile: (f) => f instanceof TFile,
+    }) as TFile | null;
+  }
+
+  /**
+   * Try to open `fileToOpen` in the YAML Viewer. Returns false (so the caller
+   * falls back to `shell.openPath`) unless the viewer is enabled, the path is a
+   * `.yaml`/`.yml`, AND it resolves to an in-vault `TFile`. A throw from
+   * `setViewState` also returns false so we never leave a broken viewer leaf.
+   */
+  private async openInYamlViewer(fileToOpen: string): Promise<boolean> {
+    const tfile = this.pathToVaultTFile(fileToOpen);
+    if (
+      !canOpenInYamlViewer({
+        viewerEnabled: this.isYamlViewerEnabled(),
+        fileToOpen,
+        hasTFile: tfile !== null,
+      })
+    ) {
+      return false;
+    }
+    try {
+      await this.app.workspace.getLeaf(false).setViewState({
+        type: YAML_VIEWER_VIEW_TYPE,
+        state: { file: (tfile as TFile).path },
+        active: true,
+      });
+      return true;
+    } catch (err) {
+      console.error("[skill-layer] YAML Viewer open failed:", err);
+      return false;
     }
   }
 

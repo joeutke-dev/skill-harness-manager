@@ -18,7 +18,7 @@
 
 import esbuild from "esbuild";
 import { fileURLToPath, pathToFileURL } from "url";
-import { dirname, join } from "path";
+import { dirname, join, relative, isAbsolute, sep } from "path";
 import {
   mkdirSync,
   mkdtempSync,
@@ -99,6 +99,24 @@ await esbuild.build({
   logLevel: "silent",
 });
 const { decideToggleAction } = await import(pathToFileURL(toggleOut).href);
+
+// M13: pure YAML-Viewer routing helpers (no Obsidian — deps are injected).
+const yamlOut = join(builtDir, "yamlViewer.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "yamlViewer.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: yamlOut,
+  logLevel: "silent",
+});
+const {
+  detectYamlViewerEnabled,
+  resolveVaultTFile,
+  canOpenInYamlViewer,
+  isYamlFile,
+  YAML_VIEWER_PLUGIN_ID,
+} = await import(pathToFileURL(yamlOut).href);
 
 let passed = 0;
 let failed = 0;
@@ -990,6 +1008,98 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
   check("launch rejects a non-yaml/non-bundle extension → null", safeCustomAgentRealPath(`${SCAN}/evil.txt`, SCAN, throwingFs) === null);
   check("launch rejects a relative path → null", safeCustomAgentRealPath("vault-agent", SCAN, throwingFs) === null);
   check("launch rejects empty path → null", safeCustomAgentRealPath("", SCAN, throwingFs) === null);
+}
+
+// =====================================================================
+// M13: YAML-Viewer "Open file" routing — open in the `yaml-viewer` community
+// plugin when it's installed+enabled AND the config is an in-vault TFile;
+// otherwise fall back to the existing OS-default-app (`shell.openPath`) path.
+// These exercise the pure decision core (src/yamlViewer.ts); the only impure
+// parts (setViewState / FileSystemAdapter) are thin wrappers in main.ts.
+// =====================================================================
+console.log("\n[M13] YAML-Viewer detection + in-vault TFile resolution + fallback gate");
+{
+  // --- (a) detection helper: true only when installed AND enabled -----------
+  const enabledApi = {
+    enabledPlugins: new Set([YAML_VIEWER_PLUGIN_ID]),
+    plugins: { [YAML_VIEWER_PLUGIN_ID]: { id: YAML_VIEWER_PLUGIN_ID } },
+  };
+  check("(a) enabled+installed → true", detectYamlViewerEnabled(enabledApi) === true);
+  check(
+    "(a) installed (in registry) but NOT in enabledPlugins → false",
+    detectYamlViewerEnabled({ enabledPlugins: new Set(), plugins: { [YAML_VIEWER_PLUGIN_ID]: {} } }) === false,
+  );
+  check(
+    "(a) enabled flag set but no plugin instance (not loaded) → false",
+    detectYamlViewerEnabled({ enabledPlugins: new Set([YAML_VIEWER_PLUGIN_ID]), plugins: {} }) === false,
+  );
+  check("(a) some other plugin enabled → false", detectYamlViewerEnabled({ enabledPlugins: new Set(["other"]), plugins: { other: {} } }) === false);
+  check("(a) undefined/empty plugins API → false (no throw)", detectYamlViewerEnabled(undefined) === false && detectYamlViewerEnabled(null) === false && detectYamlViewerEnabled({}) === false);
+
+  // --- (b) path → in-vault TFile resolver -----------------------------------
+  // Node's real `path` fns are injected, exactly as main.ts injects them.
+  const pathDeps = { relative, isAbsolute, sep };
+  // An index of the only file Obsidian "knows about" (an in-vault, indexed file).
+  const indexedVaultPath = "agents/vault-agent/config.yaml";
+  const tfileSentinel = { __isTFile: true, path: indexedVaultPath };
+  const index = { [indexedVaultPath]: tfileSentinel };
+  const mkDeps = (idx) => ({
+    ...pathDeps,
+    getAbstractFileByPath: (vp) => idx[vp] ?? null,
+    isTFile: (f) => Boolean(f && f.__isTFile),
+  });
+
+  const inVaultAbs = `${VAULT}/${indexedVaultPath}`;
+  check(
+    "(b) in-vault indexed file → returns the TFile",
+    resolveVaultTFile(VAULT, inVaultAbs, mkDeps(index)) === tfileSentinel,
+  );
+  check(
+    "(b) out-of-vault absolute path → null",
+    resolveVaultTFile(VAULT, "/etc/passwd.yaml", mkDeps(index)) === null,
+  );
+  check(
+    "(b) parent-traversal (sibling of vault) → null",
+    resolveVaultTFile(VAULT, `${VAULT}/../other/config.yaml`, mkDeps(index)) === null,
+  );
+  // A dot-folder path IS lexically inside the vault, but Obsidian doesn't index
+  // dot-folders, so the lookup returns nothing → null (→ shell.openPath fallback).
+  check(
+    "(b) in-vault dot-folder path with no TFile → null",
+    resolveVaultTFile(VAULT, `${VAULT}/.omnigent/agent-configs/a/config.yaml`, mkDeps(index)) === null,
+  );
+  check(
+    "(b) null base path (adapter isn't FileSystemAdapter) → null",
+    resolveVaultTFile(null, inVaultAbs, mkDeps(index)) === null,
+  );
+
+  // --- (c) fallback gate: viewer-disabled OR no-TFile → don't open in viewer -
+  // canOpenInYamlViewer() === false is exactly the branch openCustomAgent uses
+  // to fall through to the unchanged shell.openPath behavior.
+  check(
+    "(c) enabled + yaml + in-vault TFile → open in viewer (true)",
+    canOpenInYamlViewer({ viewerEnabled: true, fileToOpen: inVaultAbs, hasTFile: true }) === true,
+  );
+  check(
+    "(c) viewer DISABLED → false → falls back to shell.openPath",
+    canOpenInYamlViewer({ viewerEnabled: false, fileToOpen: inVaultAbs, hasTFile: true }) === false,
+  );
+  check(
+    "(c) out-of-vault (no TFile) → false → falls back to shell.openPath",
+    canOpenInYamlViewer({ viewerEnabled: true, fileToOpen: "/etc/passwd.yaml", hasTFile: false }) === false,
+  );
+  check(
+    "(c) non-yaml extension → false → falls back to shell.openPath",
+    canOpenInYamlViewer({ viewerEnabled: true, fileToOpen: `${VAULT}/agents/a/config.json`, hasTFile: true }) === false,
+  );
+  check("(c) isYamlFile matches .yaml/.yml (case-insensitive), rejects others", isYamlFile("a/config.yaml") && isYamlFile("b.yml") && isYamlFile("C.YAML") && !isYamlFile("c.json") && !isYamlFile("d.yamlx"));
+  // End-to-end of the pure gate: disabled-viewer path is identical whether or
+  // not a TFile exists — both fall back.
+  check(
+    "(c) disabled viewer ignores TFile presence (both fall back)",
+    canOpenInYamlViewer({ viewerEnabled: false, fileToOpen: inVaultAbs, hasTFile: true }) === false &&
+      canOpenInYamlViewer({ viewerEnabled: false, fileToOpen: inVaultAbs, hasTFile: false }) === false,
+  );
 }
 
 // =====================================================================
