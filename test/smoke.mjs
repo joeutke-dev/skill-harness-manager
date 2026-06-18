@@ -63,8 +63,29 @@ const {
   decodeAgentChoice,
   BUILTIN_AGENTS,
   AGENT_DEFAULT_VALUE,
+  AGENT_SESSION_PROMPT,
+  AGENT_INVOCATION_PLACEHOLDER,
+  buildAgentInvocation,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
+
+// M10: pure tab-state + Agents-tab render-model helpers (no Obsidian).
+const tabsOut = join(builtDir, "tabs.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "tabs.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: tabsOut,
+  logLevel: "silent",
+});
+const {
+  DEFAULT_TAB,
+  TABS,
+  AGENTS_EMPTY_TEXT,
+  normalizeTab,
+  buildAgentsTabModel,
+} = await import(pathToFileURL(tabsOut).href);
 
 // M5: the pure ribbon-toggle decision helper (no Obsidian, no side effects).
 const toggleOut = join(builtDir, "viewToggle.mjs");
@@ -828,6 +849,86 @@ console.log("\n[o] real-fs bundle config.yaml must be a regular file (no-follow)
   check("(fixture sanity) outer symlink target is a regular file", statSync(join(symOutBundle, "config.yaml")).isFile());
 
   rmSync(tmp, { recursive: true, force: true });
+}
+
+// =====================================================================
+// (p) M10 TABBED UI: tab-switch state, Agents-tab render model (N agents +
+//     empty state), agent-session argv shape, copy-invocation format, and
+//     launch-path validation rejecting a bad agent path.
+// =====================================================================
+console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
+{
+  // --- tab-switch state: default Skills; switch to Agents and back ---------
+  eq("default tab is Skills", DEFAULT_TAB, "skills");
+  check("TABS are Skills then Agents", deepEq(TABS.map((t) => t.id), ["skills", "agents"]));
+  check("TABS labels are Skills / Agents", deepEq(TABS.map((t) => t.label), ["Skills", "Agents"]));
+  // Simulate the click handler: state := normalizeTab(clicked id).
+  let tab = DEFAULT_TAB;
+  eq("starts on Skills", tab, "skills");
+  tab = normalizeTab("agents");
+  eq("switching to Agents → agents", tab, "agents");
+  tab = normalizeTab("skills");
+  eq("switching back to Skills → skills", tab, "skills");
+  eq("unknown/stale tab id falls back to Skills", normalizeTab("garbage"), "skills");
+  eq("undefined tab id falls back to Skills", normalizeTab(undefined), "skills");
+
+  // --- Agents tab renders N discovered agents -----------------------------
+  const sampleAgents = [
+    { path: "/v/.omnigent/agent-configs/vault-agent", name: "Vault Agent", description: "Helps in the vault" },
+    { path: "/v/.omnigent/agent-configs/loose.yaml", name: "Loose One" },
+    { path: "/v/.omnigent/agent-configs/another", name: "Another", description: "Third agent" },
+  ];
+  const model = buildAgentsTabModel(sampleAgents);
+  check("3 agents → not empty", model.empty === false);
+  eq("3 agents → 3 rows", model.empty ? -1 : model.rows.length, 3);
+  check("row titles preserve discovery order", model.empty ? false : deepEq(model.rows.map((r) => r.title), ["Vault Agent", "Loose One", "Another"]));
+  check("row paths are the discovered launch paths", model.empty ? false : deepEq(model.rows.map((r) => r.path), sampleAgents.map((a) => a.path)));
+  check("description maps to subtitle", model.empty ? false : model.rows[0].subtitle === "Helps in the vault");
+  check("missing description → empty subtitle", model.empty ? false : model.rows[1].subtitle === "");
+
+  // --- Agents tab empty state ---------------------------------------------
+  const emptyModel = buildAgentsTabModel([]);
+  check("no agents → empty model", emptyModel.empty === true);
+  eq("empty model carries the empty-state text", emptyModel.empty ? emptyModel.text : "", AGENTS_EMPTY_TEXT);
+  check("empty text names the dir + the create skill", AGENTS_EMPTY_TEXT.includes(".omnigent/agent-configs/") && AGENTS_EMPTY_TEXT.includes("create-custom-agent"));
+  check("non-array agents → empty (fail-safe)", buildAgentsTabModel(undefined).empty === true);
+
+  // --- agent launch argv shape == [bin, 'run', <path>, '-p', <prompt>] -----
+  const AGENT_PATH = "/Users/joe.utke/Documents/Obsidian/Vault/.omnigent/agent-configs/vault-agent";
+  const launchArgv = buildOmnigentArgv({
+    binaryPath: BIN,
+    prompt: AGENT_SESSION_PROMPT,
+    agent: { mode: "custom", path: AGENT_PATH },
+  });
+  check("agent-session argv == [bin,'run',<path>,'-p',<prompt>]", deepEq(launchArgv, [BIN, "run", AGENT_PATH, "-p", AGENT_SESSION_PROMPT]));
+  check("agent path is a SINGLE inert argv element", launchArgv.filter((a) => a === AGENT_PATH).length === 1);
+  check("default session prompt is a non-empty, non-slash sentence", typeof AGENT_SESSION_PROMPT === "string" && AGENT_SESSION_PROMPT.length > 0 && !AGENT_SESSION_PROMPT.startsWith("/"));
+  // With a server URL the path stays a single positional after --server.
+  const launchArgvSrv = buildOmnigentArgv({ binaryPath: BIN, prompt: AGENT_SESSION_PROMPT, serverUrl: "https://x", agent: { mode: "custom", path: AGENT_PATH } });
+  check("agent-session argv (with --server) keeps path inert after run", deepEq(launchArgvSrv, [BIN, "run", "--server", "https://x", AGENT_PATH, "-p", AGENT_SESSION_PROMPT]));
+
+  // --- copy-invocation string format --------------------------------------
+  eq("copy invocation == omnigent run <path> -p \"<your prompt here>\"", buildAgentInvocation(AGENT_PATH), `omnigent run ${AGENT_PATH} -p "<your prompt here>"`);
+  check("invocation placeholder is the documented one", AGENT_INVOCATION_PLACEHOLDER === "<your prompt here>");
+  check("invocation uses the 'run' subcommand (custom-agent form)", buildAgentInvocation(AGENT_PATH).startsWith("omnigent run "));
+
+  // --- launch rejects an agent path that fails validation ------------------
+  // safeCustomAgentRealPath is the SAME gate launch + copy use; null ⇒ no spawn.
+  // These fail at the lexical gate (before any fs op), so stub fs ops that throw
+  // prove the rejection is fail-closed and doesn't even touch the filesystem.
+  const SCAN = "/Users/joe.utke/Documents/Obsidian/Vault/.omnigent/agent-configs";
+  const throwingFs = {
+    exists: () => { throw new Error("must not be called"); },
+    realpath: () => { throw new Error("must not be called"); },
+    isFile: () => { throw new Error("must not be called"); },
+    isDirectory: () => { throw new Error("must not be called"); },
+    isRegularFileNoFollow: () => { throw new Error("must not be called"); },
+  };
+  check("launch rejects a path outside the scan dir → null", safeCustomAgentRealPath("/etc/evil.yaml", SCAN, throwingFs) === null);
+  check("launch rejects a `..` traversal path → null", safeCustomAgentRealPath(`${SCAN}/../evil.yaml`, SCAN, throwingFs) === null);
+  check("launch rejects a non-yaml/non-bundle extension → null", safeCustomAgentRealPath(`${SCAN}/evil.txt`, SCAN, throwingFs) === null);
+  check("launch rejects a relative path → null", safeCustomAgentRealPath("vault-agent", SCAN, throwingFs) === null);
+  check("launch rejects empty path → null", safeCustomAgentRealPath("", SCAN, throwingFs) === null);
 }
 
 // =====================================================================

@@ -18,10 +18,13 @@ import { elementHasSvg, pinAction, resolvePinnedIcon } from "./icon";
 import { IconPickerModal } from "./iconPicker";
 import {
   AGENT_CONFIG_SUBDIR,
+  AGENT_SESSION_PROMPT,
   augmentPath,
+  buildAgentInvocation,
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
+  BUNDLE_CONFIG_NAME,
   CustomAgent,
   decodeAgentChoice,
   discoverCustomAgents,
@@ -30,6 +33,7 @@ import {
   isValidCustomAgentPath,
   resolveAgentLaunch,
   resolveOmnigentBinary,
+  safeCustomAgentRealPath,
   SkillAgent,
 } from "./launch";
 import {
@@ -666,27 +670,9 @@ export default class SkillLayerPlugin extends Plugin {
       return;
     }
 
-    // Resolve the omnigent binary, failing closed. Allowlist = an absolute path
-    // named exactly "omnigent" (override) or the trusted default candidates.
-    const resolution = resolveOmnigentBinary({
-      override: this.settings.omnigentBinaryPath,
-      homedir: os.homedir(),
-      exists: (p) => fs.existsSync(p),
-    });
-    if (resolution.status === "invalid-override") {
-      new Notice(
-        'Skill Layer: invalid omnigent binary path (must be an absolute path ' +
-          'to a binary named "omnigent"). Launch aborted.',
-      );
-      return;
-    }
-    if (resolution.status === "not-found") {
-      new Notice(
-        "Skill Layer: omnigent binary not found. Set its path in Settings → Skill Layer.",
-      );
-      return;
-    }
-    const binaryPath = resolution.path;
+    // Resolve the omnigent binary, failing closed (shared with launchCustomAgent).
+    const binaryPath = this.resolveBinaryOrNotice();
+    if (!binaryPath) return;
 
     // Natural-language prompt (NOT the `/slash` invocation): a leading-slash
     // first token would hit omnigent's REPL slash dispatcher ("Unknown
@@ -716,6 +702,55 @@ export default class SkillLayerPlugin extends Plugin {
       agent,
     });
 
+    // Spawn via the single shared hardened surface. The success Notice is built
+    // here (skill name + optional context file); the run's real success/failure
+    // is async (an 'error' or non-zero 'exit' Notices from spawnOmnigent).
+    this.spawnOmnigent(
+      argv,
+      cwd,
+      `Launching "${skill.name}"${
+        contextPath ? ` on ${nodePath.basename(contextPath)}` : ""
+      } in omnigent — it should appear in the omnigent UI shortly.`,
+    );
+  }
+
+  /**
+   * Resolve the omnigent binary, failing closed; Notices + returns null on a
+   * set-but-invalid override or a not-found binary. Shared by every spawn caller
+   * (skill launch + custom-agent launch). Allowlist = an absolute path named
+   * exactly "omnigent" (override) or the trusted default candidates.
+   */
+  private resolveBinaryOrNotice(): string | null {
+    const resolution = resolveOmnigentBinary({
+      override: this.settings.omnigentBinaryPath,
+      homedir: os.homedir(),
+      exists: (p) => fs.existsSync(p),
+    });
+    if (resolution.status === "invalid-override") {
+      new Notice(
+        'Skill Layer: invalid omnigent binary path (must be an absolute path ' +
+          'to a binary named "omnigent"). Launch aborted.',
+      );
+      return null;
+    }
+    if (resolution.status === "not-found") {
+      new Notice(
+        "Skill Layer: omnigent binary not found. Set its path in Settings → Skill Layer.",
+      );
+      return null;
+    }
+    return resolution.path;
+  }
+
+  /**
+   * The plugin's ONLY process-spawn surface, shared by skill launch (launchSkill)
+   * and custom-agent launch (launchCustomAgent). `argv[0]` is the allowlisted,
+   * absolute omnigent binary; the rest are inert array args. shell:false; stdio
+   * ignores stdin/stdout at the OS level and pipes a bounded stderr tail. `cwd`
+   * is the vault base path so any files the run writes land in the real vault.
+   * `successNotice` is shown once spawn succeeds.
+   */
+  private spawnOmnigent(argv: string[], cwd: string, successNotice: string): void {
     // GUI apps inherit a thin launchd PATH; the binary execs sub-tools, so
     // widen PATH (de-duped) without mutating process.env. /opt/homebrew/bin is
     // required so omnigent can find the Homebrew `databricks` CLI it uses to
@@ -767,11 +802,120 @@ export default class SkillLayerPlugin extends Plugin {
 
     // Spawn succeeded; the run's real success/failure is async (an 'error' or
     // non-zero 'exit' will Notice above), so don't assert success here.
-    new Notice(
-      `Launching "${skill.name}"${
-        contextPath ? ` on ${nodePath.basename(contextPath)}` : ""
-      } in omnigent — it should appear in the omnigent UI shortly.`,
+    new Notice(successNotice);
+  }
+
+  // --- Custom agents (Agents tab, M10) -----------------------------------
+  /**
+   * Re-validate a discovered custom-agent path through the SAME fail-closed gate
+   * launches use (`safeCustomAgentRealPath`): the path must be a real, direct
+   * child of the scan dir and either a loose `.yaml`/`.yml` file or a bundle
+   * directory containing a regular `config.yaml`. Returns the real (symlink-
+   * resolved) absolute path, or null (caller Notices + aborts). NEVER throws.
+   */
+  private validateAgentPath(agentPath: string): string | null {
+    return safeCustomAgentRealPath(agentPath, this.agentConfigDir() ?? "", {
+      exists: (p) => fs.existsSync(p),
+      realpath: (p) => fs.realpathSync(p),
+      isFile: (p) => fs.statSync(p).isFile(),
+      isDirectory: (p) => fs.statSync(p).isDirectory(),
+      isRegularFileNoFollow: (p) => fs.lstatSync(p).isFile(),
+    });
+  }
+
+  /**
+   * Open a discovered custom agent's config in the OS default app. `.omnigent/`
+   * is a dot-folder outside the Vault API index, so (like openSkill's non-indexed
+   * branch) we open via Electron `shell.openPath` rather than the Vault API. A
+   * bundle's launch path is the DIRECTORY, so we open `<dir>/config.yaml`; a loose
+   * agent path is the file itself. If it can't be opened, fall back to a Notice
+   * showing the absolute path. `agentPath` comes from our own discovery scan.
+   */
+  async openCustomAgent(agentPath: string): Promise<void> {
+    let fileToOpen = agentPath;
+    try {
+      if (fs.statSync(agentPath).isDirectory()) {
+        fileToOpen = nodePath.join(agentPath, BUNDLE_CONFIG_NAME);
+      }
+    } catch {
+      // stat failed — fall through; shell.openPath will Notice with the path.
+    }
+    try {
+      const result: string = await shell.openPath(fileToOpen);
+      if (result) {
+        new Notice(`Could not open agent config (${result}). Path: ${fileToOpen}`);
+      }
+    } catch (err) {
+      console.error("[skill-layer] openPath (agent) failed:", err);
+      new Notice(`Could not open agent config. Path: ${fileToOpen}`);
+    }
+  }
+
+  /**
+   * Launch a UI-visible omnigent SESSION for a discovered custom agent
+   * (`omnigent run <agent-path> -p "<default prompt>"`). The agent path is
+   * re-validated through `safeCustomAgentRealPath` (same gate as skill launches);
+   * a path that fails validation Notices and does NOT spawn. Reuses the shared
+   * hardened spawn surface (allowlisted binary, shell:false, array args, stdio
+   * ignore). Since the spawn is non-interactive, a default opening prompt is
+   * passed so the session opens and is visible in the omnigent UI.
+   */
+  async launchCustomAgent(agentPath: string): Promise<void> {
+    if (!this.detector.canScanExternal()) {
+      new Notice("Skill Layer: launching requires the desktop app.");
+      return;
+    }
+    const cwd = this.detector.vaultBasePath();
+    if (!cwd) {
+      new Notice("Skill Layer: could not resolve the vault path; not launching.");
+      return;
+    }
+    const real = this.validateAgentPath(agentPath);
+    if (!real) {
+      new Notice(
+        "Skill Layer: this agent path failed validation; not launching.",
+      );
+      return;
+    }
+    const binaryPath = this.resolveBinaryOrNotice();
+    if (!binaryPath) return;
+
+    const argv = buildOmnigentArgv({
+      binaryPath,
+      prompt: AGENT_SESSION_PROMPT,
+      serverUrl: this.settings.omnigentServerUrl,
+      agent: { mode: "custom", path: real },
+    });
+    this.spawnOmnigent(
+      argv,
+      cwd,
+      `Launching agent session (${nodePath.basename(real)}) in omnigent — ` +
+        "it should appear in the omnigent UI shortly.",
     );
+  }
+
+  /**
+   * Copy the exact CLI to start a session with a custom agent plus a placeholder
+   * prompt: `omnigent run <validated-abs-agent-path> -p "<your prompt here>"`.
+   * The path is re-validated through the SAME gate as launch; a path that fails
+   * validation Notices and copies nothing.
+   */
+  async copyCustomAgentInvocation(agentPath: string): Promise<void> {
+    const real = this.validateAgentPath(agentPath);
+    if (!real) {
+      new Notice(
+        "Skill Layer: this agent path failed validation; nothing copied.",
+      );
+      return;
+    }
+    const invocation = buildAgentInvocation(real);
+    try {
+      await navigator.clipboard.writeText(invocation);
+      new Notice(`Copied invocation: ${invocation}`);
+    } catch (err) {
+      console.error("[skill-layer] clipboard write failed:", err);
+      new Notice(`Invocation: ${invocation}`);
+    }
   }
 
   // --- Tagging (write side) ----------------------------------------------

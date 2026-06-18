@@ -1,6 +1,13 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import { AGENT_DEFAULT_VALUE, BUILTIN_AGENTS } from "./launch";
 import type SkillLayerPlugin from "./main";
+import {
+  AgentRowModel,
+  buildAgentsTabModel,
+  DEFAULT_TAB,
+  SkillLayerTab,
+  TABS,
+} from "./tabs";
 import { Skill } from "./types";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
@@ -11,6 +18,10 @@ export class SkillBrowserView extends ItemView {
   /** Active tag filters (lowercased), AND-combined with the text filter. */
   private activeTags = new Set<string>();
   private listEl: HTMLElement | null = null;
+  /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
+  private activeTab: SkillLayerTab = DEFAULT_TAB;
+  /** Container the active tab's content renders into (below the tab bar). */
+  private tabContentEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: SkillLayerPlugin) {
     super(leaf);
@@ -33,7 +44,7 @@ export class SkillBrowserView extends ItemView {
     this.render();
     // Dot-folder / external roots emit no metadataCache events — refresh on open.
     await this.plugin.rescan();
-    this.renderList();
+    this.renderActiveTab();
   }
 
   async onClose(): Promise<void> {
@@ -42,9 +53,11 @@ export class SkillBrowserView extends ItemView {
 
   /** Called by the plugin after a rescan / tag write so the view stays current. */
   refresh(): void {
-    this.renderList();
+    // Re-render whichever tab is showing (rescan also re-scans custom agents).
+    this.renderActiveTab();
   }
 
+  /** Render the persistent chrome (title + rescan + tab bar) and the active tab. */
   private render(): void {
     const root = this.contentEl;
     root.empty();
@@ -61,10 +74,46 @@ export class SkillBrowserView extends ItemView {
     rescanBtn.createSpan({ text: "Rescan" });
     rescanBtn.addEventListener("click", async () => {
       await this.plugin.rescan();
-      this.renderList();
+      this.renderActiveTab();
     });
 
-    const search = root.createEl("input", {
+    this.renderTabBar(root);
+
+    this.tabContentEl = root.createDiv({ cls: "skill-layer-tabcontent" });
+    this.renderActiveTab();
+  }
+
+  /** The Skills | Agents tab bar; clicking a tab switches the rendered content. */
+  private renderTabBar(root: HTMLElement): void {
+    const bar = root.createDiv({ cls: "skill-layer-tabbar" });
+    for (const tab of TABS) {
+      const active = this.activeTab === tab.id;
+      const btn = bar.createEl("button", {
+        cls: "skill-layer-tab" + (active ? " is-active" : ""),
+        text: tab.label,
+        attr: { "aria-label": `${tab.label} tab`, "aria-selected": String(active) },
+      });
+      btn.addEventListener("click", () => {
+        if (this.activeTab === tab.id) return;
+        this.activeTab = tab.id;
+        // Re-render the whole view so tab-bar active state + content both update.
+        this.render();
+      });
+    }
+  }
+
+  /** Render the content for the active tab into the tab-content container. */
+  private renderActiveTab(): void {
+    const c = this.tabContentEl;
+    if (!c) return;
+    c.empty();
+    if (this.activeTab === "agents") this.renderAgentsTab(c);
+    else this.renderSkillsTab(c);
+  }
+
+  /** The Skills tab: the existing browser (search + filters + facet + rows). */
+  private renderSkillsTab(c: HTMLElement): void {
+    const search = c.createEl("input", {
       cls: "skill-layer-search",
       attr: {
         type: "text",
@@ -78,8 +127,85 @@ export class SkillBrowserView extends ItemView {
       this.renderList();
     });
 
-    this.listEl = root.createDiv({ cls: "skill-layer-list" });
+    this.listEl = c.createDiv({ cls: "skill-layer-list" });
     this.renderList();
+  }
+
+  /** The Agents tab: a Refresh control + the discovered custom agents (M10). */
+  private renderAgentsTab(c: HTMLElement): void {
+    // Refresh control — re-scan custom agents (replaces the Settings button being
+    // removed next milestone). refreshCustomAgents re-renders open views.
+    const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
+    const refreshBtn = toolbar.createEl("button", {
+      cls: "skill-layer-rescan",
+      attr: { "aria-label": "Refresh custom agents" },
+    });
+    setIcon(refreshBtn, "refresh-cw");
+    refreshBtn.createSpan({ text: "Refresh" });
+    refreshBtn.addEventListener("click", () => {
+      this.plugin.refreshCustomAgents();
+    });
+
+    const agents = this.plugin.getCustomAgents();
+    const model = buildAgentsTabModel(agents);
+
+    const count = c.createDiv({ cls: "skill-layer-count" });
+    count.setText(
+      `${agents.length} custom agent${agents.length === 1 ? "" : "s"}`,
+    );
+
+    if (model.empty) {
+      const empty = c.createDiv({ cls: "skill-layer-empty" });
+      empty.setText(model.text);
+      return;
+    }
+
+    const list = c.createDiv({ cls: "skill-layer-list" });
+    for (const row of model.rows) this.renderAgentRow(list, row);
+  }
+
+  /** One Agents-tab row: name + description, with Open / Launch / Copy actions. */
+  private renderAgentRow(parent: HTMLElement, row: AgentRowModel): void {
+    const el = parent.createDiv({ cls: "skill-layer-row" });
+
+    const main = el.createDiv({ cls: "skill-layer-row-main" });
+    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
+    const nameEl = nameLine.createSpan({
+      text: row.title,
+      cls: "skill-layer-row-name",
+    });
+    // Description as subtitle when present; also a title tooltip on the name.
+    if (row.subtitle) nameEl.setAttr("title", row.subtitle);
+    nameLine.createSpan({ text: "agent", cls: "skill-layer-row-badge" });
+
+    if (row.subtitle) {
+      main.createDiv({ cls: "skill-layer-row-desc", text: row.subtitle });
+    }
+    main.createDiv({ cls: "skill-layer-row-path", text: row.path });
+
+    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+
+    const openBtn = actions.createEl("button", {
+      cls: "skill-layer-action",
+      text: "Open file",
+    });
+    openBtn.addEventListener("click", () => this.plugin.openCustomAgent(row.path));
+
+    const launchBtn = actions.createEl("button", {
+      cls: "skill-layer-action",
+      text: "Launch session",
+    });
+    launchBtn.addEventListener("click", () =>
+      this.plugin.launchCustomAgent(row.path),
+    );
+
+    const copyBtn = actions.createEl("button", {
+      cls: "skill-layer-action",
+      text: "Copy invocation",
+    });
+    copyBtn.addEventListener("click", () =>
+      this.plugin.copyCustomAgentInvocation(row.path),
+    );
   }
 
   private renderList(): void {

@@ -86,6 +86,32 @@ export function buildOmnigentArgv(opts: {
   return argv;
 }
 
+/**
+ * Default opening prompt for a custom-agent SESSION launched from the Agents tab
+ * (M10). That spawn is non-interactive (stdio ignored), so a sensible `-p`
+ * prompt is passed so the session actually opens and is visible in the omnigent
+ * UI. Reaches argv as the single inert `-p` element.
+ */
+export const AGENT_SESSION_PROMPT =
+  "Hi — what can you help with in this vault?";
+
+/**
+ * Placeholder prompt embedded in the copyable Agents-tab invocation string
+ * (M10). This is clipboard text only — it never reaches argv.
+ */
+export const AGENT_INVOCATION_PLACEHOLDER = "<your prompt here>";
+
+/**
+ * The exact CLI to start a session with a custom agent, for the Agents-tab
+ * "Copy invocation" action (M10): `omnigent run <agentPath> -p "<placeholder>"`.
+ * `agentPath` MUST be the validated absolute real path (a loose `.yaml`/`.yml`
+ * file or a bundle directory) produced by `safeCustomAgentRealPath`. Clipboard
+ * text only — pure / unit-testable.
+ */
+export function buildAgentInvocation(agentPath: string): string {
+  return `${OMNIGENT_BIN_NAME} run ${agentPath} -p "${AGENT_INVOCATION_PLACEHOLDER}"`;
+}
+
 // =====================================================================
 // Per-skill AGENT selector (replaces the M1–M7 harness selector).
 //

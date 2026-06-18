@@ -23,6 +23,44 @@
   cursor: pointer;
 }
 
+/* --- Tab bar (M10): Skills | Agents ------------------------------------- */
+
+.skill-layer-tabbar {
+  display: flex;
+  gap: 4px;
+  margin: 10px 0 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.skill-layer-tab {
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 12px;
+  color: var(--text-muted);
+  font-weight: var(--font-semibold);
+}
+
+.skill-layer-tab:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.skill-layer-tab.is-active {
+  color: var(--text-accent);
+  border-bottom-color: var(--interactive-accent);
+}
+
+/* Agents-tab toolbar holding the Refresh control. */
+.skill-layer-agents-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0 4px;
+}
+
 .skill-layer-search {
   width: 100%;
   margin: 10px 0;
