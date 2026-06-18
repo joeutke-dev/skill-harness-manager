@@ -24,6 +24,7 @@ import {
   buildLaunchPrompt,
   buildOmnigentArgv,
   buildRightClickMenuItems,
+  buildSkillInvocation,
   BUNDLE_CONFIG_NAME,
   CustomAgent,
   decodeAgentChoice,
@@ -164,6 +165,15 @@ export default class SkillLayerPlugin extends Plugin {
       "discoveredHarnesses",
       "customHarnesses",
       "omnigentHarness",
+      // M11: the user-configurable invocation template and the omnigent server
+      // URL are gone. The "Copy invocation" action now uses a FIXED natural-
+      // language form (`Use the <name> skill.`), and server routing is decided
+      // by omnigent's own config.yaml (the plugin never passes `--server`).
+      // Strip both fail-closed so a stale data.json can never reintroduce them;
+      // every OTHER setting (scanRoots, pins, skillAgent, omnigentBinaryPath,
+      // appendVaultAnchor, …) is preserved by the Object.assign above.
+      "invocationTemplate",
+      "omnigentServerUrl",
     ]) {
       delete raw[key];
     }
@@ -625,9 +635,14 @@ export default class SkillLayerPlugin extends Plugin {
     }
   }
 
-  /** Copy the skill's invocation string to the clipboard (row action). */
+  /**
+   * Copy the skill's invocation string to the clipboard (row action). The
+   * invocation is the FIXED natural-language form `Use the <name> skill.` (M11
+   * removed the user-configurable template). It embeds no path, so no shell
+   * quoting is needed.
+   */
   async copyInvocation(skill: Skill): Promise<void> {
-    const invocation = this.buildInvocation(skill);
+    const invocation = buildSkillInvocation(skill.name);
     try {
       await navigator.clipboard.writeText(invocation);
       new Notice(`Copied invocation: ${invocation}`);
@@ -635,13 +650,6 @@ export default class SkillLayerPlugin extends Plugin {
       console.error("[skill-layer] clipboard write failed:", err);
       new Notice(`Invocation: ${invocation}`);
     }
-  }
-
-  private buildInvocation(skill: Skill): string {
-    return this.settings.invocationTemplate
-      .replace(/\{name\}/g, skill.name)
-      .replace(/\{path\}/g, skill.path)
-      .replace(/\{label\}/g, skill.sourceLabel);
   }
 
   /**
@@ -698,7 +706,6 @@ export default class SkillLayerPlugin extends Plugin {
     const argv = buildOmnigentArgv({
       binaryPath,
       prompt,
-      serverUrl: this.settings.omnigentServerUrl,
       agent,
     });
 
@@ -883,7 +890,6 @@ export default class SkillLayerPlugin extends Plugin {
     const argv = buildOmnigentArgv({
       binaryPath,
       prompt: AGENT_SESSION_PROMPT,
-      serverUrl: this.settings.omnigentServerUrl,
       agent: { mode: "custom", path: real },
     });
     this.spawnOmnigent(

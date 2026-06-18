@@ -66,6 +66,8 @@ const {
   AGENT_SESSION_PROMPT,
   AGENT_INVOCATION_PLACEHOLDER,
   buildAgentInvocation,
+  buildSkillInvocation,
+  shellSingleQuote,
   augmentPath,
 } = await import(pathToFileURL(outfile).href);
 
@@ -221,25 +223,27 @@ console.log("\n[b] Hostile path stays inert inside the single -p element");
   const flagLike = argvHostile.filter((x) => /^-/.test(x));
   check("the only flag-like argv element is `-p`", flagLike.length === 1 && flagLike[0] === "-p");
 
-  // With a server + a custom agent configured, those become their OWN elements,
-  // but the hostile CONTEXT path STILL stays contained in the prompt only (the
-  // custom config path is a separate, distinct inert element).
+  // With a custom agent configured, the config path is its OWN element, but the
+  // hostile CONTEXT path STILL stays contained in the prompt only (the custom
+  // config path is a separate, distinct inert element). M11: a stale
+  // `serverUrl` property is IGNORED — no `--server` token is ever emitted.
   const cfg = `${VAULT}/.omnigent/agent-configs/my-agent.yaml`;
   const argvWithFlags = buildOmnigentArgv({
     binaryPath: BIN,
     prompt: buildLaunchPrompt("transcribe-meeting", VAULT, true, hostile),
-    serverUrl: "https://omni.example",
+    serverUrl: "https://omni.example", // stale field — must be ignored
     agent: { mode: "custom", path: cfg },
   });
   check(
-    "configured shape: [bin, run, --server, <url>, <config>, -p, prompt]",
-    deepEq(argvWithFlags.slice(0, 5), [BIN, "run", "--server", "https://omni.example", cfg]) &&
-      argvWithFlags[5] === "-p" &&
-      argvWithFlags.length === 7,
+    "configured shape: [bin, run, <config>, -p, prompt] (no --server)",
+    deepEq(argvWithFlags.slice(0, 3), [BIN, "run", cfg]) &&
+      argvWithFlags[3] === "-p" &&
+      argvWithFlags.length === 5,
   );
+  check("stale serverUrl never emits a --server token", argvWithFlags.indexOf("--server") === -1);
   check(
-    "hostile context path still contained ONLY in the prompt element when flags set",
-    argvWithFlags[6].includes(hostile) && !argvWithFlags.slice(0, 6).some((x) => x.includes(hostile)),
+    "hostile context path still contained ONLY in the prompt element when config set",
+    argvWithFlags[4].includes(hostile) && !argvWithFlags.slice(0, 4).some((x) => x.includes(hostile)),
   );
 }
 
@@ -351,8 +355,8 @@ console.log("\n[e] Per-skill agent resolution (fail-closed for each kind)");
 }
 
 // =====================================================================
-// (f) argv shape for each launch form (Default / builtin / custom), with
-//     and without --server; the prompt stays a single inert `-p` element.
+// (f) argv shape for each launch form (Default / builtin / custom); the prompt
+//     stays a single inert `-p` element and `--server` is NEVER emitted (M11).
 // =====================================================================
 console.log("\n[f] argv shape for each launch form (Default / polly / custom)");
 {
@@ -379,16 +383,18 @@ console.log("\n[f] argv shape for each launch form (Default / polly / custom)");
   // No `--harness` is EVER emitted (omnigent picks the harness).
   check("no --harness token in any form", ![argvDefault, argvPolly, argvCustom].some((a) => a.includes("--harness")));
 
-  // With --server set, the flag is its own two elements in every form; the
-  // prompt stays the single final `-p` element.
+  // M11: `--server` is NEVER emitted — omnigent's own config.yaml decides server
+  // routing. Even a stale `serverUrl` property (from an old data.json) is ignored
+  // by the builder, in EVERY launch form. The prompt stays the final `-p` element.
   const url = "https://omni.example";
   const sd = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "default" } });
   const sp = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "builtin", name: "polly" } });
   const sc = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "custom", path: GOOD_YAML } });
-  check("Default+server: [bin, run, --server, url, -p, prompt]", deepEq(sd, [BIN, "run", "--server", url, "-p", prompt]));
-  check("polly+server: [bin, polly, --server, url, -p, prompt]", deepEq(sp, [BIN, "polly", "--server", url, "-p", prompt]));
-  check("custom+server: [bin, run, --server, url, <config>, -p, prompt]", deepEq(sc, [BIN, "run", "--server", url, GOOD_YAML, "-p", prompt]));
+  check("Default ignores stale serverUrl: [bin, run, -p, prompt]", deepEq(sd, [BIN, "run", "-p", prompt]));
+  check("polly ignores stale serverUrl: [bin, polly, -p, prompt]", deepEq(sp, [BIN, "polly", "-p", prompt]));
+  check("custom ignores stale serverUrl: [bin, run, <config>, -p, prompt]", deepEq(sc, [BIN, "run", GOOD_YAML, "-p", prompt]));
   for (const [n, a] of [["Default", sd], ["polly", sp], ["custom", sc]]) {
+    check(`${n}: NO --server token even with a stale serverUrl`, a.indexOf("--server") === -1);
     eq(`${n}: prompt is the final element`, a[a.length - 1], prompt);
     eq(`${n}: the lone -p precedes the prompt`, a[a.length - 2], "-p");
   }
@@ -527,32 +533,63 @@ console.log("\n[k] agent encode/decode + migration strips legacy harness keys");
   }
 
   // Mirror main.ts loadSettings migration: a stale data.json carrying every
-  // legacy harness key (global + per-skill machinery) gets them stripped, while
-  // everything else — including the new skillAgent map — is preserved.
+  // legacy harness key (global + per-skill machinery) AND the M11-removed fields
+  // (invocationTemplate + omnigentServerUrl) gets them ALL stripped, while every
+  // other setting — including the new skillAgent map — is preserved.
+  // This is the EXACT key list main.ts deletes.
+  const M11_STRIP_KEYS = [
+    "skillHarness",
+    "discoveredHarnesses",
+    "customHarnesses",
+    "omnigentHarness",
+    "invocationTemplate",
+    "omnigentServerUrl",
+  ];
   const persisted = {
     skillHarness: { "/abs/skill.md": "codex" },
     discoveredHarnesses: ["newharness"],
     customHarnesses: ["mything"],
     omnigentHarness: "claude",
+    invocationTemplate: "/{name}", // M11-removed
+    omnigentServerUrl: "https://stale.example", // M11-removed
     skillAgent: { "/abs/skill.md": { kind: "builtin", name: "polly" } },
     pinnedSkillIds: ["/abs/skill.md"],
-    invocationTemplate: "/{name}",
+    rightClickSkillIds: ["/abs/skill.md"],
+    skillIcons: { "/abs/skill.md": "wand" },
+    scanRoots: [{ path: "", kind: "vault", enabled: true }],
+    omnigentBinaryPath: "/opt/homebrew/bin/omnigent",
+    appendVaultAnchor: true,
   };
   const merged = Object.assign({}, persisted);
-  for (const key of ["skillHarness", "discoveredHarnesses", "customHarnesses", "omnigentHarness"]) {
+  for (const key of M11_STRIP_KEYS) {
     delete merged[key];
   }
   check("skillHarness stripped", merged.skillHarness === undefined);
   check("discoveredHarnesses stripped", merged.discoveredHarnesses === undefined);
   check("customHarnesses stripped", merged.customHarnesses === undefined);
   check("omnigentHarness stripped", merged.omnigentHarness === undefined);
+  // M11: the two removed fields are stripped fail-closed.
+  check("invocationTemplate stripped (M11)", merged.invocationTemplate === undefined);
+  check("omnigentServerUrl stripped (M11)", merged.omnigentServerUrl === undefined);
+  // Every other setting survives untouched.
   check("skillAgent preserved", deepEq(merged.skillAgent, { "/abs/skill.md": { kind: "builtin", name: "polly" } }));
-  check("unrelated settings preserved", deepEq(merged.pinnedSkillIds, ["/abs/skill.md"]) && merged.invocationTemplate === "/{name}");
+  check("scanRoots preserved", deepEq(merged.scanRoots, [{ path: "", kind: "vault", enabled: true }]));
+  check("pinnedSkillIds preserved", deepEq(merged.pinnedSkillIds, ["/abs/skill.md"]));
+  check("rightClickSkillIds preserved", deepEq(merged.rightClickSkillIds, ["/abs/skill.md"]));
+  check("skillIcons preserved", deepEq(merged.skillIcons, { "/abs/skill.md": "wand" }));
+  check("omnigentBinaryPath preserved", merged.omnigentBinaryPath === "/opt/homebrew/bin/omnigent");
+  check("appendVaultAnchor preserved", merged.appendVaultAnchor === true);
+
+  // The migration must NOT throw on an absent / odd-shaped data.json: deleting a
+  // missing key is a no-op; an empty object survives cleanly.
+  const emptyMerged = {};
+  for (const key of M11_STRIP_KEYS) delete emptyMerged[key]; // no throw
+  check("migration on empty data.json is a clean no-op", deepEq(emptyMerged, {}));
 
   // A skill that previously had a harness selected reverts to the Default agent
   // (it has no skillAgent entry → resolveAgentLaunch yields mode default).
   const reverted = Object.assign({}, persisted);
-  for (const key of ["skillHarness", "discoveredHarnesses", "customHarnesses", "omnigentHarness", "skillAgent"]) {
+  for (const key of [...M11_STRIP_KEYS, "skillAgent"]) {
     delete reverted[key];
   }
   check(
@@ -903,14 +940,40 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
   check("agent-session argv == [bin,'run',<path>,'-p',<prompt>]", deepEq(launchArgv, [BIN, "run", AGENT_PATH, "-p", AGENT_SESSION_PROMPT]));
   check("agent path is a SINGLE inert argv element", launchArgv.filter((a) => a === AGENT_PATH).length === 1);
   check("default session prompt is a non-empty, non-slash sentence", typeof AGENT_SESSION_PROMPT === "string" && AGENT_SESSION_PROMPT.length > 0 && !AGENT_SESSION_PROMPT.startsWith("/"));
-  // With a server URL the path stays a single positional after --server.
+  // M11: a stale serverUrl is IGNORED — the agent-session argv emits no --server.
   const launchArgvSrv = buildOmnigentArgv({ binaryPath: BIN, prompt: AGENT_SESSION_PROMPT, serverUrl: "https://x", agent: { mode: "custom", path: AGENT_PATH } });
-  check("agent-session argv (with --server) keeps path inert after run", deepEq(launchArgvSrv, [BIN, "run", "--server", "https://x", AGENT_PATH, "-p", AGENT_SESSION_PROMPT]));
+  check("agent-session argv ignores stale serverUrl: [bin,run,<path>,-p,prompt]", deepEq(launchArgvSrv, [BIN, "run", AGENT_PATH, "-p", AGENT_SESSION_PROMPT]));
+  check("agent-session argv emits NO --server token", launchArgvSrv.indexOf("--server") === -1);
 
-  // --- copy-invocation string format --------------------------------------
-  eq("copy invocation == omnigent run <path> -p \"<your prompt here>\"", buildAgentInvocation(AGENT_PATH), `omnigent run ${AGENT_PATH} -p "<your prompt here>"`);
+  // --- copy-invocation string format (M11: path is SHELL-QUOTED) ----------
+  eq(
+    "copy invocation == omnigent run '<path>' -p \"<your prompt here>\"",
+    buildAgentInvocation(AGENT_PATH),
+    `omnigent run '${AGENT_PATH}' -p "<your prompt here>"`,
+  );
   check("invocation placeholder is the documented one", AGENT_INVOCATION_PLACEHOLDER === "<your prompt here>");
   check("invocation uses the 'run' subcommand (custom-agent form)", buildAgentInvocation(AGENT_PATH).startsWith("omnigent run "));
+  check("agent path is single-quote wrapped in the invocation", buildAgentInvocation(AGENT_PATH).includes(`run '${AGENT_PATH}'`));
+
+  // A path containing spaces and shell metacharacters is single-quoted so it
+  // pastes into a shell as ONE safe argument; an embedded single quote is escaped
+  // as '\'' (close-quote, escaped-quote, reopen-quote).
+  const SPACEY = "/Users/me/Obsidian Vault/.omnigent/agent-configs/my agent; rm -rf ~";
+  eq("shellSingleQuote wraps + leaves a metachar path inert", shellSingleQuote(SPACEY), `'${SPACEY}'`);
+  const QUOTEY = "/v/.omnigent/agent-configs/it's-an-agent";
+  eq("shellSingleQuote escapes an embedded single quote", shellSingleQuote(QUOTEY), `'/v/.omnigent/agent-configs/it'\\''s-an-agent'`);
+  check(
+    "agent invocation embeds the fully-quoted metachar path",
+    buildAgentInvocation(SPACEY) === `omnigent run '${SPACEY}' -p "<your prompt here>"`,
+  );
+  // Re-quoting is idempotent at the boundary: the metachars never escape the quotes.
+  check("metachars stay inside the single-quoted region", !/run [^']*[;&|$`]/.test(buildAgentInvocation(SPACEY)));
+
+  // --- skill copy-invocation == the FIXED natural-language form -----------
+  // (M11 removed the user-configurable template; embeds no path, no quoting.)
+  eq("skill copy invocation == `Use the <name> skill.`", buildSkillInvocation("transcribe-meeting"), "Use the transcribe-meeting skill.");
+  check("skill invocation has no leading slash (no REPL slash form)", !buildSkillInvocation("daily-note").startsWith("/"));
+  check("skill invocation matches the launch-prompt base", buildLaunchPrompt("daily-note", VAULT, false) === buildSkillInvocation("daily-note"));
 
   // --- launch rejects an agent path that fails validation ------------------
   // safeCustomAgentRealPath is the SAME gate launch + copy use; null ⇒ no spawn.

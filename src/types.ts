@@ -83,15 +83,8 @@ export interface SkillLayerSettings {
    * local state only — never written into any SKILL.md.
    */
   skillAgent: Record<string, SkillAgent>;
-  /**
-   * Template for the skill invocation string (the `-p` prompt for launch, and
-   * the "Copy invocation" clipboard text). Placeholders: {name} {path} {label}.
-   */
-  invocationTemplate: string;
   /** Absolute path to the omnigent binary; blank = auto-detect by probing. */
   omnigentBinaryPath: string;
-  /** Omnigent server URL; blank = local daemon (omit --server). */
-  omnigentServerUrl: string;
   /** Append the generic vault-anchor instruction to the launch prompt. */
   appendVaultAnchor: boolean;
   /**
@@ -111,8 +104,6 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   rightClickSkillIds: [],
   skillIcons: {},
   skillAgent: {},
-  invocationTemplate: "/{name}",
   omnigentBinaryPath: "",
-  omnigentServerUrl: "",
   appendVaultAnchor: true,
 };

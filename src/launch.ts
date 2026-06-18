@@ -56,27 +56,28 @@ export function buildLaunchPrompt(
  * Build the omnigent one-shot argv array (UI-visible run; exits on its own).
  * The per-skill AGENT selection (already resolved fail-closed by
  * `resolveAgentLaunch`) determines the subcommand and any positional:
- *   - default  → [bin, 'run', ('--server' url)?, '-p', prompt]
- *   - builtin  → [bin, <name>, ('--server' url)?, '-p', prompt]  (subcommand, NOT 'run')
- *   - custom   → [bin, 'run', ('--server' url)?, <abs agent path>, '-p', prompt]
+ *   - default  → [bin, 'run', '-p', prompt]
+ *   - builtin  → [bin, <name>, '-p', prompt]  (subcommand, NOT 'run')
+ *   - custom   → [bin, 'run', <abs agent path>, '-p', prompt]
  * For a custom agent the path (a loose `.yaml`/`.yml` FILE or a BUNDLE directory)
  * is emitted as a SINGLE inert argv element after `run` — never split, never its
  * own flag (the resolver guarantees it is an absolute path, so it can never be
  * read as an option). No '--no-session'
  * (that path is ephemeral / not UI-visible). The prompt is a single inert
  * element. No `--harness` is ever emitted: omnigent picks the harness itself.
+ *
+ * No `--server` is EVER emitted (M11): omnigent's own config.yaml decides server
+ * routing, so `omnigent run <agent>` with no `--server` routes via the user's
+ * omnigent config. This removed the overlap with omnigent's own configuration.
  */
 export function buildOmnigentArgv(opts: {
   binaryPath: string;
   prompt: string;
-  serverUrl?: string;
   agent?: ResolvedAgent;
 }): string[] {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
   const argv = [opts.binaryPath, subcommand];
-  const server = opts.serverUrl?.trim();
-  if (server) argv.push("--server", server);
   // The custom agent path is a single inert positional after `run` — a loose
   // `.yaml`/`.yml` file or a bundle directory. The resolver has already proven
   // it absolute + a real direct child of the scan dir, so it can never split or
@@ -84,6 +85,28 @@ export function buildOmnigentArgv(opts: {
   if (agent.mode === "custom") argv.push(agent.path);
   argv.push("-p", opts.prompt);
   return argv;
+}
+
+/**
+ * The FIXED skill invocation string for the "Copy invocation" row action
+ * (manual REPL/clipboard paste). Natural-language form `Use the <name> skill.`,
+ * consistent with how launch prompts are built (`buildLaunchPrompt`'s base).
+ * There is no user-configurable template (M11). Embeds NO path, so no shell
+ * quoting is required. Pure / unit-testable.
+ */
+export function buildSkillInvocation(skillName: string): string {
+  return `Use the ${skillName} skill.`;
+}
+
+/**
+ * POSIX single-quote shell escaping: wrap `s` in single quotes and escape any
+ * embedded single quote as `'\''`. This makes a path containing spaces or shell
+ * metacharacters safe to paste into a shell as one argument. Used only for the
+ * COPYABLE invocation strings (clipboard text); never for argv (argv is passed
+ * to spawn with shell:false and needs no quoting). Pure / unit-testable.
+ */
+export function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 /**
@@ -103,13 +126,15 @@ export const AGENT_INVOCATION_PLACEHOLDER = "<your prompt here>";
 
 /**
  * The exact CLI to start a session with a custom agent, for the Agents-tab
- * "Copy invocation" action (M10): `omnigent run <agentPath> -p "<placeholder>"`.
+ * "Copy invocation" action (M10): `omnigent run '<agentPath>' -p "<placeholder>"`.
  * `agentPath` MUST be the validated absolute real path (a loose `.yaml`/`.yml`
- * file or a bundle directory) produced by `safeCustomAgentRealPath`. Clipboard
+ * file or a bundle directory) produced by `safeCustomAgentRealPath`. The path is
+ * SHELL-QUOTED (POSIX single-quote wrap, M11) so a path containing spaces or
+ * shell metacharacters pastes safely into a shell as one argument. Clipboard
  * text only — pure / unit-testable.
  */
 export function buildAgentInvocation(agentPath: string): string {
-  return `${OMNIGENT_BIN_NAME} run ${agentPath} -p "${AGENT_INVOCATION_PLACEHOLDER}"`;
+  return `${OMNIGENT_BIN_NAME} run ${shellSingleQuote(agentPath)} -p "${AGENT_INVOCATION_PLACEHOLDER}"`;
 }
 
 // =====================================================================

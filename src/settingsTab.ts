@@ -1,5 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
-import { BUILTIN_AGENTS } from "./launch";
+import { App, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type SkillLayerPlugin from "./main";
 import { normalizeExternalRoot } from "./parse";
 import { RootKind, ScanRoot } from "./types";
@@ -17,6 +16,17 @@ function inferKind(path: string): RootKind {
   return "vault";
 }
 
+/**
+ * The Skill Layer settings page (M11: slimmed to install/storage config only).
+ * It is exactly three things, in order:
+ *   1. Scan roots — the discovery dirs (enable/remove + add a root).
+ *   2. Omnigent binary path — the install location.
+ *   3. Append vault-anchor instruction — the one launch-behavior toggle.
+ * Everything explanatory or duplicative of omnigent's own config / the M10
+ * Agents tab / the browser view (plugin description, invocation template,
+ * server URL, the Agents section, pinned-icon + tagging + pinned-skills text)
+ * was removed.
+ */
 export class SkillLayerSettingTab extends PluginSettingTab {
   private plugin: SkillLayerPlugin;
 
@@ -28,14 +38,6 @@ export class SkillLayerSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
-    containerEl.createEl("h2", { text: "Skill Layer" });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Discover, browse, and pin AI skills (SKILL.md files) across your vault, " +
-        "dot-folders like .claude/skills, and external desktop directories.",
-    });
 
     // --- Scan roots -------------------------------------------------------
     new Setting(containerEl)
@@ -124,35 +126,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
       });
     }
 
-    // --- Launch behavior --------------------------------------------------
-    new Setting(containerEl).setName("Launch").setHeading();
-
-    new Setting(containerEl)
-      .setName("Invocation template")
-      .setDesc(
-        "The skill invocation string for the “Copy invocation” action (for manual " +
-          "REPL paste). Launch uses a natural-language prompt instead. " +
-          "Placeholders: {name} {path} {label}.",
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("/{name}")
-          .setValue(settings.invocationTemplate)
-          .onChange(async (value) => {
-            settings.invocationTemplate = value || "/{name}";
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Launch (the ribbon icon and a skill row’s “Launch”) spawns a one-shot, " +
-        "UI-visible omnigent run in the vault directory — view it in the omnigent " +
-        "UI. The plugin spawns only the omnigent binary, with array arguments and " +
-        "no shell. “Copy invocation” and “Open file” are unchanged.",
-    });
-
+    // --- Omnigent binary path ---------------------------------------------
     new Setting(containerEl)
       .setName("Omnigent binary path")
       .setDesc(
@@ -169,22 +143,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName("Omnigent server URL")
-      .setDesc(
-        "Blank = local daemon (no --server). If set, the run is sent to this " +
-          "server so it appears in your remote omnigent UI.",
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("(local daemon)")
-          .setValue(settings.omnigentServerUrl)
-          .onChange(async (value) => {
-            settings.omnigentServerUrl = value.trim();
-            await this.plugin.saveSettings();
-          }),
-      );
-
+    // --- Append vault-anchor instruction ----------------------------------
     new Setting(containerEl)
       .setName("Append vault-anchor instruction")
       .setDesc(
@@ -196,161 +155,6 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           settings.appendVaultAnchor = value;
           await this.plugin.saveSettings();
         }),
-      );
-
-    // --- Agents -----------------------------------------------------------
-    this.renderAgentsSection(containerEl);
-
-    // The former global "Pinned ribbon icon" setting is gone — each pinned
-    // skill now picks its own Lucide icon from the Skill Layer browser ("Pin to
-    // ribbon…" / "Change icon"). Any old global value is read only as a
-    // one-time migration fallback for pre-existing pins.
-    new Setting(containerEl)
-      .setName("Pinned ribbon icons")
-      .setDesc(
-        "Each pinned skill chooses its own icon from the Skill Layer view — " +
-          'use "Pin to ribbon…" or "Change icon" on a skill row.',
-      );
-
-    // --- Tagging ----------------------------------------------------------
-    new Setting(containerEl).setName("Tagging").setHeading();
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Each skill shows tags from three sources: its frontmatter tags: field, " +
-        "#tag tokens in its description, and a dimmed virtual tag auto-derived " +
-        "from its folder. Click any chip to filter.",
-    });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Frontmatter tags: is the single authoritative place the UI writes. Only " +
-        "frontmatter chips have a remove ×; description and folder chips are " +
-        "read-only (edit the note to change a description #tag). “+ tag” adds to " +
-        "frontmatter — if a tag currently exists only in the description, adding " +
-        "it promotes it to the authoritative, natively-indexed frontmatter list.",
-    });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Writes happen ONLY on an explicit add/remove and never touch the " +
-        "description. In-vault frontmatter tags appear in Obsidian's native tag " +
-        "pane and search; external and dot-folder skills (e.g. .claude/skills) " +
-        "live outside the vault index, so only this plugin's tag layer applies " +
-        "to them. The body, line endings, and other frontmatter are preserved; " +
-        "the tags: field is normalized to a compact inline list.",
-    });
-
-    // --- Pinned skills ----------------------------------------------------
-    new Setting(containerEl).setName("Pinned skills").setHeading();
-    if (settings.pinnedSkillIds.length === 0) {
-      containerEl.createEl("p", {
-        cls: "setting-item-description",
-        text: "No skills pinned. Pin skills from the Skill Layer browser view.",
-      });
-    } else {
-      for (const id of [...settings.pinnedSkillIds]) {
-        const skill = this.plugin.getSkillById(id);
-        new Setting(containerEl)
-          .setName(skill?.name ?? "(missing skill)")
-          .setDesc(id)
-          .addButton((btn) =>
-            btn
-              .setButtonText("Unpin")
-              .setWarning()
-              .onClick(async () => {
-                await this.plugin.unpinById(id);
-                this.display();
-              }),
-          );
-      }
-    }
-  }
-
-  /**
-   * The "Agents" settings section: the per-skill "Run with" dropdown ties a
-   * skill to a specific omnigent AGENT (omnigent then picks the harness). Shows
-   * the built-in set (Default + the hardcoded allowlist) and the dynamically
-   * discovered custom agents from `<vault>/.omnigent/agent-configs`, plus a
-   * "Refresh agents" button that re-scans that directory. This is plugin-local
-   * and never written into any SKILL.md.
-   */
-  private renderAgentsSection(containerEl: HTMLElement): void {
-    new Setting(containerEl).setName("Agents").setHeading();
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Each skill row has a “Run with” dropdown that ties the skill to a " +
-        "specific omnigent agent; omnigent itself then picks the harness. " +
-        "“Default” launches omnigent run; a built-in agent launches as the " +
-        "omnigent <name> subcommand; a custom agent launches omnigent run " +
-        "<config.yaml>. Custom agents are discovered from " +
-        ".omnigent/agent-configs in your vault. Only a built-in name from the " +
-        "hardcoded allowlist or a validated config path inside that directory " +
-        "ever reaches the command line.",
-    });
-
-    // Built-in set (informational): Default + the hardcoded allowlist.
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "Built-in agents (always available):",
-    });
-    const builtinChips = containerEl.createDiv({
-      cls: "skill-layer-agent-chips",
-    });
-    builtinChips.createSpan({
-      cls: "skill-layer-chip skill-layer-agent-chip is-builtin",
-      text: "Default (omnigent run)",
-    });
-    for (const name of BUILTIN_AGENTS) {
-      builtinChips.createSpan({
-        cls: "skill-layer-chip skill-layer-agent-chip is-builtin",
-        attr: { title: `omnigent ${name}` },
-        text: name,
-      });
-    }
-
-    // Discovered custom agents.
-    const customAgents = this.plugin.getCustomAgents();
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        customAgents.length > 0
-          ? "Custom agents (discovered in .omnigent/agent-configs):"
-          : "No custom agents found in .omnigent/agent-configs.",
-    });
-    if (customAgents.length > 0) {
-      const customChips = containerEl.createDiv({
-        cls: "skill-layer-agent-chips",
-      });
-      for (const agent of customAgents) {
-        const chip = customChips.createSpan({
-          cls: "skill-layer-chip skill-layer-agent-chip is-custom",
-          attr: { title: agent.description ? `${agent.description}\n${agent.path}` : agent.path },
-        });
-        chip.setText(agent.name);
-      }
-    }
-
-    new Setting(containerEl)
-      .setName("Refresh agents")
-      .setDesc(
-        "Re-scan .omnigent/agent-configs for custom agent YAML configs.",
-      )
-      .addButton((btn) =>
-        btn
-          .setButtonText("Refresh agents")
-          .setCta()
-          .onClick(() => {
-            this.plugin.refreshCustomAgents();
-            const count = this.plugin.getCustomAgents().length;
-            new Notice(
-              `Skill Layer: found ${count} custom agent${
-                count === 1 ? "" : "s"
-              }.`,
-            );
-            this.display();
-          }),
       );
   }
 }
