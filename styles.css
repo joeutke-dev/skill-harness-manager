@@ -187,13 +187,22 @@
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  row-gap: var(--size-4-1);
+  column-gap: var(--size-4-2);
 }
 
 .skill-layer-action {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-4-1);
+  min-height: 28px;
+  padding: var(--size-2-1) var(--size-4-2);
   cursor: pointer;
   white-space: nowrap;
   font-size: var(--font-ui-smaller);
+  line-height: var(--line-height-tight);
   transition: background-color 0.1s ease, color 0.1s ease;
 }
 
@@ -210,7 +219,7 @@
 .skill-layer-agent-group {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--size-4-1);
   max-width: 100%;
 }
 
@@ -222,6 +231,10 @@
 /* Per-skill AGENT selector ("Run with") dropdown. Left-aligned to match native
    Obsidian selects; sizes to content and may shrink so it wraps cleanly. */
 .skill-layer-agent-select {
+  box-sizing: border-box;
+  min-height: 28px;
+  padding-block: var(--size-2-1);
+  line-height: var(--line-height-tight);
   flex: 0 1 auto;
   max-width: 100%;
 }
@@ -229,7 +242,9 @@
 /* The pinned-icon glyph shown inline on the "Change icon" button. */
 .skill-layer-action-icon {
   display: inline-flex;
-  vertical-align: middle;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
 }
 
 .skill-layer-action-icon .svg-icon {
