@@ -111,6 +111,13 @@ export class SkillBrowserView extends ItemView {
     else this.renderSkillsTab(c);
   }
 
+  /** Empty-state block: a muted lucide glyph above the explanatory copy. */
+  private renderEmptyState(parent: HTMLElement, text: string): void {
+    const empty = parent.createDiv({ cls: "skill-layer-empty" });
+    setIcon(empty.createSpan(), "layers");
+    empty.createSpan({ text });
+  }
+
   /** The Skills tab: the existing browser (search + filters + facet + rows). */
   private renderSkillsTab(c: HTMLElement): void {
     const search = c.createEl("input", {
@@ -133,8 +140,7 @@ export class SkillBrowserView extends ItemView {
 
   /** The Agents tab: a Refresh control + the discovered custom agents (M10). */
   private renderAgentsTab(c: HTMLElement): void {
-    // Refresh control — re-scan custom agents (replaces the Settings button being
-    // removed next milestone). refreshCustomAgents re-renders open views.
+    // Refresh control — re-scan custom agents. refreshCustomAgents re-renders open views.
     const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
     const refreshBtn = toolbar.createEl("button", {
       cls: "skill-layer-rescan",
@@ -155,8 +161,7 @@ export class SkillBrowserView extends ItemView {
     );
 
     if (model.empty) {
-      const empty = c.createDiv({ cls: "skill-layer-empty" });
-      empty.setText(model.text);
+      this.renderEmptyState(c, model.text);
       return;
     }
 
@@ -229,8 +234,8 @@ export class SkillBrowserView extends ItemView {
     );
 
     if (skills.length === 0) {
-      const empty = container.createDiv({ cls: "skill-layer-empty" });
-      empty.setText(
+      this.renderEmptyState(
+        container,
         all.length === 0
           ? "No skills found. Add scan roots in Settings → Skill Layer, then Rescan."
           : "No skills match the current filters.",
@@ -270,7 +275,8 @@ export class SkillBrowserView extends ItemView {
         cls: "skill-layer-chip is-active",
       });
       chip.createSpan({ cls: "skill-layer-chip-label", text: `#${tag}` });
-      const x = chip.createSpan({ cls: "skill-layer-chip-x", text: "×" });
+      const x = chip.createSpan({ cls: "skill-layer-chip-x" });
+      setIcon(x, "x");
       x.setAttr("aria-label", `Remove ${tag} filter`);
       x.addEventListener("click", () => this.toggleTagFilter(tag));
     }
@@ -375,13 +381,19 @@ export class SkillBrowserView extends ItemView {
     const rcEnabled = this.plugin.isRightClickEnabled(skill.id);
     const rcBtn = actions.createEl("button", {
       cls: "skill-layer-action" + (rcEnabled ? " is-pinned" : ""),
-      text: rcEnabled ? "✓ Right-click menu" : "Add to right-click menu",
       attr: {
         "aria-label": rcEnabled
           ? `Remove ${skill.name} from the file right-click menu`
           : `Add ${skill.name} to the file right-click menu`,
       },
     });
+    if (rcEnabled) {
+      const glyph = rcBtn.createSpan({ cls: "skill-layer-action-icon" });
+      setIcon(glyph, "check");
+      rcBtn.createSpan({ text: " Right-click menu" });
+    } else {
+      rcBtn.setText("Add to right-click menu");
+    }
     rcBtn.addEventListener("click", async () => {
       await this.plugin.toggleRightClick(skill);
       this.renderList();
@@ -396,7 +408,9 @@ export class SkillBrowserView extends ItemView {
     // dynamically-discovered YAML configs (label = name, tooltip = description).
     // Selecting persists settings.skillAgent[skill.id] (Default deletes the key
     // to keep data.json clean), re-validated fail-closed before storage.
-    const agentSel = actions.createEl("select", {
+    const agentGroup = actions.createDiv({ cls: "skill-layer-agent-group" });
+    agentGroup.createSpan({ cls: "skill-layer-agent-caption", text: "Run with" });
+    const agentSel = agentGroup.createEl("select", {
       cls: "skill-layer-action skill-layer-agent-select",
       attr: { "aria-label": `Run with (agent) for ${skill.name}` },
     }) as HTMLSelectElement;
@@ -492,7 +506,8 @@ export class SkillBrowserView extends ItemView {
       // Only frontmatter chips get a remove ×; the × stops propagation so
       // removing doesn't also toggle the filter.
       if (removable) {
-        const x = chip.createSpan({ cls: "skill-layer-chip-x", text: "×" });
+        const x = chip.createSpan({ cls: "skill-layer-chip-x" });
+        setIcon(x, "x");
         x.setAttr("aria-label", `Remove tag ${t.tag}`);
         x.addEventListener("click", async (evt) => {
           evt.stopPropagation();

@@ -82,7 +82,7 @@ export default class SkillLayerPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new SkillBrowserView(leaf, this),
     );
 
-    this.addRibbonIcon("layers", "Skill Layer: browse skills", () => {
+    this.addRibbonIcon("layers", "Skill Layer: toggle skills browser", () => {
       void this.toggleView();
     });
 

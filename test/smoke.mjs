@@ -85,7 +85,6 @@ const {
   DEFAULT_TAB,
   TABS,
   AGENTS_EMPTY_TEXT,
-  normalizeTab,
   buildAgentsTabModel,
 } = await import(pathToFileURL(tabsOut).href);
 
@@ -899,15 +898,14 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
   eq("default tab is Skills", DEFAULT_TAB, "skills");
   check("TABS are Skills then Agents", deepEq(TABS.map((t) => t.id), ["skills", "agents"]));
   check("TABS labels are Skills / Agents", deepEq(TABS.map((t) => t.label), ["Skills", "Agents"]));
-  // Simulate the click handler: state := normalizeTab(clicked id).
+  // Simulate the click handler: state := clicked tab.id (assigned directly,
+  // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
   eq("starts on Skills", tab, "skills");
-  tab = normalizeTab("agents");
+  tab = TABS[1].id;
   eq("switching to Agents → agents", tab, "agents");
-  tab = normalizeTab("skills");
+  tab = TABS[0].id;
   eq("switching back to Skills → skills", tab, "skills");
-  eq("unknown/stale tab id falls back to Skills", normalizeTab("garbage"), "skills");
-  eq("undefined tab id falls back to Skills", normalizeTab(undefined), "skills");
 
   // --- Agents tab renders N discovered agents -----------------------------
   const sampleAgents = [

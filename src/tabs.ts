@@ -24,15 +24,6 @@ export const AGENTS_EMPTY_TEXT =
   "No custom agents found in .omnigent/agent-configs/. " +
   "Create one with the create-custom-agent skill.";
 
-/**
- * Normalize a requested tab id to a known tab, defaulting to {@link DEFAULT_TAB}.
- * Any value other than the literal "agents" resolves to "skills", so an unknown
- * / stale value can never leave the view on a non-existent tab.
- */
-export function normalizeTab(id: unknown): SkillLayerTab {
-  return id === "agents" ? "agents" : "skills";
-}
-
 /** A single Agents-tab row's display fields. `path` is the discovered launch path. */
 export interface AgentRowModel {
   /** Display name (top-level `name:`, else filename stem / dir name). */
