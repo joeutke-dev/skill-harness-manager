@@ -294,9 +294,10 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /**
-   * Re-scan `<vault>/.omnigent/agent-configs` for `*.yaml`/`*.yml` custom agents
-   * into the cache (no view refresh). A missing directory yields zero agents (no
-   * error). All filesystem access is wrapped so this never throws.
+   * Re-scan `<vault>/.omnigent/agent-configs` for custom agents into the cache
+   * (no view refresh): loose `*.yaml`/`*.yml` files AND bundle directories
+   * (`<name>/config.yaml`). A missing directory yields zero agents (no error).
+   * All filesystem access is wrapped so this never throws.
    */
   private scanCustomAgents(): void {
     this.customAgents = discoverCustomAgents({
@@ -306,6 +307,13 @@ export default class SkillLayerPlugin extends Plugin {
       isFile: (p) => {
         try {
           return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      },
+      isDirectory: (p) => {
+        try {
+          return fs.statSync(p).isDirectory();
         } catch {
           return false;
         }
@@ -692,10 +700,11 @@ export default class SkillLayerPlugin extends Plugin {
     );
     // Per-skill AGENT, resolved fail-closed: a built-in name reaches argv as an
     // omnigent SUBCOMMAND only if it is in the hardcoded allowlist; a custom
-    // config path reaches argv as a single inert positional after `run` only if
-    // it still exists inside the scan dir and ends in .yaml/.yml. Anything else
-    // (absent / unknown kind / bad name / bad path) → the Default agent
-    // (`omnigent run …`). No display label/description ever flows to argv.
+    // path reaches argv as a single inert positional after `run` only if it is a
+    // real direct child of the scan dir AND is either a `.yaml`/`.yml` file or a
+    // bundle directory containing `config.yaml`. Anything else (absent / unknown
+    // kind / bad name / bad path) → the Default agent (`omnigent run …`). No
+    // display label/description ever flows to argv.
     const agent = resolveAgentLaunch(this.settings.skillAgent[skill.id], {
       scanDir: this.agentConfigDir() ?? "",
       exists: (p) => fs.existsSync(p),

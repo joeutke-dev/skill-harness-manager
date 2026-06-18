@@ -58,10 +58,11 @@ export function buildLaunchPrompt(
  * `resolveAgentLaunch`) determines the subcommand and any positional:
  *   - default  → [bin, 'run', ('--server' url)?, '-p', prompt]
  *   - builtin  → [bin, <name>, ('--server' url)?, '-p', prompt]  (subcommand, NOT 'run')
- *   - custom   → [bin, 'run', ('--server' url)?, <abs yaml path>, '-p', prompt]
- * For a custom agent the config path is emitted as a SINGLE inert argv element
- * after `run` — never split, never its own flag (the resolver guarantees it is
- * an absolute path, so it can never be read as an option). No '--no-session'
+ *   - custom   → [bin, 'run', ('--server' url)?, <abs agent path>, '-p', prompt]
+ * For a custom agent the path (a loose `.yaml`/`.yml` FILE or a BUNDLE directory)
+ * is emitted as a SINGLE inert argv element after `run` — never split, never its
+ * own flag (the resolver guarantees it is an absolute path, so it can never be
+ * read as an option). No '--no-session'
  * (that path is ephemeral / not UI-visible). The prompt is a single inert
  * element. No `--harness` is ever emitted: omnigent picks the harness itself.
  */
@@ -76,9 +77,10 @@ export function buildOmnigentArgv(opts: {
   const argv = [opts.binaryPath, subcommand];
   const server = opts.serverUrl?.trim();
   if (server) argv.push("--server", server);
-  // The custom config path is a single inert positional after `run`. The
-  // resolver has already proven it absolute + inside the scan dir + .yaml/.yml,
-  // so it can never split or become a flag.
+  // The custom agent path is a single inert positional after `run` — a loose
+  // `.yaml`/`.yml` file or a bundle directory. The resolver has already proven
+  // it absolute + a real direct child of the scan dir, so it can never split or
+  // become a flag.
   if (agent.mode === "custom") argv.push(agent.path);
   argv.push("-p", opts.prompt);
   return argv;
@@ -130,7 +132,11 @@ export type ResolvedAgent =
 
 /** A discovered custom agent (display metadata + the only argv-bound field, path). */
 export interface CustomAgent {
-  /** Absolute path to the YAML config — the ONLY field that can reach argv. */
+  /**
+   * Absolute launch path — the ONLY field that can reach argv. Either a loose
+   * YAML config FILE or a BUNDLE directory (`omnigent run <dir>`); never the
+   * `config.yaml` inside a bundle.
+   */
   path: string;
   /** Display label (top-level `name:`, else the filename stem). Never argv. */
   name: string;
@@ -153,10 +159,14 @@ export function isAllowedBuiltinAgent(name: unknown): name is BuiltinAgentName {
  * would lexically collapse back into the dir, e.g. `<scanDir>/sub/../evil.yaml`
  * or `<scanDir>/../agent-configs/evil.yaml`, is refused outright); it is an
  * ABSOLUTE path (so it can never be read as a flag — leading-dash safe by
- * construction); it ends in `.yaml`/`.yml`; and it is a direct child of
- * `scanDir`. Existence + a symlink-aware (realpath) containment check are
- * applied separately by `safeCustomAgentRealPath` (they require the filesystem).
- * Pure / unit-testable.
+ * construction); it carries either a `.yaml`/`.yml` extension (a loose file) OR
+ * NO file extension at all (a candidate BUNDLE directory `<name>/config.yaml`,
+ * whose directory path has no extension) — any OTHER extension (e.g. `.txt`) is
+ * rejected here; and it is a direct child of `scanDir`. Whether the path is in
+ * fact a loose `.yaml`/`.yml` file or a bundle directory containing
+ * `config.yaml` is decided by the filesystem-aware `safeCustomAgentRealPath`;
+ * that gate also performs existence + a symlink-aware (realpath) containment
+ * check. Pure / unit-testable.
  */
 export function isValidCustomAgentPath(p: unknown, scanDir: string): boolean {
   if (typeof p !== "string" || p.length === 0) return false;
@@ -166,10 +176,16 @@ export function isValidCustomAgentPath(p: unknown, scanDir: string): boolean {
   // would otherwise survive — the contract forbids traversal syntax entirely.
   if (rawPathHasDotDot(p)) return false;
   if (!nodePath.isAbsolute(p)) return false;
-  if (!/\.ya?ml$/i.test(p)) return false;
-  // Direct child of the scan dir only (lexical). With `..` already rejected,
-  // resolve() only normalizes separators / `.` segments here.
+  // With `..` already rejected, resolve() only normalizes separators / `.`
+  // segments here.
   const resolved = nodePath.resolve(p);
+  // A loose YAML file (`.yaml`/`.yml`) OR an extension-less path that may be a
+  // bundle directory. Any other extension is refused outright. The file-vs-dir
+  // distinction (and the `config.yaml`-inside requirement for a bundle) is the
+  // job of the fs-aware gate.
+  const ext = nodePath.extname(resolved).toLowerCase();
+  if (ext !== "" && ext !== ".yaml" && ext !== ".yml") return false;
+  // Direct child of the scan dir only (lexical).
   return nodePath.dirname(resolved) === nodePath.resolve(scanDir);
 }
 
@@ -178,16 +194,27 @@ function rawPathHasDotDot(p: string): boolean {
   return p.split(/[\\/]+/).some((seg) => seg === "..");
 }
 
+/** Basename of the canonical config file inside an omnigent BUNDLE directory. */
+export const BUNDLE_CONFIG_NAME = "config.yaml";
+
 /**
  * The FULL custom-agent path gate, fail-closed and defense-in-depth. Returns the
  * real (symlink-resolved) absolute path ONLY if every check holds, else null
- * (caller falls back to Default); NEVER throws. Checks, in order:
+ * (caller falls back to Default); NEVER throws. The path may resolve to EITHER a
+ * loose YAML file or an omnigent BUNDLE directory. Checks, in order:
  *   1–3. lexical gate (`isValidCustomAgentPath`: no `..` syntax, absolute,
- *        `.yaml`/`.yml`, lexical direct-child of scanDir);
- *   4.   the file exists AND is a regular file (injected `exists` + `isFile`);
+ *        `.yaml`/`.yml` OR extension-less, lexical direct-child of scanDir);
+ *   4.   the path exists (injected `exists`) and is EITHER
+ *          (a) a regular FILE ending `.yaml`/`.yml`, OR
+ *          (b) a DIRECTORY that directly contains a regular file `config.yaml`
+ *              (the canonical bundle layout — `omnigent run <dir>`);
+ *        anything else (extension-less plain file, dir without `config.yaml`,
+ *        special file) → null;
  *   5.   the symlink gap is closed — `realpath` of the candidate AND of scanDir
  *        are computed, and the candidate's real dirname must equal the real
  *        scanDir (a real, direct child of the real scan dir).
+ * The emitted real path is the validated FILE (loose) or DIRECTORY (bundle) —
+ * never the `config.yaml` inside a bundle (`omnigent run <dir>` is canonical).
  * A broken symlink / ENOENT / any throw from the fs ops resolves to null. fs
  * ops are injected so this stays unit-testable; the real `fs` is the default.
  */
@@ -198,17 +225,26 @@ export function safeCustomAgentRealPath(
     exists?: (p: string) => boolean;
     realpath: (p: string) => string;
     isFile: (p: string) => boolean;
+    isDirectory?: (p: string) => boolean;
   },
 ): string | null {
   if (!isValidCustomAgentPath(rawPath, scanDir)) return null;
   const p = rawPath as string;
   try {
     if (fsOps.exists && !fsOps.exists(p)) return null;
-    if (!fsOps.isFile(p)) return null;
+    // (a) loose YAML file, OR (b) bundle directory with a regular config.yaml.
+    let kindOk = false;
+    if (fsOps.isFile(p)) {
+      kindOk = /\.ya?ml$/i.test(p);
+    } else if (fsOps.isDirectory && fsOps.isDirectory(p)) {
+      kindOk = fsOps.isFile(nodePath.join(p, BUNDLE_CONFIG_NAME));
+    }
+    if (!kindOk) return null;
     const real = fsOps.realpath(p);
     const realDir = fsOps.realpath(scanDir);
     // Real, direct child of the real scan dir — closes the symlink gap that the
-    // lexical check alone (which never follows links) would miss.
+    // lexical check alone (which never follows links) would miss. Applies
+    // equally to a loose file and to a bundle directory.
     if (nodePath.dirname(real) !== realDir) return null;
     return real;
   } catch {
@@ -233,6 +269,7 @@ export function resolveAgentLaunch(
     exists: (p: string) => boolean;
     realpath?: (p: string) => string;
     isFile?: (p: string) => boolean;
+    isDirectory?: (p: string) => boolean;
   },
 ): ResolvedAgent {
   if (!stored || typeof stored !== "object") return { mode: "default" };
@@ -250,6 +287,7 @@ export function resolveAgentLaunch(
       exists: opts.exists,
       realpath: opts.realpath ?? ((p) => fs.realpathSync(p)),
       isFile: opts.isFile ?? ((p) => fs.statSync(p).isFile()),
+      isDirectory: opts.isDirectory ?? ((p) => fs.statSync(p).isDirectory()),
     });
     return real ? { mode: "custom", path: real } : { mode: "default" };
   }
@@ -303,18 +341,28 @@ function unquoteScalar(s: string): string {
 
 /**
  * Discover the custom agents in `dir` (the absolute
- * `<vaultBase>/.omnigent/agent-configs`). Only `*.yaml`/`*.yml` direct children
- * are considered; each is parsed for its top-level `name:` (display, else the
- * filename stem) and optional `description:` (tooltip). If `dir` is null or does
- * not exist (readdir throws), yields ZERO agents — never an error. fs callbacks
- * are injected so this stays pure / unit-testable. Results are sorted by
- * filename for stable ordering.
+ * `<vaultBase>/.omnigent/agent-configs`), considering ONLY direct children of
+ * two kinds:
+ *   1. LOOSE FILE  — a child ending `.yaml`/`.yml`; the launch path is the FILE,
+ *      its display name is read from that file's top-level `name:` (else the
+ *      filename stem).
+ *   2. BUNDLE DIR  — a child directory that directly contains a regular
+ *      `config.yaml`; the launch path is the DIRECTORY (`omnigent run <dir>` is
+ *      canonical — never the `config.yaml` inside it), its display name is read
+ *      from `<dir>/config.yaml`'s top-level `name:` (else the directory name).
+ * Bundle detection requires the injected `isDirectory` callback; without it only
+ * loose files are enumerated (the pre-bundle behavior). Subdirectories with no
+ * `config.yaml` and non-yaml files are ignored. Each yields an optional tooltip
+ * (`description:`). If `dir` is null or does not exist (readdir throws), yields
+ * ZERO agents — never an error. fs callbacks are injected so this stays pure /
+ * unit-testable. Results are sorted by entry name for stable ordering.
  */
 export function discoverCustomAgents(opts: {
   dir: string | null;
   readdir: (dir: string) => string[];
   readFile: (path: string) => string;
   isFile?: (path: string) => boolean;
+  isDirectory?: (path: string) => boolean;
 }): CustomAgent[] {
   if (!opts.dir) return [];
   let entries: string[];
@@ -323,30 +371,65 @@ export function discoverCustomAgents(opts: {
   } catch {
     return []; // missing dir → zero agents (no error)
   }
+  const probe = (p: string, fn?: (q: string) => boolean): boolean => {
+    if (!fn) return false;
+    try {
+      return fn(p);
+    } catch {
+      return false;
+    }
+  };
   const out: CustomAgent[] = [];
   for (const entry of [...entries].sort()) {
-    if (!/\.ya?ml$/i.test(entry)) continue;
     const abs = nodePath.join(opts.dir, entry);
-    if (opts.isFile) {
-      let ok = false;
-      try {
-        ok = opts.isFile(abs);
-      } catch {
-        ok = false;
+    // The path to launch (file OR dir) and the YAML to read display metadata
+    // from, plus the fallback display name. Resolved per kind below.
+    let launchPath: string | null = null;
+    let readPath: string | null = null;
+    let fallbackName = entry;
+
+    if (/\.ya?ml$/i.test(entry)) {
+      // LOOSE FILE: an isFile gate (when provided) must confirm it is a file.
+      const isFileOk = opts.isFile ? probe(abs, opts.isFile) : true;
+      if (isFileOk) {
+        launchPath = abs;
+        readPath = abs;
+        fallbackName = entry.replace(/\.ya?ml$/i, "");
       }
-      if (!ok) continue;
     }
+    if (launchPath === null && probe(abs, opts.isDirectory)) {
+      // BUNDLE DIR: must directly contain a regular `config.yaml`.
+      const config = nodePath.join(abs, BUNDLE_CONFIG_NAME);
+      let hasConfig: boolean;
+      if (opts.isFile) {
+        hasConfig = probe(config, opts.isFile);
+      } else {
+        // No isFile probe → fall back to attempting the read.
+        try {
+          opts.readFile(config);
+          hasConfig = true;
+        } catch {
+          hasConfig = false;
+        }
+      }
+      if (hasConfig) {
+        launchPath = abs; // the DIRECTORY, not the config.yaml inside it
+        readPath = config;
+        fallbackName = entry; // directory name
+      }
+    }
+    if (launchPath === null || readPath === null) continue;
+
     let text: string;
     try {
-      text = opts.readFile(abs);
+      text = opts.readFile(readPath);
     } catch {
       continue;
     }
     const meta = parseAgentConfigYaml(text);
-    const stem = entry.replace(/\.ya?ml$/i, "");
-    const name = meta.name && meta.name.trim() ? meta.name.trim() : stem;
+    const name = meta.name && meta.name.trim() ? meta.name.trim() : fallbackName;
     out.push({
-      path: abs,
+      path: launchPath,
       name,
       ...(meta.description ? { description: meta.description } : {}),
     });

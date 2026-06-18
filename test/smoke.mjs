@@ -27,6 +27,8 @@ import {
   existsSync,
   statSync,
   realpathSync,
+  readdirSync,
+  readFileSync,
   rmSync,
 } from "fs";
 import { tmpdir } from "os";
@@ -616,6 +618,154 @@ console.log("\n[l] real-fs symlink fixtures (default fs path)");
   // statSync follows symlinks, so confirm a real escaping target is a regular
   // file — i.e. it is the realpath gate (not the isFile gate) that rejects it.
   check("(fixture sanity) escape target is a regular file", statSync(escapeLink).isFile());
+
+  rmSync(tmp, { recursive: true, force: true });
+}
+
+// =====================================================================
+// (m) BUNDLE-directory discovery + validation + argv (injected fs). A full
+//     omnigent spec must live as a bundle dir `<name>/config.yaml` (not a loose
+//     yaml); discovery, the path gate, and argv must handle BOTH forms.
+// =====================================================================
+console.log("\n[m] bundle-directory discovery + validation + argv (injected fs)");
+{
+  const BUNDLE_DIR = `${SCAN_DIR}/vault-agent`;
+  const BUNDLE_CONFIG = `${BUNDLE_DIR}/config.yaml`;
+  const LOOSE = `${SCAN_DIR}/loose.yaml`;
+  const LOOSE2 = `${SCAN_DIR}/other.yml`;
+  const NOCONFIG_DIR = `${SCAN_DIR}/not-an-agent`; // dir, no config.yaml → ignored
+
+  const dirs = new Set([SCAN_DIR, BUNDLE_DIR, NOCONFIG_DIR]);
+  const files = {
+    [LOOSE]: "name: Loose One\n",
+    [LOOSE2]: "name: Loose Two\n",
+    [BUNDLE_CONFIG]: "name: Vault Agent\ndescription: bundle agent\n",
+  };
+  const readdir = (d) => {
+    if (d !== SCAN_DIR) throw new Error("ENOENT");
+    return ["vault-agent", "loose.yaml", "other.yml", "not-an-agent"];
+  };
+  const readFile = (p) => {
+    if (!(p in files)) throw new Error("ENOENT");
+    return files[p];
+  };
+  const isFile = (p) => p in files;
+  const isDirectory = (p) => dirs.has(p);
+
+  // Discovery enumerates the bundle dir AND both loose files; ignores the
+  // config-less subdir.
+  const agents = discoverCustomAgents({ dir: SCAN_DIR, readdir, readFile, isFile, isDirectory });
+  const byPath = (p) => agents.find((a) => a.path === p);
+  eq("discovery yields exactly 3 agents (1 bundle + 2 loose)", agents.length, 3);
+  check("bundle dir discovered; launch path IS the directory", !!byPath(BUNDLE_DIR));
+  check("loose .yaml discovered", !!byPath(LOOSE));
+  check("loose .yml discovered (not just .yaml)", !!byPath(LOOSE2));
+  check("config-less subdir is NOT an agent", !byPath(NOCONFIG_DIR));
+  check("bundle name read from <dir>/config.yaml", byPath(BUNDLE_DIR)?.name === "Vault Agent");
+  check("bundle description read from <dir>/config.yaml", byPath(BUNDLE_DIR)?.description === "bundle agent");
+  check("bundle launch path is the dir, NOT the config.yaml inside it", byPath(BUNDLE_DIR)?.path === BUNDLE_DIR && !byPath(BUNDLE_DIR)?.path.endsWith("config.yaml"));
+
+  // Bundle directory-name fallback when config.yaml has no `name:`.
+  const NAMELESS = `${SCAN_DIR}/named-by-dir`;
+  const files2 = { [`${NAMELESS}/config.yaml`]: "description: no name\n" };
+  const agents2 = discoverCustomAgents({
+    dir: SCAN_DIR,
+    readdir: (d) => (d === SCAN_DIR ? ["named-by-dir"] : ((_) => { throw new Error("ENOENT"); })(d)),
+    readFile: (p) => { if (!(p in files2)) throw new Error("ENOENT"); return files2[p]; },
+    isFile: (p) => p in files2,
+    isDirectory: (p) => p === NAMELESS,
+  });
+  check("bundle name falls back to directory name when name: missing", agents2.length === 1 && agents2[0].name === "named-by-dir" && agents2[0].path === NAMELESS);
+
+  // argv: bundle launches `omnigent run <dir>`; loose launches `omnigent run <file>`.
+  const prompt = buildLaunchPrompt("transcribe-meeting", VAULT, true);
+  const bundleArgv = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "custom", path: BUNDLE_DIR } });
+  check("bundle argv == [bin, run, <dir>, -p, prompt]", deepEq(bundleArgv, [BIN, "run", BUNDLE_DIR, "-p", prompt]));
+  const looseArgv = buildOmnigentArgv({ binaryPath: BIN, prompt, agent: { mode: "custom", path: LOOSE } });
+  check("loose argv == [bin, run, <file>, -p, prompt]", deepEq(looseArgv, [BIN, "run", LOOSE, "-p", prompt]));
+
+  // Validator (safeCustomAgentRealPath): bundle accepted as a real direct child;
+  // config-less subdir rejected; lexical gate accepts the extension-less bundle
+  // candidate yet still rejects wrong extensions and `..` traversal.
+  const id = (p) => p;
+  eq("safe: bundle dir (has config.yaml) → returns real dir path", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory }), BUNDLE_DIR);
+  eq("safe: subdir WITHOUT config.yaml → null", safeCustomAgentRealPath(NOCONFIG_DIR, SCAN_DIR, { realpath: id, isFile, isDirectory }), null);
+  eq("safe: extension-less path with no dir/file → null", safeCustomAgentRealPath(`${SCAN_DIR}/ghost`, SCAN_DIR, { realpath: id, isFile, isDirectory }), null);
+  eq("safe: bundle path containing `..` → null without touching fs", safeCustomAgentRealPath(`${SCAN_DIR}/sub/../vault-agent`, SCAN_DIR, { realpath: () => { throw new Error("should not be called"); }, isFile: () => { throw new Error("should not be called"); }, isDirectory: () => { throw new Error("should not be called"); } }), null);
+  eq("safe: bundle realpath escapes scan dir → null", safeCustomAgentRealPath(BUNDLE_DIR, SCAN_DIR, { realpath: (p) => (p === SCAN_DIR ? SCAN_DIR : `${VAULT}/evil/vault-agent`), isFile, isDirectory }), null);
+  check("lexical: extension-less bundle path accepted (candidate)", isValidCustomAgentPath(BUNDLE_DIR, SCAN_DIR));
+  check("lexical: still rejects wrong-extension file (.txt)", !isValidCustomAgentPath(`${SCAN_DIR}/x.txt`, SCAN_DIR));
+  check("lexical: rejects bundle path with `..` traversal", !isValidCustomAgentPath(`${SCAN_DIR}/sub/../vault-agent`, SCAN_DIR));
+
+  // resolveAgentLaunch end-to-end for a bundle (injected fs).
+  const resolvedBundle = resolveAgentLaunch(
+    { kind: "custom", path: BUNDLE_DIR },
+    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory },
+  );
+  check("resolveAgentLaunch bundle → mode custom with the DIR path", deepEq(resolvedBundle, { mode: "custom", path: BUNDLE_DIR }));
+  const resolvedNoConfig = resolveAgentLaunch(
+    { kind: "custom", path: NOCONFIG_DIR },
+    { scanDir: SCAN_DIR, exists: (p) => dirs.has(p) || p in files, realpath: id, isFile, isDirectory },
+  );
+  check("resolveAgentLaunch config-less subdir → default", deepEq(resolvedNoConfig, { mode: "default" }));
+}
+
+// =====================================================================
+// (n) REAL on-disk BUNDLE fixtures: discovery + resolveAgentLaunch with the
+//     DEFAULT fs — proves a real bundle dir is a real direct child, a config-less
+//     subdir is ignored/rejected, and symlink-escape / broken-symlink bundles
+//     fall back to Default; never throws.
+// =====================================================================
+console.log("\n[n] real-fs bundle directory fixtures (default fs path)");
+{
+  const tmp = mkdtempSync(join(tmpdir(), "skill-layer-bundles-"));
+  const scan = join(tmp, "agent-configs");
+  mkdirSync(scan, { recursive: true });
+  // A real bundle dir with config.yaml.
+  const bundle = join(scan, "vault-agent");
+  mkdirSync(bundle, { recursive: true });
+  writeFileSync(join(bundle, "config.yaml"), "name: Vault Agent\ndescription: the real bundle\n");
+  // A real loose file alongside.
+  const loose = join(scan, "loose.yaml");
+  writeFileSync(loose, "name: Loose\n");
+  // A subdir WITHOUT config.yaml → ignored / rejected.
+  const noconfig = join(scan, "not-an-agent");
+  mkdirSync(noconfig, { recursive: true });
+  writeFileSync(join(noconfig, "readme.md"), "nope\n");
+  // A bundle dir OUTSIDE scan, plus an in-scan symlink to it (escape).
+  const outsideBundle = join(tmp, "outside-bundle");
+  mkdirSync(outsideBundle, { recursive: true });
+  writeFileSync(join(outsideBundle, "config.yaml"), "name: Escapee\n");
+  const escapeDirLink = join(scan, "escape-bundle");
+  symlinkSync(outsideBundle, escapeDirLink);
+  // A broken dir symlink (target does not exist).
+  const brokenDirLink = join(scan, "broken-bundle");
+  symlinkSync(join(tmp, "nope-dir"), brokenDirLink);
+
+  // Discovery with the DEFAULT real fs.
+  const agents = discoverCustomAgents({
+    dir: scan,
+    readdir: (d) => readdirSync(d),
+    readFile: (p) => readFileSync(p, "utf8"),
+    isFile: (p) => { try { return statSync(p).isFile(); } catch { return false; } },
+    isDirectory: (p) => { try { return statSync(p).isDirectory(); } catch { return false; } },
+  });
+  const paths = agents.map((a) => a.path);
+  check("real discovery includes the bundle dir", paths.includes(bundle));
+  check("real discovery includes the loose file", paths.includes(loose));
+  check("real discovery excludes the config-less subdir", !paths.includes(noconfig));
+  check("real bundle name read from config.yaml", agents.find((a) => a.path === bundle)?.name === "Vault Agent");
+  // The escaping bundle symlink IS a directory with a (followed) config.yaml, so
+  // discovery may surface it for display — launch re-validates and rejects it.
+
+  const rr = (p) => resolveAgentLaunch({ kind: "custom", path: p }, { scanDir: scan, exists: (q) => existsSync(q) });
+  // macOS tmpdir is a symlink (/var → /private/var); the gate realpaths both
+  // sides, so a legitimate real child still matches.
+  check("real bundle dir → ACCEPTED (real direct child), emits real dir path", deepEq(rr(bundle), { mode: "custom", path: realpathSync(bundle) }));
+  check("config-less subdir → default", deepEq(rr(noconfig), { mode: "default" }));
+  check("symlinked bundle escaping scan dir → default", deepEq(rr(escapeDirLink), { mode: "default" }));
+  check("broken bundle symlink → default (fail-closed, no throw)", deepEq(rr(brokenDirLink), { mode: "default" }));
+  check("(fixture sanity) escape bundle realpath is outside scan dir", dirname(realpathSync(escapeDirLink)) !== realpathSync(scan));
 
   rmSync(tmp, { recursive: true, force: true });
 }
