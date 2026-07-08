@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, normalizePath, setIcon } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, normalizePath, setIcon } from "obsidian";
 import type SkillLayerPlugin from "./main";
 import { normalizeExternalRoot } from "./parse";
 import { RootKind, ScanRoot } from "./types";
@@ -40,6 +40,31 @@ export class SkillLayerSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    const settings = this.plugin.settings;
+
+    // --- Show hidden folders (M15, placed first) --------------------------
+    // Reveals dot-folders (e.g. .claude/) in Obsidian's file explorer via a
+    // private-adapter patch (see hiddenFiles.ts). Applied live on toggle.
+    const hiddenSetting = new Setting(containerEl)
+      .setName("Show hidden folders")
+      .setDesc(
+        "Reveal hidden dot-folders (e.g. .claude/) in the file explorer. " +
+          "Uses Obsidian internals; fully reverted when turned off.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setDisabled(!this.plugin.canRevealHiddenFolders())
+          .setValue(settings.showHiddenFolders)
+          .onChange(async (value) => {
+            await this.plugin.setShowHiddenFolders(value);
+          }),
+      );
+    if (!this.plugin.canRevealHiddenFolders()) {
+      hiddenSetting.setDesc(
+        "Requires the desktop app with filesystem access — unavailable here.",
+      );
+    }
+
     // --- Scan roots -------------------------------------------------------
     new Setting(containerEl)
       .setName("Scan roots")
@@ -48,8 +73,6 @@ export class SkillLayerSettingTab extends PluginSettingTab {
         "Vault-relative paths (\"\" = vault root, .claude/skills, skills) or " +
           "absolute desktop paths. The code path is inferred automatically.",
       );
-
-    const settings = this.plugin.settings;
 
     settings.scanRoots.forEach((root, index) => {
       const setting = new Setting(containerEl)
@@ -186,6 +209,78 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           settings.appendVaultAnchor = value;
           await this.plugin.saveSettings();
         }),
+      );
+
+    // --- Harness (per-skill; informational) -------------------------------
+    // The omnigent --harness set is fixed (no config needed); the per-skill
+    // choice lives on each skill row in the browser, alongside "Run with".
+    // --- Custom harnesses (M15.3) -----------------------------------------
+    new Setting(containerEl)
+      .setName("Custom harnesses")
+      .setHeading()
+      .setDesc(
+        "Run skills through your own command instead of an omnigent --harness. " +
+          "The harnesses omnigent already has configured are picked up " +
+          "automatically (see the browser's Harnesses tab); add extra ones here. " +
+          "Each skill row's Harness dropdown lists them.",
+      );
+
+    // Existing custom harnesses, each removable.
+    settings.harnesses.forEach((h) => {
+      new Setting(containerEl)
+        .setName(h.label)
+        .setDesc(h.command.join(" "))
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("trash")
+            .setTooltip("Remove harness")
+            .onClick(async () => {
+              await this.plugin.removeCustomHarness(h.id);
+              this.display();
+            }),
+        );
+    });
+
+    // Add-a-harness row: a name + a single-line command containing {prompt}.
+    let pendingHarnessLabel = "";
+    let pendingHarnessCmd = "";
+    new Setting(containerEl)
+      .setName("Add harness")
+      .setDesc(
+        "Name + full command on one line. The first token must be an ABSOLUTE " +
+          "binary path, and the command must include the {prompt} placeholder " +
+          "(replaced with the skill prompt). Spawned with no shell. " +
+          "Example (vibe): /usr/local/bin/isaac -p {prompt}",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Name (e.g. vibe)")
+          .onChange((v) => {
+            pendingHarnessLabel = v;
+          }),
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("/usr/local/bin/isaac -p {prompt}")
+          .onChange((v) => {
+            pendingHarnessCmd = v;
+          }),
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Add")
+          .setCta()
+          .onClick(async () => {
+            const err = await this.plugin.addCustomHarness(
+              pendingHarnessLabel,
+              pendingHarnessCmd,
+            );
+            if (err) {
+              new Notice(`Skill Layer: ${err}`);
+              return;
+            }
+            this.display();
+          }),
       );
   }
 }

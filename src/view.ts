@@ -1,5 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
-import { AGENT_DEFAULT_VALUE, BUILTIN_AGENTS } from "./launch";
+import { AgentConfigModal, LaunchModal, SkillConfigModal } from "./configModal";
 import type SkillLayerPlugin from "./main";
 import {
   AgentRowModel,
@@ -107,6 +107,7 @@ export class SkillBrowserView extends ItemView {
     if (!c) return;
     c.empty();
     if (this.activeTab === "agents") this.renderAgentsTab(c);
+    else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
     else this.renderSkillsTab(c);
   }
 
@@ -187,7 +188,19 @@ export class SkillBrowserView extends ItemView {
     }
     main.createDiv({ cls: "skill-layer-row-path", text: row.path });
 
+    // Cleaned-up row (M16), mirroring the Skills tab: Launch session + Open file
+    // stay inline; Copy invocation moves into the ⚙ Configuration modal.
     const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+
+    const launchBtn = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      attr: { "aria-label": `Launch a session with ${row.title}` },
+    });
+    setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
+    launchBtn.createSpan({ text: " Launch session" });
+    launchBtn.addEventListener("click", () =>
+      this.plugin.launchCustomAgent(row.path),
+    );
 
     const openBtn = actions.createEl("button", {
       cls: "skill-layer-action",
@@ -195,21 +208,89 @@ export class SkillBrowserView extends ItemView {
     });
     openBtn.addEventListener("click", () => this.plugin.openCustomAgent(row.path));
 
-    const launchBtn = actions.createEl("button", {
-      cls: "skill-layer-action",
-      text: "Launch session",
+    const cfgBtn = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-gear",
+      attr: { "aria-label": `Configure ${row.title}` },
     });
-    launchBtn.addEventListener("click", () =>
-      this.plugin.launchCustomAgent(row.path),
+    setIcon(cfgBtn, "settings");
+    cfgBtn.addEventListener("click", () =>
+      new AgentConfigModal(this.app, this.plugin, row.path, row.title).open(),
+    );
+  }
+
+  /**
+   * The Harnesses tab (M15.3), DISPLAY-ONLY. Shows (1) the harnesses omnigent has
+   * configured — discovered by running `omnigent config list` — and (2) the
+   * user's custom harnesses. Add/remove is done in Settings → Skill Layer (this
+   * tab links there). A Refresh button re-runs discovery. Selecting a harness
+   * per skill happens on the skill row's "Harness" dropdown, which this feeds.
+   */
+  private renderHarnessesTab(c: HTMLElement): void {
+    // --- Toolbar: refresh discovery ---
+    const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
+    const refreshBtn = toolbar.createEl("button", {
+      cls: "skill-layer-rescan",
+      attr: { "aria-label": "Refresh harnesses configured in omnigent" },
+    });
+    setIcon(refreshBtn, "refresh-cw");
+    refreshBtn.createSpan({ text: "Refresh" });
+    refreshBtn.addEventListener("click", () => {
+      void this.plugin.refreshConfiguredHarnesses();
+    });
+
+    // ONE unified list: omnigent-configured harnesses (discovered via the CLI)
+    // and custom harnesses render as the SAME row shape. Omnigent harnesses show
+    // their `omnigent run --harness <name>` form; custom ones show their command.
+    // Only harnesses actually CONFIGURED in omnigent are shown (an unconfigured
+    // provider like Gemini that omnigent lists with "(none configured)" is
+    // omitted). Custom harnesses are added/removed in Settings.
+    const configured = this.plugin
+      .getConfiguredHarnesses()
+      .filter((h) => h.configured);
+    const custom = this.plugin.getCustomHarnesses();
+
+    if (!this.plugin.hasDiscoveredHarnesses() && custom.length === 0) {
+      this.renderEmptyState(c, "Discovering harnesses… (omnigent config list)");
+      return;
+    }
+
+    const count = c.createDiv({ cls: "skill-layer-count" });
+    count.setText(
+      `${configured.length + custom.length} harness${
+        configured.length + custom.length === 1 ? "" : "es"
+      } — add custom ones in Settings → Skill Layer.`,
     );
 
-    const copyBtn = actions.createEl("button", {
-      cls: "skill-layer-action",
-      text: "Copy invocation",
-    });
-    copyBtn.addEventListener("click", () =>
-      this.plugin.copyCustomAgentInvocation(row.path),
-    );
+    const list = c.createDiv({ cls: "skill-layer-list" });
+    // Omnigent-discovered (configured) harnesses.
+    for (const h of configured) {
+      this.renderHarnessRow(list, {
+        name: h.name,
+        badge: "omnigent",
+        detail: `omnigent run --harness ${h.name.toLowerCase()}`,
+      });
+    }
+    // Custom harnesses (same row shape).
+    for (const h of custom) {
+      this.renderHarnessRow(list, {
+        name: h.label,
+        badge: "custom",
+        detail: h.command.join(" "),
+      });
+    }
+  }
+
+  /** One harness row (shared by omnigent-discovered and custom harnesses). */
+  private renderHarnessRow(
+    parent: HTMLElement,
+    row: { name: string; badge: string; detail: string },
+  ): void {
+    const el = parent.createDiv({ cls: "skill-layer-row" });
+    const main = el.createDiv({ cls: "skill-layer-row-main" });
+    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
+    nameLine.createSpan({ text: row.name, cls: "skill-layer-row-name" });
+    nameLine.createSpan({ text: row.badge, cls: "skill-layer-row-badge" });
+    main.createDiv({ cls: "skill-layer-row-path", text: row.detail });
   }
 
   private renderList(): void {
@@ -347,123 +428,77 @@ export class SkillBrowserView extends ItemView {
     main.createDiv({ cls: "skill-layer-row-desc", text: skill.description });
     main.createDiv({ cls: "skill-layer-row-path", text: skill.path });
 
+    this.renderRowMeta(main, skill);
     this.renderRowTags(main, skill);
 
+    // Cleaned-up row (M16): only the two primary actions live here — Launch
+    // (spawn a one-shot run) and Open file — plus a ⚙ that opens the per-skill
+    // Configuration modal holding everything else (Copy invocation, right-click
+    // toggle, Run-with agent, Harness, ribbon pin/icon). See SkillConfigModal.
     const actions = row.createDiv({ cls: "skill-layer-row-actions" });
 
+    const launchBtn = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      attr: { "aria-label": `Run the ${skill.name} skill` },
+    });
+    setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
+    launchBtn.createSpan({ text: " Run skill" });
+    // Opens the Run modal so the user can add optional context before running
+    // (empty = the prior bare `Use the <name> skill.` behavior).
+    launchBtn.addEventListener("click", () =>
+      new LaunchModal(this.app, this.plugin, skill).open(),
+    );
+
+    // Open ↔ Close toggle: when the skill's file is already open in Obsidian the
+    // button becomes "Close file" (closing re-hides a temporarily-revealed
+    // hidden folder). Only tracks files open in Obsidian, not the OS app.
+    const isOpen = this.plugin.isSkillOpen(skill);
     const openBtn = actions.createEl("button", {
       cls: "skill-layer-action",
-      text: "Open file",
+      text: isOpen ? "Close file" : "Open file",
     });
-    openBtn.addEventListener("click", () => this.plugin.openSkill(skill));
-
-    // Launch = spawn a one-shot omnigent run (UI-visible).
-    const launchBtn = actions.createEl("button", {
-      cls: "skill-layer-action",
-      text: "Launch",
-    });
-    launchBtn.addEventListener("click", () => this.plugin.launchSkill(skill));
-
-    // Copy invocation = clipboard only (the pre-spawn behavior, kept).
-    const copyBtn = actions.createEl("button", {
-      cls: "skill-layer-action",
-      text: "Copy invocation",
-    });
-    copyBtn.addEventListener("click", () => this.plugin.copyInvocation(skill));
-
-    // Right-click menu toggle (M3): when enabled, this skill appears in the
-    // file-explorer right-click as `Run "<name>" here` against the clicked file.
-    const rcEnabled = this.plugin.isRightClickEnabled(skill.id);
-    const rcBtn = actions.createEl("button", {
-      cls: "skill-layer-action" + (rcEnabled ? " is-pinned" : ""),
-      attr: {
-        "aria-label": rcEnabled
-          ? `Remove ${skill.name} from the file right-click menu`
-          : `Add ${skill.name} to the file right-click menu`,
-      },
-    });
-    if (rcEnabled) {
-      const glyph = rcBtn.createSpan({ cls: "skill-layer-action-icon" });
-      setIcon(glyph, "check");
-      rcBtn.createSpan({ text: " Right-click menu" });
-    } else {
-      rcBtn.setText("Add to right-click menu");
-    }
-    rcBtn.addEventListener("click", async () => {
-      await this.plugin.toggleRightClick(skill);
-      this.renderList();
+    openBtn.addEventListener("click", () => {
+      void (isOpen ? this.plugin.closeSkill(skill) : this.plugin.openSkill(skill));
     });
 
-    // Per-skill AGENT selector ("Run with"). Options carry short NAME-only
-    // labels (Default / a built-in name / a custom-agent name); the underlying
-    // omnigent invocation each produces is documented on `buildOmnigentArgv` and
-    // surfaced via "Copy invocation". Built-ins come from the hardcoded
-    // allowlist; custom agents are the dynamically-discovered YAML configs
-    // (label = name, tooltip = description). Selecting persists
-    // settings.skillAgent[skill.id] (Default deletes the key to keep data.json
-    // clean), re-validated fail-closed before storage.
-    const agentGroup = actions.createDiv({ cls: "skill-layer-agent-group" });
-    agentGroup.createSpan({ cls: "skill-layer-agent-caption", text: "Run with" });
-    const agentSel = agentGroup.createEl("select", {
-      cls: "skill-layer-action skill-layer-agent-select",
-      attr: { "aria-label": `Run with (agent) for ${skill.name}` },
-    }) as HTMLSelectElement;
-    agentSel.createEl("option", {
-      text: "Default",
-      value: AGENT_DEFAULT_VALUE,
+    const cfgBtn = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-gear",
+      attr: { "aria-label": `Configure ${skill.name}` },
     });
-    for (const name of BUILTIN_AGENTS) {
-      agentSel.createEl("option", {
-        text: name,
-        value: `builtin:${name}`,
+    setIcon(cfgBtn, "settings");
+    cfgBtn.addEventListener("click", () =>
+      new SkillConfigModal(this.app, this.plugin, skill).open(),
+    );
+  }
+
+  /**
+   * The per-skill assignment line (M16): shows the effective AGENT and HARNESS
+   * at a glance, so the user sees them without opening Configuration. Each is a
+   * labelled pill; a "Default" value is muted while a non-default (explicitly
+   * assigned) value is accented so real assignments stand out. Clicking a pill
+   * opens the Configuration modal (where the dropdowns live).
+   */
+  private renderRowMeta(main: HTMLElement, skill: Skill): void {
+    const meta = main.createDiv({ cls: "skill-layer-row-meta" });
+    const pill = (key: string, val: string): void => {
+      const isDefault = val === "Default";
+      const el = meta.createSpan({
+        cls: "skill-layer-meta-pill" + (isDefault ? " is-default" : " is-set"),
+        attr: { "aria-label": `${key}: ${val} — click to configure` },
       });
-    }
-    const customAgents = this.plugin.getCustomAgents();
-    if (customAgents.length > 0) {
-      const group = agentSel.createEl("optgroup", {
-        attr: { label: "Custom agents" },
-      }) as HTMLOptGroupElement;
-      for (const agent of customAgents) {
-        const opt = group.createEl("option", {
-          text: agent.name,
-          value: `custom:${agent.path}`,
-        });
-        if (agent.description) opt.setAttr("title", agent.description);
-      }
-    }
-    agentSel.value = this.plugin.agentOptionValue(skill.id);
-    agentSel.addEventListener("change", async () => {
-      await this.plugin.setSkillAgent(skill.id, agentSel.value);
-    });
-
-    if (this.plugin.isPinned(skill.id)) {
-      // Show the current glyph; clicking re-opens the picker to change it.
-      const changeBtn = actions.createEl("button", {
-        cls: "skill-layer-action is-pinned",
-        attr: { "aria-label": `Change ribbon icon for ${skill.name}` },
-      });
-      const glyph = changeBtn.createSpan({ cls: "skill-layer-action-icon" });
-      setIcon(glyph, this.plugin.iconFor(skill.id));
-      changeBtn.createSpan({ text: " Change icon" });
-      changeBtn.addEventListener("click", () => this.plugin.openIconPicker(skill));
-
-      const unpinBtn = actions.createEl("button", {
-        cls: "skill-layer-action",
-        text: "Unpin",
-      });
-      unpinBtn.addEventListener("click", async () => {
-        await this.plugin.unpinById(skill.id);
-        this.renderList();
-      });
-    } else {
-      // Pin: reuse a remembered icon immediately if it still resolves,
-      // otherwise the picker opens (picking the icon IS the pin).
-      const pinBtn = actions.createEl("button", {
-        cls: "skill-layer-action",
-        text: "Pin to ribbon",
-      });
-      pinBtn.addEventListener("click", () => this.plugin.requestPin(skill));
-    }
+      el.createSpan({ cls: "skill-layer-meta-key", text: key });
+      el.createSpan({ cls: "skill-layer-meta-val", text: val });
+      el.addEventListener("click", () =>
+        new SkillConfigModal(this.app, this.plugin, skill).open(),
+      );
+    };
+    pill("Harness", this.plugin.harnessLabelFor(skill.id));
+    // Agent source depends on the harness (M17): a custom (claude) harness uses
+    // Claude subagents (.claude/agents); Default/omnigent use omnigent agents.
+    const agentLabel = this.plugin.skillUsesCustomHarness(skill.id)
+      ? this.plugin.claudeAgentLabelFor(skill.id)
+      : this.plugin.agentLabelFor(skill.id);
+    pill("Agent", agentLabel);
   }
 
   private renderRowTags(main: HTMLElement, skill: Skill): void {

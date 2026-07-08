@@ -37,13 +37,23 @@ export function buildLaunchPrompt(
   vaultPath: string,
   appendAnchor: boolean,
   contextPath?: string,
+  userPrompt?: string,
 ): string {
   const base = `Use the ${skillName} skill.`;
+  // M16: optional free-text the user typed in the Launch modal, appended right
+  // after the skill directive so the session reads `Use the <name> skill.
+  // <their instructions>` — giving skills that need more context something to
+  // act on. It reaches argv only as part of the single inert `-p` element (or,
+  // for a custom harness, control-char-stripped into one token), so free text —
+  // spaces, quotes, dashes — is safe and never tokenized. Empty/whitespace →
+  // omitted, preserving the exact prior prompt.
+  const extra = typeof userPrompt === "string" ? userPrompt.trim() : "";
+  const withUser = extra ? `${base} ${extra}` : base;
   const hasContext = typeof contextPath === "string" && contextPath.length > 0;
   // The path is concatenated as inert prose — never split out as a separate
   // token — so any spaces/quotes/dashes/metacharacters in it stay contained.
-  const head = hasContext ? `${base} Context file: ${contextPath}.` : base;
-  // No context + anchor off → exactly the M1 prompt (`Use the <name> skill.`).
+  const head = hasContext ? `${withUser} Context file: ${contextPath}.` : withUser;
+  // No context + anchor off + no user text → exactly the M1 prompt.
   if (!appendAnchor && !hasContext) return head;
   return (
     `${head} Operate in this vault: ${vaultPath}.` +
@@ -55,16 +65,27 @@ export function buildLaunchPrompt(
 /**
  * Build the omnigent one-shot argv array (UI-visible run; exits on its own).
  * The per-skill AGENT selection (already resolved fail-closed by
- * `resolveAgentLaunch`) determines the subcommand and any positional:
- *   - default  → [bin, 'run', '-p', prompt]
- *   - builtin  → [bin, <name>, '-p', prompt]  (subcommand, NOT 'run')
- *   - custom   → [bin, 'run', <abs agent path>, '-p', prompt]
+ * `resolveAgentLaunch`) determines the subcommand and any positional; the
+ * per-skill HARNESS selection (M15, resolved fail-closed by `resolveHarness`)
+ * OPTIONALLY appends `--harness <h>`:
+ *   - default          → [bin, 'run', '-p', prompt]
+ *   - builtin          → [bin, <name>, '-p', prompt]  (subcommand, NOT 'run')
+ *   - custom           → [bin, 'run', <abs agent path>, '-p', prompt]
+ *   - + harness (any)  → …, '--harness', <h>, '-p', prompt
  * For a custom agent the path (a loose `.yaml`/`.yml` FILE or a BUNDLE directory)
  * is emitted as a SINGLE inert argv element after `run` — never split, never its
  * own flag (the resolver guarantees it is an absolute path, so it can never be
  * read as an option). No '--no-session'
  * (that path is ephemeral / not UI-visible). The prompt is a single inert
- * element. No `--harness` is ever emitted: omnigent picks the harness itself.
+ * element.
+ *
+ * `harness` (M15) is emitted as `--harness <value>` ONLY when it is a member of
+ * the hardcoded `OMNIGENT_HARNESSES` allowlist (re-checked here as
+ * belt-and-suspenders; callers pass a value already resolved by
+ * `resolveHarness`). It routes through the SAME omnigent binary — `omnigent run`
+ * accepts `--harness`, and bundled subcommands (polly/debby) forward all run
+ * options — so it is correct for every agent form. Never free text, never a
+ * positional.
  *
  * No `--server` is EVER emitted (M11): omnigent's own config.yaml decides server
  * routing, so `omnigent run <agent>` with no `--server` routes via the user's
@@ -74,6 +95,7 @@ export function buildOmnigentArgv(opts: {
   binaryPath: string;
   prompt: string;
   agent?: ResolvedAgent;
+  harness?: string | null;
 }): string[] {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
@@ -83,6 +105,9 @@ export function buildOmnigentArgv(opts: {
   // it absolute + a real direct child of the scan dir, so it can never split or
   // become a flag.
   if (agent.mode === "custom") argv.push(agent.path);
+  // Optional omnigent harness pin (M15). Only a hardcoded-allowlist member is
+  // ever emitted, so the value can never be free text or a flag-able positional.
+  if (isAllowedHarness(opts.harness)) argv.push("--harness", opts.harness);
   argv.push("-p", opts.prompt);
   return argv;
 }
@@ -108,20 +133,25 @@ export function buildSkillInvocation(skillName: string): string {
  *   - default → omnigent run -p '<prompt>'
  *   - builtin → omnigent <name> -p '<prompt>'        (subcommand, NOT 'run')
  *   - custom  → omnigent run '<abs path>' -p '<prompt>'
+ *   - + harness (any) → … --harness <h> -p '<prompt>'
  * `agent` MUST already be resolved fail-closed by `resolveAgentLaunch`, so a
  * custom path is the validated absolute real path. The custom path and the prompt
  * are each POSIX single-quote wrapped so spaces / shell metacharacters paste as
- * one safe argument. Clipboard text only — pure / unit-testable.
+ * one safe argument. `harness` (M15) is appended as `--harness <h>` only when it
+ * is a hardcoded-allowlist member (so it can carry no metacharacters and needs
+ * no quoting). Clipboard text only — pure / unit-testable.
  */
 export function buildSkillCliInvocation(opts: {
   skillName: string;
   agent?: ResolvedAgent;
+  harness?: string | null;
 }): string {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
   const prompt = buildSkillInvocation(opts.skillName);
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
   let cli = `${OMNIGENT_BIN_NAME} ${subcommand}`;
   if (agent.mode === "custom") cli += ` ${shellSingleQuote(agent.path)}`;
+  if (isAllowedHarness(opts.harness)) cli += ` --harness ${opts.harness}`;
   cli += ` -p ${shellSingleQuote(prompt)}`;
   return cli;
 }
@@ -188,8 +218,381 @@ export function buildAgentInvocation(agentPath: string): string {
 export const BUILTIN_AGENTS = ["polly", "debby"] as const;
 export type BuiltinAgentName = (typeof BUILTIN_AGENTS)[number];
 
+// =====================================================================
+// Per-skill HARNESS selector (M15) — ORTHOGONAL to the AGENT selector.
+//
+// A skill always runs through the `omnigent` binary; the AGENT choice picks the
+// subcommand / positional (`run` | `polly`/`debby` | a custom agent YAML), and
+// INDEPENDENTLY a skill may pin a specific omnigent harness via `--harness <h>`.
+// Verified 2026-07-06 against the real CLI: `omnigent run --help` lists the
+// fixed `--harness` set below (and shows `omnigent run <agent.yaml> --harness
+// <h>` as a combine example), and `omnigent polly --help` states "All run
+// options are accepted and forwarded" — so a bundled agent subcommand forwards
+// `--harness`/`-p` too. Because the harness routes through the SAME omnigent
+// binary, this introduces NO new spawn surface and NO new binary allowlist: the
+// value is re-validated fail-closed against the hardcoded allowlist below and
+// only ever emitted as `--harness <member>` (never free text, never a flag-able
+// positional). Plugin-local state; never written into any SKILL.md.
+// =====================================================================
+
+/**
+ * The hardcoded omnigent `--harness` allowlist (from `omnigent run --help`).
+ * `claude` is omnigent's documented alias for `claude-sdk`; both are listed so a
+ * stored value of either resolves. This is the ONLY set a stored per-skill
+ * harness is permitted against at launch; anything else fails closed to "no
+ * --harness" (omnigent then uses its own configured default harness).
+ */
+export const OMNIGENT_HARNESSES = [
+  "claude",
+  "claude-sdk",
+  "codex",
+  "cursor",
+  "kimi",
+  "openai-agents",
+  "open-responses",
+  "pi",
+  "antigravity",
+  "qwen",
+  "goose",
+  "copilot",
+] as const;
+export type OmnigentHarness = (typeof OMNIGENT_HARNESSES)[number];
+
+/** The <select> option value meaning "no explicit harness" (omnigent's default). */
+export const HARNESS_DEFAULT_VALUE = "default";
+
+/** Membership test for the hardcoded harness allowlist. */
+export function isAllowedHarness(name: unknown): name is OmnigentHarness {
+  return (
+    typeof name === "string" &&
+    (OMNIGENT_HARNESSES as readonly string[]).includes(name)
+  );
+}
+
+/**
+ * Resolve a per-skill stored harness choice to the validated launch value,
+ * FAILING CLOSED to null ("no --harness"; omnigent uses its own default). Only a
+ * member of the hardcoded allowlist survives; anything else — absent, unknown
+ * string, the `"default"` sentinel, or a stale legacy object shape from the
+ * removed M4–M7 harness selector — resolves to null. Pure / unit-testable.
+ */
+export function resolveHarness(stored: unknown): OmnigentHarness | null {
+  return isAllowedHarness(stored) ? stored : null;
+}
+
+/** Encode a stored harness choice to its <select> option value. */
+export function encodeHarnessChoice(harness: unknown): string {
+  return isAllowedHarness(harness) ? harness : HARNESS_DEFAULT_VALUE;
+}
+
+/** Decode a <select> option value to a harness name, or null for Default. */
+export function decodeHarnessChoice(value: string): OmnigentHarness | null {
+  return isAllowedHarness(value) ? value : null;
+}
+
+// =====================================================================
+// CUSTOM (user-defined) harnesses (M15.3) — the escape hatch for a command the
+// built-in omnigent `--harness` set does not cover (e.g. a different CLI or a
+// preset omnigent invocation). A custom harness spawns an ARBITRARY external
+// binary instead of omnigent, so it is the plugin's only non-omnigent spawn
+// surface. SECURITY, in depth:
+//   • `command[0]` (the binary) MUST be an ABSOLUTE path — validated at add-time
+//     AND again fail-closed at launch — so it can never be a bare name resolved
+//     through PATH (no hijack) nor read as a flag.
+//   • args are stored as an ARRAY (the UI takes one arg per line), so there is
+//     NEVER any shell-word tokenization (the defect class that cost 3 review
+//     rounds). Spawned with shell:false.
+//   • only the `{prompt}` placeholder is interpolated, control-char-stripped, and
+//     substituted WITHIN a token (never as its own split element).
+//   • a custom harness only ever runs when the user explicitly created it AND
+//     selected it for a skill; anything invalid fails closed (no spawn).
+// Plugin-local state; never written into any SKILL.md.
+// =====================================================================
+
+/** Placeholder token replaced with the launch prompt in a custom harness command. */
+export const HARNESS_PROMPT_PLACEHOLDER = "{prompt}";
+
+/**
+ * OPTIONAL placeholder (M17) replaced with the selected Claude subagent name in a
+ * custom-harness command, e.g. `claude --agent {agent} -p {prompt}`. When the
+ * skill has NO agent selected, the token — and, if it stood alone, the flag
+ * immediately before it (e.g. `--agent`) — is dropped so no dangling flag
+ * swallows the next argument. Substituted WITHIN a token, never split. Unlike
+ * `{prompt}` it is optional: a command need not contain it.
+ */
+export const HARNESS_AGENT_PLACEHOLDER = "{agent}";
+
+/** The per-skill <select> value prefix identifying a custom-harness choice. */
+export const CUSTOM_HARNESS_VALUE_PREFIX = "custom:";
+
+/**
+ * A user-defined harness. `command` is an argv template: `command[0]` is the
+ * absolute binary, the rest are inert args, and at least one token contains
+ * `{prompt}`. See the block comment above for the security contract.
+ */
+export interface CustomHarness {
+  id: string;
+  label: string;
+  command: string[];
+}
+
+/** Strip ASCII control chars (incl. NUL / CR / LF) from an interpolated value. */
+export function stripControlChars(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+/**
+ * Validate a custom-harness command array (no filesystem). Passes ONLY if it is
+ * a non-empty array of non-empty strings whose FIRST element is an ABSOLUTE path
+ * and where at least one element contains the `{prompt}` placeholder. Pure /
+ * unit-testable. (Filesystem existence of the binary is checked separately,
+ * fail-closed, at launch.)
+ */
+export function isValidCustomHarnessCommand(command: unknown): command is string[] {
+  if (!Array.isArray(command) || command.length === 0) return false;
+  if (!command.every((t) => typeof t === "string" && t.length > 0)) return false;
+  if (!nodePath.isAbsolute(command[0])) return false;
+  return command.some((t) => t.includes(HARNESS_PROMPT_PLACEHOLDER));
+}
+
+/**
+ * Build the argv for a custom harness: substitute the (control-char-stripped)
+ * prompt into EVERY `{prompt}` occurrence, within each token (never split), and
+ * return the argv array. Returns null (FAIL CLOSED) if the command is invalid.
+ * The binary (argv[0]) passes through verbatim (already validated absolute).
+ * Pure / unit-testable.
+ */
+export function buildCustomHarnessArgv(opts: {
+  command: string[];
+  prompt: string;
+  agent?: string;
+}): string[] | null {
+  if (!isValidCustomHarnessCommand(opts.command)) return null;
+  const safePrompt = stripControlChars(opts.prompt);
+  const agent =
+    typeof opts.agent === "string" ? stripControlChars(opts.agent).trim() : "";
+
+  // First resolve the OPTIONAL {agent} token(s). With an agent selected,
+  // substitute it within the token (like {prompt}); with none, drop the token
+  // AND — if the token was the standalone value of a preceding flag (e.g.
+  // `--agent {agent}`) — drop that flag too, so nothing dangles. A token that
+  // merely CONTAINS the placeholder (e.g. `--agent={agent}`) is dropped whole.
+  const resolved: string[] = [];
+  for (const tok of opts.command) {
+    if (!tok.includes(HARNESS_AGENT_PLACEHOLDER)) {
+      resolved.push(tok);
+      continue;
+    }
+    if (agent) {
+      resolved.push(tok.split(HARNESS_AGENT_PLACEHOLDER).join(agent));
+    } else if (tok === HARNESS_AGENT_PLACEHOLDER) {
+      const prev = resolved[resolved.length - 1];
+      if (prev !== undefined && prev.startsWith("-")) resolved.pop();
+    }
+    // else (token contains but ≠ placeholder, no agent): drop the whole token.
+  }
+
+  // Then substitute {prompt} within each surviving token (unchanged behavior).
+  return resolved.map((t) => t.split(HARNESS_PROMPT_PLACEHOLDER).join(safePrompt));
+}
+
+/** The per-skill stored value for a custom-harness selection. */
+export function encodeCustomHarnessChoice(id: string): string {
+  return `${CUSTOM_HARNESS_VALUE_PREFIX}${id}`;
+}
+
+/**
+ * Split a single-line custom-harness command into an argv array. This is a PLAIN
+ * whitespace split — NOT a shell-words tokenizer: there is no quote handling, no
+ * backslash escapes, no metacharacter interpretation (that whole defect class is
+ * avoided by design; see `[[skillsplugin_learnings]]`). Consequently a token
+ * cannot itself contain a space — except the `{prompt}` placeholder, which is
+ * substituted (as ONE element) with the full prompt at launch. `command[0]` is
+ * the binary. Empty tokens are dropped. Pure / unit-testable.
+ */
+export function parseHarnessCommandLine(line: string): string[] {
+  if (typeof line !== "string") return [];
+  return line.trim().split(/\s+/).filter((t) => t.length > 0);
+}
+
+/** A harness omnigent has configured (parsed from `omnigent config list`). */
+export interface ConfiguredHarness {
+  /** Display name exactly as omnigent groups it, e.g. "Claude", "Codex". */
+  name: string;
+  /** True when at least one credential is configured (not "(none configured)"). */
+  configured: boolean;
+}
+
+/**
+ * Parse the "Credentials (by harness)" section of `omnigent config list` output
+ * into the harnesses omnigent knows, each flagged configured / not. omnigent has
+ * no machine-readable form, so we parse the indented text: the section header is
+ * at column 0; each harness is a 2-space-indented group header; its credential
+ * lines are indented deeper. A group is `configured:false` only when its sole
+ * child is the literal "(none configured)". A dedent (column-0 line) ends the
+ * section. Pure / unit-testable; returns [] on anything unexpected.
+ */
+export function parseConfiguredHarnesses(stdout: string): ConfiguredHarness[] {
+  if (typeof stdout !== "string") return [];
+  const out: ConfiguredHarness[] = [];
+  let inSection = false;
+  let current: ConfiguredHarness | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (/^Credentials \(by harness\)/.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection) continue;
+    if (line.trim() === "") continue; // tolerate blank lines within the section
+    if (/^\S/.test(line)) break; // a column-0 line ends the section
+    if (/^ {3,}\S/.test(line)) {
+      // A credential/detail line for the current group.
+      if (current && line.trim() !== "(none configured)") current.configured = true;
+      continue;
+    }
+    const header = /^ {2}(\S.*?)\s*$/.exec(line); // exactly-2-space-indented group
+    if (header) {
+      current = { name: header[1].trim(), configured: false };
+      out.push(current);
+    }
+  }
+  return out;
+}
+
+/** A parsed per-skill harness selection (still unvalidated against existence). */
+export type HarnessChoice =
+  | { kind: "none" }
+  | { kind: "omnigent"; name: OmnigentHarness }
+  | { kind: "custom"; id: string };
+
+/**
+ * Parse a stored/selected per-skill harness value into a choice: a hardcoded
+ * omnigent-harness name, a `custom:<id>` reference, or none (Default / anything
+ * unrecognized). Pure / unit-testable.
+ */
+export function parseHarnessValue(value: unknown): HarnessChoice {
+  if (isAllowedHarness(value)) return { kind: "omnigent", name: value };
+  if (
+    typeof value === "string" &&
+    value.startsWith(CUSTOM_HARNESS_VALUE_PREFIX)
+  ) {
+    const id = value.slice(CUSTOM_HARNESS_VALUE_PREFIX.length);
+    if (id.length > 0) return { kind: "custom", id };
+  }
+  return { kind: "none" };
+}
+
+/** The launch-resolved per-skill harness, with the custom command attached. */
+export type ResolvedSkillHarness =
+  | { kind: "none" }
+  | { kind: "omnigent"; name: OmnigentHarness }
+  | { kind: "custom"; harness: CustomHarness };
+
+/**
+ * Resolve a stored per-skill harness value, FAILING CLOSED. An omnigent harness
+ * name resolves to `{omnigent}`; a `custom:<id>` resolves to `{custom}` ONLY if
+ * that id is in `customHarnesses` AND its command still passes
+ * `isValidCustomHarnessCommand`; everything else → `{none}`. Pure /
+ * unit-testable (existence of the binary is checked at spawn time).
+ */
+export function resolveSkillHarness(
+  stored: unknown,
+  customHarnesses: CustomHarness[] | undefined | null,
+): ResolvedSkillHarness {
+  const choice = parseHarnessValue(stored);
+  if (choice.kind === "omnigent") return { kind: "omnigent", name: choice.name };
+  if (choice.kind === "custom") {
+    const h = (customHarnesses ?? []).find((c) => c && c.id === choice.id);
+    if (h && isValidCustomHarnessCommand(h.command)) {
+      return { kind: "custom", harness: h };
+    }
+  }
+  return { kind: "none" };
+}
+
+/**
+ * The copyable CLI string for a custom harness (clipboard only). Each token is
+ * POSIX single-quote wrapped so it pastes as one safe shell argument; the
+ * `{prompt}` placeholder is replaced with the (control-char-stripped, quoted)
+ * prompt. Pure / unit-testable.
+ */
+export function buildCustomHarnessCliInvocation(opts: {
+  command: string[];
+  prompt: string;
+  agent?: string;
+}): string {
+  const argv = buildCustomHarnessArgv(opts);
+  if (!argv) return "";
+  return argv.map((t) => shellSingleQuote(t)).join(" ");
+}
+
 /** The vault-relative directory custom agent YAML configs are scanned from. */
 export const AGENT_CONFIG_SUBDIR = ".omnigent/agent-configs";
+
+// =====================================================================
+// Claude subagents (M17) — `.claude/agents/*.md` files (Claude Code's own agent
+// format: frontmatter name/description/tools/model + a system-prompt body).
+// These are ORTHOGONAL to omnigent YAML agents: they apply only when the harness
+// is a claude-based CUSTOM harness, and are passed via the `{agent}` placeholder
+// (see HARNESS_AGENT_PLACEHOLDER). Discovery is a plain filesystem scan; only the
+// agent NAME ever reaches argv (control-char-stripped, as one inert token).
+// =====================================================================
+
+/** The vault-relative directory Claude subagents are scanned from. */
+export const CLAUDE_AGENTS_SUBDIR = ".claude/agents";
+
+/** A discovered Claude subagent (display metadata; only `name` reaches argv). */
+export interface ClaudeAgent {
+  /** The subagent name (frontmatter `name:`, else the filename stem). Passed to
+   *  `--agent` via the `{agent}` token — the ONLY field that reaches argv. */
+  name: string;
+  /** Absolute path to the `.md` file (display / open only; never argv). */
+  path: string;
+  /** Optional frontmatter `description:` (tooltip; never argv). */
+  description?: string;
+  /** "project" (vault `.claude/agents`) or "global" (`~/.claude/agents`). */
+  source: "project" | "global";
+}
+
+/**
+ * Read a Claude subagent's frontmatter `name:` and `description:` (top-level
+ * scalars inside the leading `---` fence). Minimal + dependency-free; mirrors
+ * `parseAgentConfigYaml` but scoped to a fenced frontmatter block. Pure /
+ * unit-testable. Returns nulls when absent.
+ */
+export function parseClaudeAgentFrontmatter(text: string): {
+  name: string | null;
+  description: string | null;
+} {
+  const out: { name: string | null; description: string | null } = {
+    name: null,
+    description: null,
+  };
+  if (typeof text !== "string") return out;
+  const lines = text.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return out;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "---") break; // end of frontmatter
+    if (/^[ \t]/.test(line)) continue; // nested — top-level keys only
+    const m = /^([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (!m) continue;
+    const key = m[1];
+    if (key !== "name" && key !== "description") continue;
+    if (out[key] !== null) continue; // first occurrence wins
+    let val = m[2].trim();
+    if (
+      val.length >= 2 &&
+      ((val[0] === '"' && val[val.length - 1] === '"') ||
+        (val[0] === "'" && val[val.length - 1] === "'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val.length ? val : null;
+  }
+  return out;
+}
 
 /**
  * The per-skill stored choice (a discriminated union). Persisted verbatim in

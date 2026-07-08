@@ -211,6 +211,90 @@
   color: var(--text-accent);
 }
 
+/* Primary row action: Launch stands out from the neutral Open file / ⚙. */
+.skill-layer-action-launch {
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+
+/* Icon-only ⚙ Configuration button — a proper square, not a thin sliver. */
+.skill-layer-action-gear {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: 0 0 auto;
+}
+.skill-layer-action-gear .svg-icon {
+  width: 1.05em;
+  height: 1.05em;
+}
+
+/* Per-skill assignment line: Agent / Harness pills (M16). */
+.skill-layer-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-4-1);
+  margin-block: var(--size-2-2);
+}
+.skill-layer-meta-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--size-2-1);
+  padding: 1px var(--size-2-2);
+  border-radius: var(--radius-s);
+  font-size: var(--font-ui-smaller);
+  line-height: var(--line-height-tight);
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+}
+.skill-layer-meta-key {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.02em;
+}
+/* Muted when Default; emphasized (bold, normal text colour — no accent/purple)
+   when explicitly assigned. */
+.skill-layer-meta-pill.is-default .skill-layer-meta-val {
+  color: var(--text-muted);
+}
+.skill-layer-meta-pill.is-set .skill-layer-meta-val {
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+}
+
+/* Per-skill / per-agent Configuration modal: keep it compact. */
+.skill-layer-config-modal .setting-item {
+  padding-block: var(--size-4-2);
+}
+
+/* When Open file reveals a skill's folder, Obsidian plays its built-in yellow
+   "flash" highlight on the revealed nav item. It reads as tacky here, so suppress
+   the flash (the folder still scrolls into view + shows as the active item). */
+.nav-folder-title.is-flashing,
+.nav-file-title.is-flashing,
+.tree-item-self.is-flashing {
+  animation: none !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Launch modal: full-width prompt textarea + muted hint line. */
+.skill-layer-launch-hint {
+  margin: 0 0 var(--size-4-3);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.skill-layer-launch-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 6em;
+  resize: vertical;
+  font-family: var(--font-text);
+}
+
 /* "Run with <select>" caption + dropdown, kept together as one wrapping unit. */
 .skill-layer-agent-group {
   display: inline-flex;
@@ -387,4 +471,42 @@
 .skill-layer-clearfilters {
   font-size: var(--font-ui-smaller);
   cursor: pointer;
+}
+
+/* M15.3 — Harnesses tab: section titles, built-in chip row, add form. */
+.skill-layer-section-title {
+  margin: 14px 0 4px;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.skill-layer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 10px;
+}
+
+.skill-layer-harness-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.skill-layer-harness-args {
+  width: 100%;
+  min-height: 5em;
+  resize: vertical;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Muted detail text (e.g. an omnigent harness with no configured credentials). */
+.skill-layer-muted {
+  color: var(--text-muted);
+  font-style: italic;
 }

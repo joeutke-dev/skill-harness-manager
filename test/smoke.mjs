@@ -70,6 +70,25 @@ const {
   buildSkillCliInvocation,
   shellSingleQuote,
   augmentPath,
+  OMNIGENT_HARNESSES,
+  HARNESS_DEFAULT_VALUE,
+  isAllowedHarness,
+  resolveHarness,
+  encodeHarnessChoice,
+  decodeHarnessChoice,
+  HARNESS_PROMPT_PLACEHOLDER,
+  HARNESS_AGENT_PLACEHOLDER,
+  parseClaudeAgentFrontmatter,
+  CUSTOM_HARNESS_VALUE_PREFIX,
+  stripControlChars,
+  isValidCustomHarnessCommand,
+  buildCustomHarnessArgv,
+  buildCustomHarnessCliInvocation,
+  encodeCustomHarnessChoice,
+  parseHarnessValue,
+  resolveSkillHarness,
+  parseHarnessCommandLine,
+  parseConfiguredHarnesses,
 } = await import(pathToFileURL(outfile).href);
 
 // M10: pure tab-state + Agents-tab render-model helpers (no Obsidian).
@@ -118,6 +137,34 @@ const {
   isYamlFile,
   YAML_VIEWER_PLUGIN_ID,
 } = await import(pathToFileURL(yamlOut).href);
+
+// hiddenFiles.ts imports `obsidian` (App type + FileSystemAdapter value) which
+// has no runtime JS package, so stub it — we only exercise the pure
+// `isRevealableHiddenPath` here, never the controller.
+const stubObsidian = {
+  name: "stub-obsidian",
+  setup(build) {
+    build.onResolve({ filter: /^obsidian$/ }, () => ({
+      path: "obsidian",
+      namespace: "stub-obsidian",
+    }));
+    build.onLoad({ filter: /.*/, namespace: "stub-obsidian" }, () => ({
+      contents: "export class FileSystemAdapter {}",
+      loader: "js",
+    }));
+  },
+};
+const hiddenOut = join(builtDir, "hiddenFiles.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "hiddenFiles.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: hiddenOut,
+  logLevel: "silent",
+  plugins: [stubObsidian],
+});
+const { isRevealableHiddenPath } = await import(pathToFileURL(hiddenOut).href);
 
 let passed = 0;
 let failed = 0;
@@ -191,6 +238,43 @@ console.log("\n[a] Right-click prompt builder (Context line + anchor)");
     pNoAnchorSetting.includes(`Operate in this vault: ${VAULT}.`) &&
       pNoAnchorSetting.includes(`Context file: ${ctx}.`),
   );
+}
+
+// =====================================================================
+// (a2) M16 Launch-modal userPrompt: appended after the skill directive,
+//      before any context/anchor; empty/whitespace is a no-op.
+// =====================================================================
+console.log("\n[a2] M16 Launch-modal userPrompt is appended safely");
+{
+  const withUser = buildLaunchPrompt("daily-note", VAULT, false, undefined, "focus on 7-Eleven");
+  eq(
+    "bare + userPrompt → `Use the <name> skill. <text>`",
+    withUser,
+    "Use the daily-note skill. focus on 7-Eleven",
+  );
+  check("userPrompt prompt has no leading slash", !withUser.startsWith("/"));
+
+  const emptyUser = buildLaunchPrompt("daily-note", VAULT, false, undefined, "   ");
+  eq("whitespace-only userPrompt is omitted (== bare M1)", emptyUser, "Use the daily-note skill.");
+
+  // userPrompt sits BEFORE the vault anchor when anchoring is on.
+  const anchoredUser = buildLaunchPrompt("daily-note", VAULT, true, undefined, "add action items");
+  check(
+    "userPrompt precedes the vault anchor",
+    anchoredUser.startsWith("Use the daily-note skill. add action items ") &&
+      anchoredUser.includes(`Operate in this vault: ${VAULT}.`),
+  );
+
+  // Hostile free text stays inside the single inert -p element (no new tokens).
+  const hostileUser = `"; rm -rf ~" $(whoami) --harness pwn --server http://evil`;
+  const argv = buildOmnigentArgv({
+    binaryPath: BIN,
+    prompt: buildLaunchPrompt("daily-note", VAULT, false, undefined, hostileUser),
+  });
+  eq("userPrompt argv length == 4", argv.length, 4);
+  check("hostile userPrompt fully contained in argv[3]", argv[3].includes(hostileUser));
+  check("no standalone `--harness` token from userPrompt", argv.indexOf("--harness") === -1);
+  check("no standalone `--server` token from userPrompt", argv.indexOf("--server") === -1);
 }
 
 // =====================================================================
@@ -915,8 +999,8 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS are Skills then Agents", deepEq(TABS.map((t) => t.id), ["skills", "agents"]));
-  check("TABS labels are Skills / Agents", deepEq(TABS.map((t) => t.label), ["Skills", "Agents"]));
+  check("TABS are Skills, Agents, Harnesses", deepEq(TABS.map((t) => t.id), ["skills", "agents", "harnesses"]));
+  check("TABS labels are Skills / Agents / Harnesses", deepEq(TABS.map((t) => t.label), ["Skills", "Agents", "Harnesses"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
@@ -1135,6 +1219,435 @@ console.log("\n[M13] YAML-Viewer detection + in-vault TFile resolution + fallbac
     "(c) disabled viewer ignores TFile presence (both fall back)",
     canOpenInYamlViewer({ viewerEnabled: false, fileToOpen: inVaultAbs, hasTFile: true }) === false &&
       canOpenInYamlViewer({ viewerEnabled: false, fileToOpen: inVaultAbs, hasTFile: false }) === false,
+  );
+}
+
+// =====================================================================
+// [q] M15 — per-skill HARNESS selector (orthogonal to the agent) + hidden-folder
+//     reveal path gate.
+// =====================================================================
+{
+  console.log("\n[q] M15 harness selector + hidden-folder gate");
+
+  // --- allowlist / resolve / encode / decode ---
+  check(
+    "(q) OMNIGENT_HARNESSES has the documented members",
+    OMNIGENT_HARNESSES.includes("claude") &&
+      OMNIGENT_HARNESSES.includes("claude-sdk") &&
+      OMNIGENT_HARNESSES.includes("codex") &&
+      OMNIGENT_HARNESSES.includes("copilot") &&
+      OMNIGENT_HARNESSES.length === 12,
+  );
+  check(
+    "(q) isAllowedHarness accepts members, rejects everything else",
+    isAllowedHarness("codex") &&
+      isAllowedHarness("claude") &&
+      !isAllowedHarness("default") &&
+      !isAllowedHarness("evil") &&
+      !isAllowedHarness("") &&
+      !isAllowedHarness(undefined) &&
+      !isAllowedHarness(null) &&
+      !isAllowedHarness({ kind: "builtin", name: "claude" }),
+  );
+  eq("(q) resolveHarness member → same", resolveHarness("cursor"), "cursor");
+  eq("(q) resolveHarness non-member → null", resolveHarness("nope"), null);
+  eq("(q) resolveHarness undefined → null", resolveHarness(undefined), null);
+  eq(
+    "(q) resolveHarness legacy object shape → null (fail-closed)",
+    resolveHarness({ kind: "default" }),
+    null,
+  );
+  eq(
+    "(q) encodeHarnessChoice member → member",
+    encodeHarnessChoice("pi"),
+    "pi",
+  );
+  eq(
+    "(q) encodeHarnessChoice non-member → default sentinel",
+    encodeHarnessChoice("bogus"),
+    HARNESS_DEFAULT_VALUE,
+  );
+  eq("(q) decodeHarnessChoice member → member", decodeHarnessChoice("goose"), "goose");
+  eq(
+    "(q) decodeHarnessChoice default sentinel → null",
+    decodeHarnessChoice(HARNESS_DEFAULT_VALUE),
+    null,
+  );
+
+  // --- buildOmnigentArgv with harness across every agent mode ---
+  check(
+    "(q) default agent + harness → run --harness <h> -p",
+    deepEq(
+      buildOmnigentArgv({ binaryPath: BIN, prompt: "P", harness: "codex" }),
+      [BIN, "run", "--harness", "codex", "-p", "P"],
+    ),
+  );
+  check(
+    "(q) builtin agent + harness → <name> --harness <h> -p (forwarded)",
+    deepEq(
+      buildOmnigentArgv({
+        binaryPath: BIN,
+        prompt: "P",
+        agent: { mode: "builtin", name: "polly" },
+        harness: "claude",
+      }),
+      [BIN, "polly", "--harness", "claude", "-p", "P"],
+    ),
+  );
+  check(
+    "(q) custom agent + harness → run <path> --harness <h> -p (path before flag)",
+    deepEq(
+      buildOmnigentArgv({
+        binaryPath: BIN,
+        prompt: "P",
+        agent: { mode: "custom", path: "/v/.omnigent/agent-configs/a.yaml" },
+        harness: "cursor",
+      }),
+      [BIN, "run", "/v/.omnigent/agent-configs/a.yaml", "--harness", "cursor", "-p", "P"],
+    ),
+  );
+  check(
+    "(q) no harness → argv is byte-identical to pre-M15 (no --harness)",
+    deepEq(buildOmnigentArgv({ binaryPath: BIN, prompt: "P" }), [
+      BIN,
+      "run",
+      "-p",
+      "P",
+    ]),
+  );
+  check(
+    "(q) invalid harness value is dropped from argv (fail-closed)",
+    deepEq(
+      buildOmnigentArgv({ binaryPath: BIN, prompt: "P", harness: "evil; rm -rf" }),
+      [BIN, "run", "-p", "P"],
+    ),
+  );
+  check(
+    "(q) null harness is dropped from argv",
+    deepEq(buildOmnigentArgv({ binaryPath: BIN, prompt: "P", harness: null }), [
+      BIN,
+      "run",
+      "-p",
+      "P",
+    ]),
+  );
+
+  // --- buildSkillCliInvocation (copy-invocation) with harness ---
+  eq(
+    "(q) copy-invocation default + harness",
+    buildSkillCliInvocation({ skillName: "daily-note", harness: "codex" }),
+    "omnigent run --harness codex -p 'Use the daily-note skill.'",
+  );
+  eq(
+    "(q) copy-invocation builtin + harness",
+    buildSkillCliInvocation({
+      skillName: "x",
+      agent: { mode: "builtin", name: "debby" },
+      harness: "pi",
+    }),
+    "omnigent debby --harness pi -p 'Use the x skill.'",
+  );
+  eq(
+    "(q) copy-invocation invalid harness omitted",
+    buildSkillCliInvocation({ skillName: "x", harness: "bogus" }),
+    "omnigent run -p 'Use the x skill.'",
+  );
+
+  // --- hidden-folder reveal path gate (the security-relevant bit) ---
+  check(
+    "(q) reveals a .claude dot-folder path",
+    isRevealableHiddenPath(".claude/skills/foo/SKILL.md", ".obsidian") === true,
+  );
+  check(
+    "(q) NEVER reveals the config dir (.obsidian)",
+    isRevealableHiddenPath(".obsidian/plugins/x/main.js", ".obsidian") === false,
+  );
+  check(
+    "(q) NEVER reveals .trash",
+    isRevealableHiddenPath(".trash/old.md", ".obsidian") === false,
+  );
+  check(
+    "(q) a normal (non-dot) path is not 'revealable' (already visible)",
+    isRevealableHiddenPath("notes/today.md", ".obsidian") === false,
+  );
+  check(
+    "(q) a nested dot segment under a visible folder is revealed",
+    isRevealableHiddenPath("projects/.agents/skills/a.md", ".obsidian") === true,
+  );
+  check(
+    "(q) config dir check is per-segment (a .obsidian-suffixed name still reveals)",
+    isRevealableHiddenPath(".obsidianX/note.md", ".obsidian") === true,
+  );
+}
+
+// =====================================================================
+// [r] M15.3 — custom (user-defined) harnesses: validation, argv substitution,
+//     control-char stripping, per-skill value parse/resolve (fail-closed).
+// =====================================================================
+{
+  console.log("\n[r] M15.3 custom harnesses");
+
+  const ABS = "/usr/local/bin/isaac";
+  const okCmd = [ABS, "-p", HARNESS_PROMPT_PLACEHOLDER];
+
+  // --- stripControlChars ---
+  eq(
+    "(r) stripControlChars removes NUL/CR/LF/etc",
+    stripControlChars("a b\nc\r\td"),
+    "abcd",
+  );
+  eq("(r) stripControlChars leaves normal text", stripControlChars("hi there"), "hi there");
+
+  // --- isValidCustomHarnessCommand ---
+  check("(r) valid: absolute bin + {prompt} token", isValidCustomHarnessCommand(okCmd));
+  check(
+    "(r) valid: {prompt} embedded within a token",
+    isValidCustomHarnessCommand([ABS, `--msg=${HARNESS_PROMPT_PLACEHOLDER}`]),
+  );
+  check("(r) invalid: no {prompt} anywhere", !isValidCustomHarnessCommand([ABS, "-p", "hi"]));
+  check(
+    "(r) invalid: relative binary (PATH-hijackable)",
+    !isValidCustomHarnessCommand(["isaac", "-p", HARNESS_PROMPT_PLACEHOLDER]),
+  );
+  check("(r) invalid: empty array", !isValidCustomHarnessCommand([]));
+  check("(r) invalid: not an array", !isValidCustomHarnessCommand("x"));
+  check(
+    "(r) invalid: an empty-string token",
+    !isValidCustomHarnessCommand([ABS, "", HARNESS_PROMPT_PLACEHOLDER]),
+  );
+
+  // --- buildCustomHarnessArgv ---
+  check(
+    "(r) argv: {prompt} substituted as ONE inert token (no split)",
+    deepEq(
+      buildCustomHarnessArgv({ command: okCmd, prompt: "Use the daily-note skill." }),
+      [ABS, "-p", "Use the daily-note skill."],
+    ),
+  );
+  check(
+    "(r) argv: control chars stripped from the substituted prompt",
+    deepEq(
+      buildCustomHarnessArgv({ command: okCmd, prompt: "a\nb c" }),
+      [ABS, "-p", "abc"],
+    ),
+  );
+  check(
+    "(r) argv: substitution stays within an embedded token",
+    deepEq(
+      buildCustomHarnessArgv({
+        command: [ABS, `--msg=${HARNESS_PROMPT_PLACEHOLDER}`],
+        prompt: "hi; rm -rf /",
+      }),
+      [ABS, "--msg=hi; rm -rf /"],
+    ),
+  );
+  eq(
+    "(r) argv: invalid command → null (fail-closed)",
+    buildCustomHarnessArgv({ command: ["rel", HARNESS_PROMPT_PLACEHOLDER], prompt: "x" }),
+    null,
+  );
+
+  // --- M17: optional {agent} placeholder ---
+  const agentCmd = [ABS, "--agent", HARNESS_AGENT_PLACEHOLDER, "-p", HARNESS_PROMPT_PLACEHOLDER];
+  check(
+    "(r) {agent}: selected agent substituted as its own token",
+    deepEq(
+      buildCustomHarnessArgv({ command: agentCmd, prompt: "P", agent: "claude-docs" }),
+      [ABS, "--agent", "claude-docs", "-p", "P"],
+    ),
+  );
+  check(
+    "(r) {agent}: no agent → drops the standalone token AND its preceding flag",
+    deepEq(
+      buildCustomHarnessArgv({ command: agentCmd, prompt: "P", agent: "" }),
+      [ABS, "-p", "P"],
+    ),
+  );
+  check(
+    "(r) {agent}: no agent → embedded `--agent={agent}` token dropped whole",
+    deepEq(
+      buildCustomHarnessArgv({
+        command: [ABS, `--agent=${HARNESS_AGENT_PLACEHOLDER}`, "-p", HARNESS_PROMPT_PLACEHOLDER],
+        prompt: "P",
+      }),
+      [ABS, "-p", "P"],
+    ),
+  );
+  check(
+    "(r) {agent}: control chars stripped from the agent name",
+    deepEq(
+      buildCustomHarnessArgv({ command: agentCmd, prompt: "P", agent: "a\nb c" }),
+      [ABS, "--agent", "ab c", "-p", "P"],
+    ),
+  );
+  check(
+    "(r) {agent}: agent provided but no {agent} token → agent ignored",
+    deepEq(
+      buildCustomHarnessArgv({ command: [ABS, "-p", HARNESS_PROMPT_PLACEHOLDER], prompt: "P", agent: "x" }),
+      [ABS, "-p", "P"],
+    ),
+  );
+
+  // --- M17: Claude subagent frontmatter parser ---
+  check(
+    "(r) claude frontmatter: reads name + description from the fence",
+    deepEq(
+      parseClaudeAgentFrontmatter('---\nname: researcher\ndescription: "deep research"\ntools: [Read]\n---\nbody'),
+      { name: "researcher", description: "deep research" },
+    ),
+  );
+  check(
+    "(r) claude frontmatter: no fence → nulls",
+    deepEq(parseClaudeAgentFrontmatter("# just a heading\n"), { name: null, description: null }),
+  );
+
+  // --- parse / encode per-skill value ---
+  eq(
+    "(r) encodeCustomHarnessChoice → custom:<id>",
+    encodeCustomHarnessChoice("isaac"),
+    `${CUSTOM_HARNESS_VALUE_PREFIX}isaac`,
+  );
+  check(
+    "(r) parseHarnessValue omnigent member",
+    deepEq(parseHarnessValue("codex"), { kind: "omnigent", name: "codex" }),
+  );
+  check(
+    "(r) parseHarnessValue custom:<id>",
+    deepEq(parseHarnessValue("custom:isaac"), { kind: "custom", id: "isaac" }),
+  );
+  check(
+    "(r) parseHarnessValue default → none",
+    deepEq(parseHarnessValue(HARNESS_DEFAULT_VALUE), { kind: "none" }),
+  );
+  check(
+    "(r) parseHarnessValue empty custom id → none",
+    deepEq(parseHarnessValue("custom:"), { kind: "none" }),
+  );
+
+  // --- resolveSkillHarness (fail-closed against the harness registry) ---
+  const registry = [{ id: "isaac", label: "isaac", command: okCmd }];
+  check(
+    "(r) resolve omnigent name → {omnigent}",
+    deepEq(resolveSkillHarness("cursor", registry), { kind: "omnigent", name: "cursor" }),
+  );
+  check(
+    "(r) resolve known custom id → {custom, harness}",
+    deepEq(resolveSkillHarness("custom:isaac", registry), {
+      kind: "custom",
+      harness: registry[0],
+    }),
+  );
+  check(
+    "(r) resolve UNKNOWN custom id → none (fail-closed)",
+    deepEq(resolveSkillHarness("custom:ghost", registry), { kind: "none" }),
+  );
+  check(
+    "(r) resolve custom id whose command went invalid → none",
+    deepEq(
+      resolveSkillHarness("custom:bad", [{ id: "bad", label: "bad", command: ["rel"] }]),
+      { kind: "none" },
+    ),
+  );
+  check(
+    "(r) resolve with null registry → none (no throw)",
+    deepEq(resolveSkillHarness("custom:isaac", null), { kind: "none" }),
+  );
+
+  // --- copyable CLI string ---
+  eq(
+    "(r) buildCustomHarnessCliInvocation quotes each token",
+    buildCustomHarnessCliInvocation({ command: okCmd, prompt: "Use the x skill." }),
+    "'/usr/local/bin/isaac' '-p' 'Use the x skill.'",
+  );
+  eq(
+    "(r) buildCustomHarnessCliInvocation invalid → empty string",
+    buildCustomHarnessCliInvocation({ command: ["rel", HARNESS_PROMPT_PLACEHOLDER], prompt: "x" }),
+    "",
+  );
+}
+
+// =====================================================================
+// [s] M15.3 — single-line command parsing + omnigent config-list discovery.
+// =====================================================================
+{
+  console.log("\n[s] M15.3 command-line parse + omnigent discovery");
+
+  // --- parseHarnessCommandLine (plain whitespace split, NOT a shell tokenizer) ---
+  check(
+    "(s) splits a vibe command into argv tokens",
+    deepEq(parseHarnessCommandLine("/usr/local/bin/isaac -p {prompt}"), [
+      "/usr/local/bin/isaac",
+      "-p",
+      "{prompt}",
+    ]),
+  );
+  check(
+    "(s) collapses extra whitespace + trims",
+    deepEq(parseHarnessCommandLine("  /bin/x   --flag   {prompt}  "), [
+      "/bin/x",
+      "--flag",
+      "{prompt}",
+    ]),
+  );
+  check("(s) empty line → []", deepEq(parseHarnessCommandLine("   "), []));
+  check("(s) non-string → []", deepEq(parseHarnessCommandLine(undefined), []));
+  // End-to-end: a parsed vibe line is a valid harness command and builds argv.
+  check(
+    "(s) parsed vibe line is valid + builds the expected argv",
+    isValidCustomHarnessCommand(parseHarnessCommandLine("/usr/local/bin/isaac -p {prompt}")) &&
+      deepEq(
+        buildCustomHarnessArgv({
+          command: parseHarnessCommandLine("/usr/local/bin/isaac -p {prompt}"),
+          prompt: "Use the daily-note skill.",
+        }),
+        ["/usr/local/bin/isaac", "-p", "Use the daily-note skill."],
+      ),
+  );
+
+  // --- parseConfiguredHarnesses (real `omnigent config list` shape) ---
+  const CONFIG_LIST = [
+    "Defaults",
+    "  # ~/.omnigent/config.yaml",
+    "  server=https://omnigents-3272836215725701.aws.databricksapps.com",
+    "",
+    "Credentials (by harness)",
+    "  Claude",
+    "    🎟️ subscription claude via claude CLI ✓ default",
+    "    🧱 databricks databricks profile: omni-profile",
+    "  Codex",
+    "    ⚙️ cli-config codex-databricks ~/.codex/config.toml: Databricks ✓ default",
+    "    🧱 databricks databricks profile: omni-profile",
+    "  Gemini",
+    "    (none configured)",
+    "  Pi",
+    "    ⚙️ cli-config codex-databricks ~/.codex/config.toml: Databricks ✓ default",
+    "    🧱 databricks databricks profile: omni-profile",
+  ].join("\n");
+  const parsed = parseConfiguredHarnesses(CONFIG_LIST);
+  check(
+    "(s) discovers the four harness groups in order",
+    deepEq(parsed.map((h) => h.name), ["Claude", "Codex", "Gemini", "Pi"]),
+  );
+  check(
+    "(s) Claude/Codex/Pi configured, Gemini not",
+    parsed.find((h) => h.name === "Claude").configured === true &&
+      parsed.find((h) => h.name === "Codex").configured === true &&
+      parsed.find((h) => h.name === "Pi").configured === true &&
+      parsed.find((h) => h.name === "Gemini").configured === false,
+  );
+  check(
+    "(s) ignores the Defaults section (server/comment lines)",
+    !parsed.some((h) => h.name.includes("server") || h.name.startsWith("#")),
+  );
+  check("(s) empty/garbage input → []", deepEq(parseConfiguredHarnesses(""), []) && deepEq(parseConfiguredHarnesses(undefined), []));
+  check(
+    "(s) a dedent (column-0 line) ends the section",
+    deepEq(
+      parseConfiguredHarnesses(
+        "Credentials (by harness)\n  Claude\n    x ✓\nDefaults again\n  ShouldNotAppear",
+      ).map((h) => h.name),
+      ["Claude"],
+    ),
   );
 }
 

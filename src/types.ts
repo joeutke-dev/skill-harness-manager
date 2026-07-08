@@ -1,6 +1,6 @@
 // Shared types for the Skill Layer plugin.
 
-import type { SkillAgent } from "./launch";
+import type { CustomHarness, SkillAgent } from "./launch";
 
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
@@ -83,10 +83,50 @@ export interface SkillLayerSettings {
    * local state only — never written into any SKILL.md.
    */
   skillAgent: Record<string, SkillAgent>;
+  /**
+   * Per-skill omnigent HARNESS choice (M15), keyed by skill id (same stable path
+   * used in `skillAgent`/`skillIcons`). The value is a harness NAME string; an
+   * absent key = no `--harness` (omnigent uses its own configured default).
+   * ORTHOGONAL to `skillAgent` — a skill can pin both an agent and a harness. At
+   * launch the value is re-validated fail-closed by `resolveHarness` against the
+   * hardcoded `OMNIGENT_HARNESSES` allowlist, so any unrecognized or stale value
+   * (incl. a legacy object shape from the removed M4–M7 harness selector) simply
+   * emits no `--harness`. Plugin-local state only — never written into any
+   * SKILL.md.
+   */
+  skillHarness: Record<string, string>;
+  /**
+   * Per-skill CLAUDE SUBAGENT choice (M17), keyed by skill id. The value is a
+   * `.claude/agents/*.md` subagent NAME. Applies ONLY when the skill's harness is
+   * a claude-based CUSTOM harness (omnigent agents live in `skillAgent`); it is
+   * substituted into the harness command's `{agent}` token at launch. An absent
+   * key = no agent. Re-validated against the discovered subagents before use, so
+   * a stale name degrades to none. Plugin-local; never written into any SKILL.md.
+   */
+  skillClaudeAgent: Record<string, string>;
+  /**
+   * User-defined custom harnesses (M15.3) — arbitrary external commands the
+   * per-skill Harness dropdown can select instead of an omnigent `--harness`.
+   * Each is `{id, label, command[]}` where `command[0]` is an absolute binary
+   * and one token holds `{prompt}`. This is the plugin's only non-omnigent spawn
+   * target; every launch re-validates fail-closed (`resolveSkillHarness` +
+   * `isValidCustomHarnessCommand` + an existence check on the binary). Managed
+   * from the Harnesses tab. Plugin-local state — never written into any SKILL.md.
+   */
+  harnesses: CustomHarness[];
   /** Absolute path to the omnigent binary; blank = auto-detect by probing. */
   omnigentBinaryPath: string;
   /** Append the generic vault-anchor instruction to the launch prompt. */
   appendVaultAnchor: boolean;
+  /**
+   * Reveal hidden dot-folders (e.g. `.claude/`) in Obsidian's file explorer
+   * (M15). When on, the plugin patches the vault adapter's private reconcile
+   * path to surface dotfiles and suppresses the "bad dotfile" warning; when off
+   * (default), the explorer behaves normally. Cleanly reverted on toggle-off and
+   * on unload. NOTE: relies on undocumented Obsidian internals (see
+   * `hiddenFiles.ts`).
+   */
+  showHiddenFolders: boolean;
   /**
    * Global default pinned-ribbon icon — the fallback used by any pinned skill
    * that has no per-skill icon in `skillIcons`. Set via the settings selector
@@ -105,6 +145,10 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   rightClickSkillIds: [],
   skillIcons: {},
   skillAgent: {},
+  skillHarness: {},
+  skillClaudeAgent: {},
+  harnesses: [],
   omnigentBinaryPath: "",
   appendVaultAnchor: true,
+  showHiddenFolders: false,
 };

@@ -7,8 +7,8 @@
 
 import type { CustomAgent } from "./launch";
 
-/** The two browser tabs. The Skills tab is the existing browser, unchanged. */
-export type SkillLayerTab = "skills" | "agents";
+/** The browser tabs. Skills is the existing browser; Harnesses is M15.3. */
+export type SkillLayerTab = "skills" | "agents" | "harnesses";
 
 /** The tab shown on first open. */
 export const DEFAULT_TAB: SkillLayerTab = "skills";
@@ -17,6 +17,7 @@ export const DEFAULT_TAB: SkillLayerTab = "skills";
 export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "agents", label: "Agents" },
+  { id: "harnesses", label: "Harnesses" },
 ];
 
 /** Empty-state copy for the Agents tab when discovery returns nothing. */
