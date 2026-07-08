@@ -138,6 +138,26 @@ const {
   YAML_VIEWER_PLUGIN_ID,
 } = await import(pathToFileURL(yamlOut).href);
 
+// M18: per-tool folder map (pure; type-only import of ScanRoot is erased).
+const foldersOut = join(builtDir, "folders.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "folders.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: foldersOut,
+  logLevel: "silent",
+});
+const {
+  TOOL_FOLDERS,
+  skillFolderSegments,
+  commandFolderSegments,
+  agentFolderSegments,
+  defaultSkillScanRoots,
+  homeSkillRootPaths,
+  joinHome,
+} = await import(pathToFileURL(foldersOut).href);
+
 // hiddenFiles.ts imports `obsidian` (App type + FileSystemAdapter value) which
 // has no runtime JS package, so stub it — we only exercise the pure
 // `isRevealableHiddenPath` here, never the controller.
@@ -275,6 +295,44 @@ console.log("\n[a2] M16 Launch-modal userPrompt is appended safely");
   check("hostile userPrompt fully contained in argv[3]", argv[3].includes(hostileUser));
   check("no standalone `--harness` token from userPrompt", argv.indexOf("--harness") === -1);
   check("no standalone `--server` token from userPrompt", argv.indexOf("--server") === -1);
+}
+
+// =====================================================================
+// (a3) M18 command launch wording + per-tool folder map.
+// =====================================================================
+console.log("\n[a3] M18 command form + folder map");
+{
+  eq(
+    "command base form = `Run the /<name> command.`",
+    buildLaunchPrompt("deploy", VAULT, false, undefined, undefined, "command"),
+    "Run the /deploy command.",
+  );
+  check(
+    "command form does NOT start with a slash (omnigent REPL-safe)",
+    !buildLaunchPrompt("deploy", VAULT, false, undefined, undefined, "command").startsWith("/"),
+  );
+  eq(
+    "skill base form unchanged (default kind)",
+    buildLaunchPrompt("daily-note", VAULT, false),
+    "Use the daily-note skill.",
+  );
+  eq(
+    "command + userPrompt appends after the directive",
+    buildLaunchPrompt("deploy", VAULT, false, undefined, "to staging", "command"),
+    "Run the /deploy command. to staging",
+  );
+
+  // Folder map
+  check("joinHome joins with a single slash", joinHome("/Users/x/", "/.claude/skills") === "/Users/x/.claude/skills");
+  check("commandFolderSegments has .claude/commands + .codex/prompts", commandFolderSegments().includes(".claude/commands") && commandFolderSegments().includes(".codex/prompts"));
+  check("agentFolderSegments has claude/cursor/codex agents", [".", ".claude/agents", ".cursor/agents", ".codex/agents"].slice(1).every((s) => agentFolderSegments().includes(s)));
+  check("skillFolderSegments includes .claude/skills + .agents/skills", skillFolderSegments().includes(".claude/skills") && skillFolderSegments().includes(".agents/skills"));
+  const roots = defaultSkillScanRoots();
+  check("defaultSkillScanRoots: first is the vault root, enabled", roots[0].kind === "vault" && roots[0].path === "" && roots[0].enabled === true);
+  check("defaultSkillScanRoots: has an enabled vault-relative .claude/skills adapter root", roots.some((r) => r.kind === "adapter" && r.path === ".claude/skills" && r.enabled));
+  check("defaultSkillScanRoots: NO home/external roots (vault-only)", roots.every((r) => r.kind !== "external"));
+  check("homeSkillRootPaths: absolute home tool paths for cleanup", homeSkillRootPaths("/home/u").includes("/home/u/.claude/skills") && homeSkillRootPaths("/home/u").includes("/home/u/.codex/skills"));
+  check("TOOL_FOLDERS has 8 tools incl. Claude Code", TOOL_FOLDERS.length === 8 && TOOL_FOLDERS[0].tool === "Claude Code");
 }
 
 // =====================================================================
@@ -999,13 +1057,15 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS are Skills, Agents, Harnesses", deepEq(TABS.map((t) => t.id), ["skills", "agents", "harnesses"]));
-  check("TABS labels are Skills / Agents / Harnesses", deepEq(TABS.map((t) => t.label), ["Skills", "Agents", "Harnesses"]));
+  check("TABS are Skills, Commands, Agents, Harnesses", deepEq(TABS.map((t) => t.id), ["skills", "commands", "agents", "harnesses"]));
+  check("TABS labels are Skills / Commands / Agents / Harnesses", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Agents", "Harnesses"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
   eq("starts on Skills", tab, "skills");
   tab = TABS[1].id;
+  eq("switching to Commands → commands", tab, "commands");
+  tab = TABS.find((x) => x.id === "agents").id;
   eq("switching to Agents → agents", tab, "agents");
   tab = TABS[0].id;
   eq("switching back to Skills → skills", tab, "skills");

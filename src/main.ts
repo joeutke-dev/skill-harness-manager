@@ -32,7 +32,6 @@ import {
   buildRightClickMenuItems,
   buildSkillCliInvocation,
   BUNDLE_CONFIG_NAME,
-  CLAUDE_AGENTS_SUBDIR,
   ClaudeAgent,
   CustomAgent,
   buildCustomHarnessArgv,
@@ -59,9 +58,18 @@ import {
   safeCustomAgentRealPath,
   SkillAgent,
 } from "./launch";
+import {
+  agentFolderSegments,
+  commandFolderSegments,
+  defaultSkillScanRoots,
+  homeSkillRootPaths,
+  joinHome,
+} from "./folders";
 import { HiddenFilesController, isRevealableHiddenPath } from "./hiddenFiles";
 import {
   coerceFrontmatterTags,
+  firstHeading,
+  inferSourceLabel,
   parseFrontmatter,
   resolveSkillTags,
   sanitizeTag,
@@ -102,6 +110,9 @@ export default class SkillLayerPlugin extends Plugin {
 
   /** Cached Claude subagents (M17) from `<vault>/.claude/agents` + `~/.claude/agents`. */
   private claudeAgents: ClaudeAgent[] = [];
+
+  /** Cached commands (M18): `*.md` under each tool's commands folder (Skill-shaped, kind:"command"). */
+  private commands: Skill[] = [];
 
   /** Cached harnesses discovered from `omnigent config list` (M15.3). */
   private configuredHarnesses: ConfiguredHarness[] = [];
@@ -245,6 +256,26 @@ export default class SkillLayerPlugin extends Plugin {
     ]) {
       delete raw[key];
     }
+
+    // M18: remove the home-directory (global) skill roots an earlier build
+    // auto-added (external kind, disabled) — they cluttered settings and mixed
+    // machine-global skills with the user's in-vault skills. Only the exact
+    // auto-added paths are dropped, so a user's own custom external roots stay.
+    const homeRoots = new Set(homeSkillRootPaths(os.homedir()));
+    this.settings.scanRoots = this.settings.scanRoots.filter(
+      (r) => !(r.kind === "external" && homeRoots.has(r.path)),
+    );
+    // Union the per-tool VAULT skill scan roots (from the Agentfiles tool map)
+    // into whatever's stored, so in-vault skills across Claude/Cursor/Codex/etc.
+    // are discovered out of the box. Additive + idempotent: existing roots (incl.
+    // the user's custom ones and their enabled state) are preserved.
+    const havePaths = new Set(this.settings.scanRoots.map((r) => r.path));
+    for (const root of defaultSkillScanRoots()) {
+      if (!havePaths.has(root.path)) {
+        this.settings.scanRoots.push(root);
+        havePaths.add(root.path);
+      }
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -270,6 +301,7 @@ export default class SkillLayerPlugin extends Plugin {
     // Keep the custom-agent dropdown in step with on-disk config changes.
     this.scanCustomAgents();
     this.scanClaudeAgents();
+    this.scanCommands();
     for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
       const view = leaf.view;
       if (view instanceof SkillBrowserView) view.refresh();
@@ -410,6 +442,19 @@ export default class SkillLayerPlugin extends Plugin {
     this.refreshViews();
   }
 
+  /**
+   * Unified refresh (M18): re-scan everything the browser shows — skills,
+   * commands, custom agents, Claude subagents (all via `rescan`) — and kick a
+   * best-effort re-discovery of omnigent harnesses. This is the single "Refresh"
+   * action wired to every tab's refresh control (it subsumes the old Rescan
+   * button). Harness discovery is fire-and-forget so a slow/unavailable omnigent
+   * never blocks the filesystem rescan.
+   */
+  async refreshAll(): Promise<void> {
+    await this.rescan();
+    void this.refreshConfiguredHarnesses();
+  }
+
   // --- Claude subagents (M17) --------------------------------------------
   /** The cached, discovered Claude subagents (for the per-skill Agent dropdown
    *  when a claude/custom harness is selected). */
@@ -425,9 +470,17 @@ export default class SkillLayerPlugin extends Plugin {
    */
   private scanClaudeAgents(): void {
     const base = this.detector.vaultBasePath();
+    const home = os.homedir();
+    // M18: scan EVERY tool's agents folder (.claude/agents, .cursor/agents,
+    // .codex/agents, …) — project (vault-relative) first, then home — so agents
+    // from any assistant appear. Project wins over global on a name clash.
     const dirs: { dir: string; source: "project" | "global" }[] = [];
-    if (base) dirs.push({ dir: nodePath.join(base, CLAUDE_AGENTS_SUBDIR), source: "project" });
-    dirs.push({ dir: nodePath.join(os.homedir(), CLAUDE_AGENTS_SUBDIR), source: "global" });
+    for (const seg of agentFolderSegments()) {
+      if (base) dirs.push({ dir: nodePath.join(base, seg), source: "project" });
+    }
+    for (const seg of agentFolderSegments()) {
+      dirs.push({ dir: joinHome(home, seg), source: "global" });
+    }
 
     const byName = new Map<string, ClaudeAgent>();
     for (const { dir, source } of dirs) {
@@ -496,6 +549,82 @@ export default class SkillLayerPlugin extends Plugin {
   claudeAgentLabelFor(id: string): string {
     const v = this.claudeAgentOptionValue(id);
     return v || "Default";
+  }
+
+  // --- Commands (M18) ----------------------------------------------------
+  /** The cached, discovered commands (for the Commands tab). Skill-shaped. */
+  getCommands(): Skill[] {
+    return this.commands;
+  }
+
+  /**
+   * Scan every tool's commands folder (`.claude/commands`, `.codex/prompts`, …)
+   * — project (vault-relative) first, then home — for `*.md` files, each of
+   * which is one command. Unlike skills there's no SKILL.md rule: any markdown in
+   * a commands folder is a command. Built as Skill objects with kind:"command" so
+   * they reuse the whole row UI / per-item state. Deduped by absolute path
+   * (project wins). All fs access wrapped; never throws.
+   */
+  private scanCommands(): void {
+    const base = this.detector.vaultBasePath();
+    const home = os.homedir();
+    const dirs: { dir: string; vaultRel: string | null }[] = [];
+    for (const seg of commandFolderSegments()) {
+      if (base) dirs.push({ dir: nodePath.join(base, seg), vaultRel: seg });
+    }
+    for (const seg of commandFolderSegments()) {
+      dirs.push({ dir: joinHome(home, seg), vaultRel: null });
+    }
+
+    const byId = new Map<string, Skill>();
+    for (const { dir, vaultRel } of dirs) {
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        continue; // missing dir → skip
+      }
+      for (const entry of entries.sort()) {
+        if (!/\.md$/i.test(entry)) continue;
+        const abs = nodePath.join(dir, entry);
+        let text: string;
+        try {
+          if (!fs.statSync(abs).isFile()) continue;
+          text = fs.readFileSync(abs, "utf8");
+        } catch {
+          continue;
+        }
+        if (byId.has(abs)) continue;
+        const fm = parseFrontmatter(text);
+        const stem = entry.replace(/\.md$/i, "");
+        const name = fm.name && fm.name.trim() ? fm.name.trim() : stem;
+        const description =
+          fm.description && fm.description.trim()
+            ? fm.description.trim()
+            : firstHeading(text) ?? "(no description)";
+        const vaultPath = vaultRel ? `${vaultRel}/${entry}` : null;
+        const relForTag = vaultPath ?? `${nodePath.basename(dir)}/${entry}`;
+        byId.set(abs, {
+          id: abs,
+          kind: "command",
+          name,
+          description,
+          path: abs,
+          vaultPath,
+          sourceRoot: dir,
+          sourceLabel: inferSourceLabel(abs),
+          detection: vaultRel ? "adapter" : "external",
+          tags: resolveSkillTags({
+            relativePath: relForTag,
+            description,
+            frontmatterTags: fm.tags ?? [],
+          }),
+        });
+      }
+    }
+    this.commands = Array.from(byId.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
   }
 
   /**
@@ -1371,7 +1500,14 @@ export default class SkillLayerPlugin extends Plugin {
       // template with {prompt} filled in, each token shell-quoted.
       invocation = buildCustomHarnessCliInvocation({
         command: resolvedH.harness.command,
-        prompt: buildLaunchPrompt(skill.name, this.detector.vaultBasePath() ?? "", false),
+        prompt: buildLaunchPrompt(
+          skill.name,
+          this.detector.vaultBasePath() ?? "",
+          false,
+          undefined,
+          undefined,
+          skill.kind ?? "skill",
+        ),
         agent: this.claudeAgentOptionValue(skill.id),
       });
     } else {
@@ -1383,6 +1519,7 @@ export default class SkillLayerPlugin extends Plugin {
         skillName: skill.name,
         agent,
         harness: resolvedH.kind === "omnigent" ? resolvedH.name : null,
+        kind: skill.kind ?? "skill",
       });
     }
     try {
@@ -1439,6 +1576,7 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.appendVaultAnchor,
       contextPath,
       userPrompt,
+      skill.kind ?? "skill",
     );
 
     // Per-skill HARNESS (M15), resolved fail-closed. A CUSTOM harness spawns its

@@ -1,17 +1,26 @@
 /* Skill Layer — all styling lives here; no inline JS styles. */
 
 .skill-layer-view {
-  padding: 0 8px 16px;
+  /* No padding on the view — so the tab STRIP fills the full width and reaches
+     the very top of the pane (no gap). Side/bottom padding lives on the content
+     below (.skill-layer-tabcontent). !important because this element is also
+     Obsidian's `.view-content`, and the app stylesheet's contextual
+     `.workspace-leaf-content .view-content { padding }` rule (higher specificity)
+     would otherwise reintroduce a gap around the strip. */
+  padding: 0 !important;
+  /* Never scroll horizontally (avoids the pane shifting when a tab is focused). */
+  overflow-x: hidden;
+  /* Body/page = the LIGHTER grey (--background-secondary-alt). The active tab and
+     content share this so the tab merges into the page; the strip is darker. */
+  background: var(--background-secondary-alt);
 }
 
-.skill-layer-header {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 8px;
+/* Content below the tab strip carries the side + bottom padding. */
+.skill-layer-tabcontent {
+  padding: 0 var(--size-4-2) var(--size-4-4);
 }
 
+/* Refresh control (Agents/Harnesses tabs reuse this class). */
 .skill-layer-rescan {
   display: inline-flex;
   align-items: center;
@@ -19,47 +28,153 @@
   cursor: pointer;
 }
 
-/* Keep the rescan/refresh glyph from rendering at the large default icon size. */
+/* Keep the refresh glyph from rendering at the large default icon size. */
 .skill-layer-rescan .svg-icon {
   width: var(--icon-s);
   height: var(--icon-s);
 }
 
-/* --- Tab bar (M10): Skills | Agents ------------------------------------- */
+/* --- Tab bar (M10/M18): Skills | Commands | Agents | Harnesses ----------- */
 
+/* Chrome-style tabs (verified in a headless render harness): a full-bleed darker
+   tab STRIP (--background-secondary) holds the tabs; the ACTIVE tab is painted in
+   the page color (--background-secondary-alt, the lighter grey, same as the
+   content below), rounded at the top, with CONCAVE outward "feet" at its bottom
+   corners (mask-carved quarter-circles) that flare it into the strip — so it
+   reads as part of the page while curving out of the darker frame. Inactive tabs
+   are muted labels. */
 .skill-layer-tabbar {
   display: flex;
-  gap: 4px;
-  margin: 10px 0 4px;
-  border-bottom: 1px solid var(--background-modifier-border);
+  align-items: flex-end;
+  gap: var(--size-2-1);
+  /* Fills the full view width + top (the view has no padding), so the strip
+     reaches every edge with no gap. Internal padding keeps the tabs inset. */
+  margin: 0 0 var(--size-4-2);
+  padding: var(--size-2-3) var(--size-4-2) 0;
+  /* Darker than the page (--background-secondary-alt) so the page-colored active
+     tab reads as the prominent, lighter Chrome tab flaring out of a dark frame. */
+  background: var(--background-secondary);
 }
 
 .skill-layer-tab {
+  position: relative;
   cursor: pointer;
+  box-sizing: border-box;
+  /* Equal fixed width; stacked left with free space on the right. */
+  flex: 0 0 auto;
+  width: 9.8em;
   background: transparent;
   border: none;
-  box-shadow: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  padding: 6px 12px;
+  /* !important: Obsidian's default <button> box-shadow otherwise leaks in the
+     non-hover state. The keyboard focus ring is re-added below with !important. */
+  box-shadow: none !important;
+  /* Tab height (~15% shorter than the prior +5px). */
+  padding: calc(var(--size-4-3) + 2.5px) var(--size-4-2);
   color: var(--text-muted);
-  font-weight: var(--font-semibold);
-  transition: background-color 0.1s ease, color 0.1s ease;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  text-align: center;
+  white-space: nowrap;
+  /* visible so the active tab's flare feet can extend past its edges. */
+  overflow: visible;
+  transition: color 0.1s ease;
 }
 
-.skill-layer-tab:hover {
+.skill-layer-tab:not(.is-active):hover {
   color: var(--text-normal);
-  background: var(--background-modifier-hover);
+}
+
+/* Short vertical divider between adjacent INACTIVE tabs (a centered pseudo, so
+   no width shift). Suppressed on the last tab and next to the active tab. */
+.skill-layer-tab:not(.is-active):not(:last-child)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 28%;
+  height: 44%;
+  width: 1px;
+  background: var(--background-modifier-border);
+}
+.skill-layer-tab:not(.is-active):has(+ .skill-layer-tab.is-active)::after {
+  display: none;
 }
 
 .skill-layer-tab:focus-visible {
-  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
   outline: none;
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus) !important;
 }
 
+/* Active tab: page color, rounded top, concave flare feet into the strip. */
 .skill-layer-tab.is-active {
-  color: var(--text-accent);
-  border-bottom-color: var(--interactive-accent);
+  background: var(--background-secondary-alt);
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+  border-top-left-radius: var(--radius-l);
+  border-top-right-radius: var(--radius-l);
+  z-index: 1;
+}
+.skill-layer-tab.is-active::before,
+.skill-layer-tab.is-active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: var(--radius-l);
+  height: var(--radius-l);
+  background: var(--background-secondary-alt);
+}
+/* #0000/#000 are MASK operators (transparent/opaque), not theme colors — they
+   carve the concave quarter-circle at each foot's outer-top corner. */
+.skill-layer-tab.is-active::before {
+  left: calc(-1 * var(--radius-l));
+  -webkit-mask: radial-gradient(circle at top left, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+  mask: radial-gradient(circle at top left, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+}
+.skill-layer-tab.is-active::after {
+  right: calc(-1 * var(--radius-l));
+  -webkit-mask: radial-gradient(circle at top right, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+  mask: radial-gradient(circle at top right, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+}
+
+
+/* Browser toolbar: the filter input + a compact unified Refresh icon. The dark
+   filter bar directly below provides the visual separation from the content. */
+.skill-layer-searchbar {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-3);
+  margin-bottom: var(--size-2-3);
+}
+.skill-layer-searchbar .skill-layer-search {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+/* Filter bar: a recessed DARK-grey panel (like the item cards) holding the
+   Agent / Harness / Tag / Access dropdowns. Wraps on narrow panes. */
+.skill-layer-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-2-2);
+  padding: var(--size-2-3);
+  margin-bottom: var(--size-4-2);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+.skill-layer-filter {
+  flex: 1 1 8em;
+  min-width: 0;
+}
+.skill-layer-filter-select {
+  width: 100%;
+  font-size: var(--font-ui-smaller);
+}
+.skill-layer-refresh-icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
 }
 
 /* Agents-tab toolbar holding the Refresh control. */
@@ -98,45 +213,95 @@
   color: var(--text-faint);
 }
 
-.skill-layer-group {
-  margin-bottom: 14px;
+/* --- Folder tree (M18): collapsible source-folder groups with indent guides,
+   mirroring Obsidian's file explorer. --------------------------------------- */
+.skill-layer-tree-folder {
+  margin-bottom: var(--size-4-1);
 }
 
-.skill-layer-group-heading {
+.skill-layer-tree-folder-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  text-transform: uppercase;
-  font-size: var(--font-ui-smaller);
-  letter-spacing: 0.05em;
-  color: var(--text-accent);
-  border-bottom: 1px solid var(--background-modifier-border);
-  padding-bottom: 4px;
-  margin-bottom: 6px;
-}
-
-.skill-layer-group-name {
-  font-weight: var(--font-semibold);
-}
-
-.skill-layer-group-count {
-  color: var(--text-muted);
-  background: var(--background-secondary-alt);
+  gap: var(--size-2-2);
+  width: 100%;
+  background: transparent;
+  border: none;
+  box-shadow: none;
   border-radius: var(--radius-s);
-  padding: 0 6px;
+  padding: var(--size-2-2);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: left;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.skill-layer-tree-folder-title:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.skill-layer-tree-folder-title:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+  outline: none;
+}
+
+.skill-layer-tree-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.skill-layer-tree-chevron .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+}
+
+/* Section header (folder) is LARGER than the item name below it, so folders
+   read as the organizing level. Name uses the smaller UI size (see row-name). */
+.skill-layer-tree-folder-name {
+  /* ~10% larger than --font-ui-medium (15px) so folders read as the section level. */
+  font-size: calc(var(--font-ui-medium) * 1.1);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The vertical indent guide line, like the explorer's nesting lines. */
+.skill-layer-tree-children {
+  margin-inline-start: var(--size-4-2);
+  padding-inline-start: var(--size-4-2);
+  border-inline-start: 1px solid var(--background-modifier-border);
 }
 
 .skill-layer-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 6px;
+  gap: var(--size-2-3);
+  /* Symmetric padding so the hover background isn't lopsided. */
+  padding: var(--size-4-2);
+  /* Each item is a card: the DARKER grey (--background-secondary) recessed against
+     the lighter page, with a hairline border + radius like a form field — so items
+     read as distinct units and are easy to scan. */
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
-  transition: background-color 0.1s ease, color 0.1s ease;
+  /* Vertical gap between cards. */
+  margin-bottom: var(--size-2-3);
+  transition: border-color 0.1s ease, color 0.1s ease;
+}
+
+.skill-layer-row:last-child {
+  margin-bottom: 0;
 }
 
 .skill-layer-row:hover {
-  background: var(--background-modifier-hover);
+  /* Keep the dark card; brighten the border for interactive feedback. */
+  border-color: var(--background-modifier-border-hover);
 }
 
 .skill-layer-row-main {
@@ -151,28 +316,34 @@
 }
 
 .skill-layer-row-name {
-  font-weight: var(--font-semibold);
+  font-size: var(--font-ui-small);
+  /* Medium (not semibold) — semibold is reserved for section headers so weight
+     stays a meaningful hierarchy signal. */
+  font-weight: var(--font-medium);
+  color: var(--text-normal);
 }
 
 .skill-layer-row-badge {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
-  background: var(--background-secondary);
+  background: var(--background-secondary-alt);
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-s);
   padding: 0 6px;
 }
 
 .skill-layer-row-desc {
-  color: var(--text-normal);
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
-  margin: 2px 0;
+  margin: var(--size-2-1) 0;
 }
 
 .skill-layer-row-path {
   color: var(--text-faint);
   font-size: var(--font-ui-smaller);
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Actions live on their own line beneath the content and WRAP, so the column
@@ -200,6 +371,10 @@
   font-size: var(--font-ui-smaller);
   line-height: var(--line-height-tight);
   transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.skill-layer-action:hover {
+  background: var(--background-modifier-hover);
 }
 
 .skill-layer-action:focus-visible {
@@ -252,7 +427,7 @@
 .skill-layer-meta-key {
   color: var(--text-faint);
   text-transform: uppercase;
-  font-size: 0.85em;
+  font-size: var(--font-ui-smaller);
   letter-spacing: 0.02em;
 }
 /* Muted when Default; emphasized (bold, normal text colour — no accent/purple)
@@ -262,7 +437,14 @@
 }
 .skill-layer-meta-pill.is-set .skill-layer-meta-val {
   color: var(--text-normal);
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-medium);
+}
+.skill-layer-meta-pill:hover {
+  background: var(--background-modifier-hover);
+}
+.skill-layer-meta-pill:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+  outline: none;
 }
 
 /* Per-skill / per-agent Configuration modal: keep it compact. */
@@ -367,12 +549,12 @@
   align-items: center;
   gap: 3px;
   font-size: var(--font-ui-smaller);
-  line-height: 1.4;
-  padding: 2px 8px;
+  line-height: var(--line-height-tight);
+  padding: var(--size-2-1) var(--size-4-2);
   /* Explicit large radius keeps chips reading as pills (no Obsidian token). */
   border-radius: 999px;
   border: 1px solid var(--background-modifier-border);
-  background: var(--background-secondary);
+  background: var(--background-secondary-alt);
   color: var(--text-normal);
   cursor: pointer;
   user-select: none;
@@ -446,37 +628,10 @@
   padding: 1px 6px;
 }
 
-.skill-layer-facet {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 6px 0 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.skill-layer-activefilters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin: 6px 0;
-}
-
-.skill-layer-activefilters-label {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.skill-layer-clearfilters {
-  font-size: var(--font-ui-smaller);
-  cursor: pointer;
-}
-
 /* M15.3 — Harnesses tab: section titles, built-in chip row, add form. */
 .skill-layer-section-title {
-  margin: 14px 0 4px;
-  font-size: var(--font-ui-small);
+  margin: var(--size-4-4) 0 var(--size-4-1);
+  font-size: var(--font-ui-medium);
   font-weight: var(--font-semibold);
   color: var(--text-normal);
 }

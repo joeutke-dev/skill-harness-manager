@@ -15,9 +15,15 @@ export const SKILL_LAYER_VIEW = "skill-layer-browser";
 export class SkillBrowserView extends ItemView {
   private plugin: SkillLayerPlugin;
   private filter = "";
-  /** Active tag filters (lowercased), AND-combined with the text filter. */
-  private activeTags = new Set<string>();
+  /** Dropdown filters (all "" = no filter). Combined AND with the text filter. */
+  private filterAgent = "";
+  private filterHarness = "";
+  private filterTag = "";
+  /** "" | "rightclick" | "ribbon" | "either" — the Access dropdown. */
+  private filterAccess = "";
   private listEl: HTMLElement | null = null;
+  /** Collapsed source-folder groups in the tree (M18), keyed by group label. */
+  private collapsedGroups = new Set<string>();
   /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
   private activeTab: SkillLayerTab = DEFAULT_TAB;
   /** Container the active tab's content renders into (below the tab bar). */
@@ -63,19 +69,9 @@ export class SkillBrowserView extends ItemView {
     root.empty();
     root.addClass("skill-layer-view");
 
-    const header = root.createDiv({ cls: "skill-layer-header" });
-
-    const rescanBtn = header.createEl("button", {
-      cls: "skill-layer-rescan",
-      attr: { "aria-label": "Rescan skills" },
-    });
-    setIcon(rescanBtn, "refresh-cw");
-    rescanBtn.createSpan({ text: "Rescan" });
-    rescanBtn.addEventListener("click", async () => {
-      await this.plugin.rescan();
-      this.renderActiveTab();
-    });
-
+    // No rescan button (it ate the top space) — the view rescans on open and on
+    // file changes; per-tab Refresh controls remain on Agents/Harnesses. The tab
+    // bar sits at the very top now.
     this.renderTabBar(root);
 
     this.tabContentEl = root.createDiv({ cls: "skill-layer-tabcontent" });
@@ -84,19 +80,36 @@ export class SkillBrowserView extends ItemView {
 
   /** The Skills | Agents tab bar; clicking a tab switches the rendered content. */
   private renderTabBar(root: HTMLElement): void {
-    const bar = root.createDiv({ cls: "skill-layer-tabbar" });
+    const bar = root.createDiv({ cls: "skill-layer-tabbar", attr: { role: "tablist" } });
     for (const tab of TABS) {
       const active = this.activeTab === tab.id;
-      const btn = bar.createEl("button", {
+      // A DIV (role=tab), NOT a <button> — Obsidian's default button chrome
+      // (background, padding, box-shadow) interferes with the Chrome-tab CSS.
+      const btn = bar.createEl("div", {
         cls: "skill-layer-tab" + (active ? " is-active" : ""),
         text: tab.label,
-        attr: { "aria-label": `${tab.label} tab`, "aria-selected": String(active) },
+        attr: {
+          role: "tab",
+          tabindex: "0",
+          "aria-label": `${tab.label} tab`,
+          "aria-selected": String(active),
+        },
       });
-      btn.addEventListener("click", () => {
+      const activate = () => {
         if (this.activeTab === tab.id) return;
         this.activeTab = tab.id;
+        // Filters are per-tab (agents/harnesses/tags differ between Skills and
+        // Commands), so reset them to avoid a stale selection hiding everything.
+        this.resetFilters();
         // Re-render the whole view so tab-bar active state + content both update.
         this.render();
+      };
+      btn.addEventListener("click", activate);
+      btn.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          activate();
+        }
       });
     }
   }
@@ -108,7 +121,14 @@ export class SkillBrowserView extends ItemView {
     c.empty();
     if (this.activeTab === "agents") this.renderAgentsTab(c);
     else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
-    else this.renderSkillsTab(c);
+    else this.renderBrowserTab(c); // skills OR commands (same browser UI)
+  }
+
+  /** The active browser tab's item kind + label noun. */
+  private get browsing(): { items: Skill[]; noun: string } {
+    return this.activeTab === "commands"
+      ? { items: this.plugin.getCommands(), noun: "command" }
+      : { items: this.plugin.getSkills(), noun: "skill" };
   }
 
   /** Empty-state block: a muted lucide glyph above the explanatory copy. */
@@ -118,14 +138,20 @@ export class SkillBrowserView extends ItemView {
     empty.createSpan({ text });
   }
 
-  /** The Skills tab: the existing browser (search + filters + facet + rows). */
-  private renderSkillsTab(c: HTMLElement): void {
-    const search = c.createEl("input", {
+  /** The Skills/Commands browser tab (search + filters + facet + rows). Shared
+   *  between the Skills and Commands tabs — the only difference is the item
+   *  source + label noun (see `browsing`). */
+  private renderBrowserTab(c: HTMLElement): void {
+    const noun = this.browsing.noun;
+    // Search + a compact Refresh (the unified rescan — replaces the old top
+    // Rescan button; re-scans skills/commands/agents + re-discovers harnesses).
+    const toolbar = c.createDiv({ cls: "skill-layer-searchbar" });
+    const search = toolbar.createEl("input", {
       cls: "skill-layer-search",
       attr: {
         type: "text",
-        placeholder: "Filter skills by name, description, source…",
-        "aria-label": "Filter skills by name, description, source, or path",
+        placeholder: `Filter ${noun}s by name, description, source…`,
+        "aria-label": `Filter ${noun}s by name, description, source, or path`,
       },
     });
     search.value = this.filter;
@@ -134,8 +160,115 @@ export class SkillBrowserView extends ItemView {
       this.renderList();
     });
 
+    const refreshBtn = toolbar.createEl("button", {
+      cls: "skill-layer-rescan skill-layer-refresh-icon",
+      attr: { "aria-label": "Refresh (rescan skills, commands, agents, harnesses)" },
+    });
+    setIcon(refreshBtn, "refresh-cw");
+    refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
+
+    this.renderFilterBar(c, this.browsing.items);
+
     this.listEl = c.createDiv({ cls: "skill-layer-list" });
     this.renderList();
+  }
+
+  /** The effective Agent label for a skill (accounts for custom-harness Claude
+   *  subagents vs omnigent agents), mirroring the row-meta pill logic. */
+  private agentLabelOf(s: Skill): string {
+    return this.plugin.skillUsesCustomHarness(s.id)
+      ? this.plugin.claudeAgentLabelFor(s.id)
+      : this.plugin.agentLabelFor(s.id);
+  }
+
+  private resetFilters(): void {
+    this.filter = "";
+    this.filterAgent = "";
+    this.filterHarness = "";
+    this.filterTag = "";
+    this.filterAccess = "";
+  }
+
+  /** The dark filter bar: Agent / Harness / Tag / Access dropdowns. Options are
+   *  the distinct values actually present across `all`, so empty facets vanish. */
+  private renderFilterBar(c: HTMLElement, all: Skill[]): void {
+    const bar = c.createDiv({ cls: "skill-layer-filterbar" });
+
+    const distinct = (fn: (s: Skill) => string): string[] =>
+      Array.from(new Set(all.map(fn).filter(Boolean))).sort((a, b) =>
+        a.localeCompare(b),
+      );
+
+    const addSelect = (
+      label: string,
+      allLabel: string,
+      options: { value: string; text: string }[],
+      current: string,
+      onChange: (v: string) => void,
+    ): void => {
+      const field = bar.createDiv({ cls: "skill-layer-filter" });
+      const sel = field.createEl("select", {
+        cls: "dropdown skill-layer-filter-select",
+        attr: { "aria-label": label },
+      });
+      sel.createEl("option", { value: "", text: allLabel });
+      for (const o of options) {
+        sel.createEl("option", { value: o.value, text: o.text });
+      }
+      sel.value = current;
+      sel.addEventListener("change", () => {
+        onChange(sel.value);
+        this.renderList();
+      });
+    };
+
+    addSelect(
+      "Filter by agent",
+      "All agents",
+      distinct((s) => this.agentLabelOf(s)).map((v) => ({ value: v, text: v })),
+      this.filterAgent,
+      (v) => (this.filterAgent = v),
+    );
+    addSelect(
+      "Filter by harness",
+      "All harnesses",
+      distinct((s) => this.plugin.harnessLabelFor(s.id)).map((v) => ({
+        value: v,
+        text: v,
+      })),
+      this.filterHarness,
+      (v) => (this.filterHarness = v),
+    );
+
+    // Tags: distinct across every item's resolved tags (case-insensitive).
+    const tagByKey = new Map<string, string>();
+    for (const s of all) {
+      for (const t of s.tags) {
+        const k = t.tag.toLowerCase();
+        if (!tagByKey.has(k)) tagByKey.set(k, t.tag);
+      }
+    }
+    addSelect(
+      "Filter by tag",
+      "All tags",
+      Array.from(tagByKey.keys())
+        .sort()
+        .map((k) => ({ value: k, text: `#${tagByKey.get(k) ?? k}` })),
+      this.filterTag,
+      (v) => (this.filterTag = v),
+    );
+
+    addSelect(
+      "Filter by access",
+      "Any access",
+      [
+        { value: "rightclick", text: "Right-click" },
+        { value: "ribbon", text: "Ribbon" },
+        { value: "either", text: "Right-click or ribbon" },
+      ],
+      this.filterAccess,
+      (v) => (this.filterAccess = v),
+    );
   }
 
   /** The Agents tab: a Refresh control + the discovered custom agents (M10). */
@@ -148,17 +281,10 @@ export class SkillBrowserView extends ItemView {
     });
     setIcon(refreshBtn, "refresh-cw");
     refreshBtn.createSpan({ text: "Refresh" });
-    refreshBtn.addEventListener("click", () => {
-      this.plugin.refreshCustomAgents();
-    });
+    refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
 
     const agents = this.plugin.getCustomAgents();
     const model = buildAgentsTabModel(agents);
-
-    const count = c.createDiv({ cls: "skill-layer-count" });
-    count.setText(
-      `${agents.length} custom agent${agents.length === 1 ? "" : "s"}`,
-    );
 
     if (model.empty) {
       this.renderEmptyState(c, model.text);
@@ -234,9 +360,7 @@ export class SkillBrowserView extends ItemView {
     });
     setIcon(refreshBtn, "refresh-cw");
     refreshBtn.createSpan({ text: "Refresh" });
-    refreshBtn.addEventListener("click", () => {
-      void this.plugin.refreshConfiguredHarnesses();
-    });
+    refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
 
     // ONE unified list: omnigent-configured harnesses (discovered via the CLI)
     // and custom harnesses render as the SAME row shape. Omnigent harnesses show
@@ -254,12 +378,8 @@ export class SkillBrowserView extends ItemView {
       return;
     }
 
-    const count = c.createDiv({ cls: "skill-layer-count" });
-    count.setText(
-      `${configured.length + custom.length} harness${
-        configured.length + custom.length === 1 ? "" : "es"
-      } — add custom ones in Settings → Skill Layer.`,
-    );
+    const hint = c.createDiv({ cls: "skill-layer-count" });
+    hint.setText("Add custom harnesses in Settings → Skill Layer.");
 
     const list = c.createDiv({ cls: "skill-layer-list" });
     // Omnigent-discovered (configured) harnesses.
@@ -298,32 +418,24 @@ export class SkillBrowserView extends ItemView {
     if (!container) return;
     container.empty();
 
-    const all = this.plugin.getSkills();
-
-    this.renderActiveFilters(container);
-    this.renderFacet(container, all);
+    const { items: all, noun } = this.browsing;
 
     const skills = all.filter((s) => this.matches(s));
-
-    const count = container.createDiv({ cls: "skill-layer-count" });
-    count.setText(
-      `${skills.length} skill${skills.length === 1 ? "" : "s"}` +
-        (this.filter || this.activeTags.size
-          ? ` (filtered from ${all.length})`
-          : ""),
-    );
 
     if (skills.length === 0) {
       this.renderEmptyState(
         container,
         all.length === 0
-          ? "No skills found. Add scan roots in Settings → Skill Layer, then Rescan."
-          : "No skills match the current filters.",
+          ? `No ${noun}s found. Add scan roots in Settings → Skill Layer, then Rescan.`
+          : `No ${noun}s match the current filters.`,
       );
       return;
     }
 
-    // Group by source label.
+    // Group by source folder, rendered as a collapsible tree that mirrors
+    // Obsidian's file explorer: a folder title (chevron + name + count) with the
+    // items nested under a left indent-guide line, so items read as belonging to
+    // their source folder (.claude, .agents, cursor, …).
     const groups = new Map<string, Skill[]>();
     for (const s of skills) {
       const g = groups.get(s.sourceLabel) ?? [];
@@ -332,70 +444,40 @@ export class SkillBrowserView extends ItemView {
     }
 
     for (const label of Array.from(groups.keys()).sort()) {
-      const groupEl = container.createDiv({ cls: "skill-layer-group" });
-      const heading = groupEl.createDiv({ cls: "skill-layer-group-heading" });
-      heading.createSpan({ text: label, cls: "skill-layer-group-name" });
-      heading.createSpan({
-        text: String(groups.get(label)?.length ?? 0),
-        cls: "skill-layer-group-count",
+      const items = groups.get(label) ?? [];
+      const collapsed = this.collapsedGroups.has(label);
+      const folder = container.createDiv({ cls: "skill-layer-tree-folder" });
+
+      // A DIV (role=button), NOT a <button> — Obsidian's default button chrome
+      // (grey background, box-shadow, radius) otherwise wins over our transparent
+      // styling and draws a grey box around the folder header.
+      const title = folder.createDiv({
+        cls: "skill-layer-tree-folder-title",
+        attr: {
+          "aria-expanded": String(!collapsed),
+          "aria-label": `${label} (${items.length} ${this.browsing.noun}${items.length === 1 ? "" : "s"})`,
+        },
       });
-      for (const skill of groups.get(label) ?? []) {
-        this.renderRow(groupEl, skill);
+      const chevron = title.createSpan({ cls: "skill-layer-tree-chevron" });
+      setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+      title.createSpan({ cls: "skill-layer-tree-folder-name", text: label });
+      this.makeActivatable(title, () => {
+        if (collapsed) this.collapsedGroups.delete(label);
+        else this.collapsedGroups.add(label);
+        this.renderList();
+      });
+
+      if (!collapsed) {
+        const children = folder.createDiv({ cls: "skill-layer-tree-children" });
+        for (const skill of items) this.renderRow(children, skill);
       }
     }
   }
 
-  /** The "active tag filters" bar with a clear-all. */
-  private renderActiveFilters(container: HTMLElement): void {
-    if (this.activeTags.size === 0) return;
-    const bar = container.createDiv({ cls: "skill-layer-activefilters" });
-    bar.createSpan({ cls: "skill-layer-activefilters-label", text: "Filtering:" });
-    for (const tag of Array.from(this.activeTags).sort()) {
-      const chip = bar.createSpan({
-        cls: "skill-layer-chip is-active",
-      });
-      chip.createSpan({ cls: "skill-layer-chip-label", text: `#${tag}` });
-      const x = chip.createSpan({ cls: "skill-layer-chip-x" });
-      setIcon(x, "x");
-      x.setAttr("aria-label", `Remove ${tag} filter`);
-      x.addEventListener("click", () => this.toggleTagFilter(tag));
-    }
-    const clear = bar.createEl("button", {
-      cls: "skill-layer-clearfilters",
-      text: "Clear all",
-    });
-    clear.addEventListener("click", () => {
-      this.activeTags.clear();
-      this.renderList();
-    });
-  }
-
-  /** The tag facet — every tag present across all skills, click to toggle. */
-  private renderFacet(container: HTMLElement, all: Skill[]): void {
-    const byKey = new Map<string, string>();
-    for (const s of all) {
-      for (const t of s.tags) {
-        const k = t.tag.toLowerCase();
-        if (!byKey.has(k)) byKey.set(k, t.tag);
-      }
-    }
-    if (byKey.size === 0) return;
-
-    const facet = container.createDiv({ cls: "skill-layer-facet" });
-    for (const key of Array.from(byKey.keys()).sort()) {
-      const display = byKey.get(key) ?? key;
-      const active = this.activeTags.has(key);
-      const chip = facet.createSpan({
-        cls: "skill-layer-chip skill-layer-facet-chip" + (active ? " is-active" : ""),
-      });
-      chip.createSpan({ cls: "skill-layer-chip-label", text: `#${display}` });
-      chip.addEventListener("click", () => this.toggleTagFilter(key));
-    }
-  }
-
+  /** Set the tag dropdown filter (called from a row tag chip); toggles off if the
+   *  same tag is clicked again. */
   private toggleTagFilter(tagLower: string): void {
-    if (this.activeTags.has(tagLower)) this.activeTags.delete(tagLower);
-    else this.activeTags.add(tagLower);
+    this.filterTag = this.filterTag === tagLower ? "" : tagLower;
     this.renderList();
   }
 
@@ -411,11 +493,42 @@ export class SkillBrowserView extends ItemView {
         s.tags.some((t) => t.tag.toLowerCase().includes(q));
       if (!textHit) return false;
     }
-    // Tag filters — AND: every active tag must be present.
-    for (const want of this.activeTags) {
-      if (!s.tags.some((t) => t.tag.toLowerCase() === want)) return false;
+    // Dropdown filters (each "" = no constraint).
+    if (this.filterAgent && this.agentLabelOf(s) !== this.filterAgent) return false;
+    if (this.filterHarness && this.plugin.harnessLabelFor(s.id) !== this.filterHarness) {
+      return false;
+    }
+    if (
+      this.filterTag &&
+      !s.tags.some((t) => t.tag.toLowerCase() === this.filterTag)
+    ) {
+      return false;
+    }
+    if (this.filterAccess) {
+      const rc = this.plugin.isRightClickEnabled(s.id);
+      const pin = this.plugin.isPinned(s.id);
+      if (this.filterAccess === "rightclick" && !rc) return false;
+      if (this.filterAccess === "ribbon" && !pin) return false;
+      if (this.filterAccess === "either" && !rc && !pin) return false;
     }
     return true;
+  }
+
+  /**
+   * Make a non-<button> element keyboard-activatable (a11y): role=button,
+   * focusable, and Enter/Space triggers the same handler as click. Used for the
+   * clickable chips/pills that can't be real buttons (they nest a remove-×).
+   */
+  private makeActivatable(el: HTMLElement, onActivate: () => void): void {
+    el.setAttr("role", "button");
+    el.setAttr("tabindex", "0");
+    el.addEventListener("click", onActivate);
+    el.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onActivate();
+      }
+    });
   }
 
   private renderRow(parent: HTMLElement, skill: Skill): void {
@@ -426,7 +539,10 @@ export class SkillBrowserView extends ItemView {
     nameLine.createSpan({ text: skill.name, cls: "skill-layer-row-name" });
 
     main.createDiv({ cls: "skill-layer-row-desc", text: skill.description });
-    main.createDiv({ cls: "skill-layer-row-path", text: skill.path });
+    // Path is single-line truncated (CSS); full path in a tooltip.
+    main
+      .createDiv({ cls: "skill-layer-row-path", text: skill.path })
+      .setAttr("title", skill.path);
 
     this.renderRowMeta(main, skill);
     this.renderRowTags(main, skill);
@@ -437,12 +553,13 @@ export class SkillBrowserView extends ItemView {
     // toggle, Run-with agent, Harness, ribbon pin/icon). See SkillConfigModal.
     const actions = row.createDiv({ cls: "skill-layer-row-actions" });
 
+    const noun = skill.kind === "command" ? "command" : "skill";
     const launchBtn = actions.createEl("button", {
       cls: "skill-layer-action skill-layer-action-launch",
-      attr: { "aria-label": `Run the ${skill.name} skill` },
+      attr: { "aria-label": `Run the ${skill.name} ${noun}` },
     });
     setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
-    launchBtn.createSpan({ text: " Run skill" });
+    launchBtn.createSpan({ text: noun === "command" ? " Run command" : " Run skill" });
     // Opens the Run modal so the user can add optional context before running
     // (empty = the prior bare `Use the <name> skill.` behavior).
     launchBtn.addEventListener("click", () =>
@@ -488,7 +605,7 @@ export class SkillBrowserView extends ItemView {
       });
       el.createSpan({ cls: "skill-layer-meta-key", text: key });
       el.createSpan({ cls: "skill-layer-meta-val", text: val });
-      el.addEventListener("click", () =>
+      this.makeActivatable(el, () =>
         new SkillConfigModal(this.app, this.plugin, skill).open(),
       );
     };
@@ -518,7 +635,7 @@ export class SkillBrowserView extends ItemView {
         cls:
           "skill-layer-chip " +
           originClass +
-          (this.activeTags.has(t.tag.toLowerCase()) ? " is-active" : ""),
+          (this.filterTag === t.tag.toLowerCase() ? " is-active" : ""),
       });
       chip.createSpan({ cls: "skill-layer-chip-label", text: `#${t.tag}` });
       if (t.origin === "folder") {
@@ -528,20 +645,31 @@ export class SkillBrowserView extends ItemView {
         chip.setAttr("title", "from description text — edit the note to change");
         chip.setAttr("aria-label", `${t.tag} (from description text — read-only)`);
       }
-      // Clicking anywhere on the chip toggles its filter.
-      chip.addEventListener("click", () =>
-        this.toggleTagFilter(t.tag.toLowerCase()),
-      );
-      // Only frontmatter chips get a remove ×; the × stops propagation so
-      // removing doesn't also toggle the filter.
+      // Clicking anywhere on the chip toggles its filter (keyboard-activatable).
+      chip.setAttr("aria-pressed", String(this.filterTag === t.tag.toLowerCase()));
+      this.makeActivatable(chip, () => this.toggleTagFilter(t.tag.toLowerCase()));
+      // Only frontmatter chips get a remove ×; it stops propagation (click AND
+      // key) so removing doesn't also toggle the filter.
       if (removable) {
         const x = chip.createSpan({ cls: "skill-layer-chip-x" });
         setIcon(x, "x");
         x.setAttr("aria-label", `Remove tag ${t.tag}`);
-        x.addEventListener("click", async (evt) => {
-          evt.stopPropagation();
+        x.setAttr("role", "button");
+        x.setAttr("tabindex", "0");
+        const removeTag = async () => {
           await this.plugin.removeTag(skill, t.tag);
           this.renderList();
+        };
+        x.addEventListener("click", (evt) => {
+          evt.stopPropagation();
+          void removeTag();
+        });
+        x.addEventListener("keydown", (evt: KeyboardEvent) => {
+          if (evt.key === "Enter" || evt.key === " ") {
+            evt.preventDefault();
+            evt.stopPropagation();
+            void removeTag();
+          }
         });
       }
     }
@@ -552,7 +680,7 @@ export class SkillBrowserView extends ItemView {
       text: "+ tag",
     });
     addChip.setAttr("aria-label", `Add a tag to ${skill.name}`);
-    addChip.addEventListener("click", () => this.showAddTagInput(wrap, addChip, skill));
+    this.makeActivatable(addChip, () => this.showAddTagInput(wrap, addChip, skill));
   }
 
   private showAddTagInput(

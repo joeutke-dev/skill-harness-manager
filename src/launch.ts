@@ -38,8 +38,16 @@ export function buildLaunchPrompt(
   appendAnchor: boolean,
   contextPath?: string,
   userPrompt?: string,
+  kind: "skill" | "command" = "skill",
 ): string {
-  const base = `Use the ${skillName} skill.`;
+  // A command (M18) is a `/name` slash command; a skill is invoked by name. The
+  // command form starts with "Run" (NOT a leading slash) so omnigent's REPL
+  // slash-dispatcher isn't triggered, while still naming the `/command` for
+  // Claude-family harnesses to execute.
+  const base =
+    kind === "command"
+      ? `Run the /${skillName} command.`
+      : `Use the ${skillName} skill.`;
   // M16: optional free-text the user typed in the Launch modal, appended right
   // after the skill directive so the session reads `Use the <name> skill.
   // <their instructions>` — giving skills that need more context something to
@@ -119,8 +127,13 @@ export function buildOmnigentArgv(opts: {
  * There is no user-configurable template (M11). Embeds NO path, so no shell
  * quoting is required. Pure / unit-testable.
  */
-export function buildSkillInvocation(skillName: string): string {
-  return `Use the ${skillName} skill.`;
+export function buildSkillInvocation(
+  skillName: string,
+  kind: "skill" | "command" = "skill",
+): string {
+  return kind === "command"
+    ? `Run the /${skillName} command.`
+    : `Use the ${skillName} skill.`;
 }
 
 /**
@@ -145,9 +158,10 @@ export function buildSkillCliInvocation(opts: {
   skillName: string;
   agent?: ResolvedAgent;
   harness?: string | null;
+  kind?: "skill" | "command";
 }): string {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
-  const prompt = buildSkillInvocation(opts.skillName);
+  const prompt = buildSkillInvocation(opts.skillName, opts.kind ?? "skill");
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
   let cli = `${OMNIGENT_BIN_NAME} ${subcommand}`;
   if (agent.mode === "custom") cli += ` ${shellSingleQuote(agent.path)}`;

@@ -36,10 +36,17 @@ export interface ScanRoot {
   enabled: boolean;
 }
 
-/** A single discovered skill. */
+/** A discovered browsable item: a skill (default) or a command (M18). Both share
+ *  the same shape and reuse the same row UI / per-item state (pins, right-click,
+ *  harness, agent) keyed by `id`; only discovery + launch wording differ. */
+export type ItemKind = "skill" | "command";
+
+/** A single discovered skill (or command — see `kind`). */
 export interface Skill {
   /** Stable id = the normalized absolute path. Used for pins, commands, dedupe. */
   id: string;
+  /** "skill" (default/absent) or "command" (M18). */
+  kind?: ItemKind;
   name: string;
   description: string;
   /** Absolute filesystem path to the skill markdown file. */
