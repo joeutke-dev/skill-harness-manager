@@ -244,15 +244,14 @@ export default class SkillLayerPlugin extends Plugin {
       "discoveredHarnesses",
       "customHarnesses",
       "omnigentHarness",
-      // M11: the user-configurable invocation template and the omnigent server
-      // URL are gone. The "Copy invocation" action now uses a FIXED natural-
-      // language form (`Use the <name> skill.`), and server routing is decided
-      // by omnigent's own config.yaml (the plugin never passes `--server`).
-      // Strip both fail-closed so a stale data.json can never reintroduce them;
-      // every OTHER setting (scanRoots, pins, skillAgent, omnigentBinaryPath,
-      // appendVaultAnchor, …) is preserved by the Object.assign above.
+      // M11: the user-configurable invocation template is gone — the "Copy
+      // invocation" action now uses a FIXED natural-language form
+      // (`Use the <name> skill.`). Strip it fail-closed so a stale data.json can
+      // never reintroduce it; every OTHER setting (scanRoots, pins, skillAgent,
+      // omnigentBinaryPath, omnigentServerUrl, appendVaultAnchor, …) is preserved
+      // by the Object.assign above. NOTE (M19): `omnigentServerUrl` is BACK as a
+      // real setting (per-launch `--server` target), so it is NOT stripped.
       "invocationTemplate",
-      "omnigentServerUrl",
     ]) {
       delete raw[key];
     }
@@ -1519,6 +1518,7 @@ export default class SkillLayerPlugin extends Plugin {
         skillName: skill.name,
         agent,
         harness: resolvedH.kind === "omnigent" ? resolvedH.name : null,
+        server: this.settings.omnigentServerUrl,
         kind: skill.kind ?? "skill",
       });
     }
@@ -1616,6 +1616,7 @@ export default class SkillLayerPlugin extends Plugin {
       prompt,
       agent,
       harness: resolvedH.kind === "omnigent" ? resolvedH.name : null,
+      server: this.settings.omnigentServerUrl,
     });
 
     // Spawn via the single shared hardened surface. The success Notice is built
@@ -1923,6 +1924,7 @@ export default class SkillLayerPlugin extends Plugin {
       binaryPath,
       prompt: AGENT_SESSION_PROMPT,
       agent: { mode: "custom", path: real },
+      server: this.settings.omnigentServerUrl,
     });
     this.spawnOmnigent(
       argv,

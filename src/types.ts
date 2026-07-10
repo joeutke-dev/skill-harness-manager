@@ -123,6 +123,19 @@ export interface SkillLayerSettings {
   harnesses: CustomHarness[];
   /** Absolute path to the omnigent binary; blank = auto-detect by probing. */
   omnigentBinaryPath: string;
+  /**
+   * Omnigent `--server` target for launches (M19). Blank = omit `--server` so
+   * omnigent uses its own config/default routing. A value (e.g. `local` or a
+   * host URL like `https://<app>.cloud.databricks.com`) is passed as
+   * `--server <value>` on every omnigent launch: with a host URL this selects
+   * omnigent's local-runner + remote-server topology (work runs LOCALLY in the
+   * vault, models come from the host), which sends a RELATIVE cwd the multi-
+   * tenant server accepts — avoiding the absolute-cwd rejection that occurs when
+   * omnigent falls back to connecting directly to a remote server. The host URL
+   * changes over time, so this is user-editable in Settings. Passed as a single
+   * inert argv element (shell:false); a value with whitespace is ignored.
+   */
+  omnigentServerUrl: string;
   /** Append the generic vault-anchor instruction to the launch prompt. */
   appendVaultAnchor: boolean;
   /**
@@ -156,6 +169,7 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   skillClaudeAgent: {},
   harnesses: [],
   omnigentBinaryPath: "",
+  omnigentServerUrl: "",
   appendVaultAnchor: true,
   showHiddenFolders: false,
 };

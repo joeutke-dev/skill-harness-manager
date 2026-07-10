@@ -104,6 +104,7 @@ export function buildOmnigentArgv(opts: {
   prompt: string;
   agent?: ResolvedAgent;
   harness?: string | null;
+  server?: string | null;
 }): string[] {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
@@ -113,11 +114,27 @@ export function buildOmnigentArgv(opts: {
   // it absolute + a real direct child of the scan dir, so it can never split or
   // become a flag.
   if (agent.mode === "custom") argv.push(agent.path);
+  // Optional omnigent `--server` target (M19). A single inert argv element
+  // (shell:false); validated to a whitespace-free token so it can never split.
+  if (isValidOmnigentServer(opts.server)) argv.push("--server", opts.server.trim());
   // Optional omnigent harness pin (M15). Only a hardcoded-allowlist member is
   // ever emitted, so the value can never be free text or a flag-able positional.
   if (isAllowedHarness(opts.harness)) argv.push("--harness", opts.harness);
   argv.push("-p", opts.prompt);
   return argv;
+}
+
+/**
+ * Whether a user-configured omnigent `--server` value is safe to emit: a
+ * non-empty, whitespace-free single token (e.g. `local` or a host URL). Empty /
+ * blank = omit `--server` (omnigent uses its own default). A value containing
+ * ANY whitespace is rejected (would otherwise become multiple argv elements or a
+ * confusing single one), failing closed to "no --server". Pure / unit-testable.
+ */
+export function isValidOmnigentServer(
+  server: string | null | undefined,
+): server is string {
+  return typeof server === "string" && server.trim().length > 0 && !/\s/.test(server.trim());
 }
 
 /**
@@ -158,6 +175,7 @@ export function buildSkillCliInvocation(opts: {
   skillName: string;
   agent?: ResolvedAgent;
   harness?: string | null;
+  server?: string | null;
   kind?: "skill" | "command";
 }): string {
   const agent: ResolvedAgent = opts.agent ?? { mode: "default" };
@@ -165,6 +183,7 @@ export function buildSkillCliInvocation(opts: {
   const subcommand = agent.mode === "builtin" ? agent.name : "run";
   let cli = `${OMNIGENT_BIN_NAME} ${subcommand}`;
   if (agent.mode === "custom") cli += ` ${shellSingleQuote(agent.path)}`;
+  if (isValidOmnigentServer(opts.server)) cli += ` --server ${shellSingleQuote(opts.server.trim())}`;
   if (isAllowedHarness(opts.harness)) cli += ` --harness ${opts.harness}`;
   cli += ` -p ${shellSingleQuote(prompt)}`;
   return cli;

@@ -15,12 +15,13 @@ export const SKILL_LAYER_VIEW = "skill-layer-browser";
 export class SkillBrowserView extends ItemView {
   private plugin: SkillLayerPlugin;
   private filter = "";
-  /** Dropdown filters (all "" = no filter). Combined AND with the text filter. */
-  private filterAgent = "";
-  private filterHarness = "";
-  private filterTag = "";
-  /** "" | "rightclick" | "ribbon" | "either" — the Access dropdown. */
-  private filterAccess = "";
+  /** Multi-select dropdown filters (empty set = no constraint for that facet).
+   *  Within a facet the selected values are OR'd; facets are AND'd together. */
+  private filterAgents = new Set<string>();
+  private filterHarnesses = new Set<string>();
+  private filterTags = new Set<string>();
+  /** Access facet — any of {"rightclick","ribbon"}; both = union. */
+  private filterAccess = new Set<string>();
   private listEl: HTMLElement | null = null;
   /** Collapsed source-folder groups in the tree (M18), keyed by group label. */
   private collapsedGroups = new Set<string>();
@@ -183,14 +184,15 @@ export class SkillBrowserView extends ItemView {
 
   private resetFilters(): void {
     this.filter = "";
-    this.filterAgent = "";
-    this.filterHarness = "";
-    this.filterTag = "";
-    this.filterAccess = "";
+    this.filterAgents.clear();
+    this.filterHarnesses.clear();
+    this.filterTags.clear();
+    this.filterAccess.clear();
   }
 
-  /** The dark filter bar: Agent / Harness / Tag / Access dropdowns. Options are
-   *  the distinct values actually present across `all`, so empty facets vanish. */
+  /** The dark filter bar: Agent / Harness / Tag / Access MULTI-select dropdowns.
+   *  Options are the distinct values actually present across `all`, so empty
+   *  facets vanish. */
   private renderFilterBar(c: HTMLElement, all: Skill[]): void {
     const bar = c.createDiv({ cls: "skill-layer-filterbar" });
 
@@ -199,45 +201,24 @@ export class SkillBrowserView extends ItemView {
         a.localeCompare(b),
       );
 
-    const addSelect = (
-      label: string,
-      allLabel: string,
-      options: { value: string; text: string }[],
-      current: string,
-      onChange: (v: string) => void,
-    ): void => {
-      const field = bar.createDiv({ cls: "skill-layer-filter" });
-      const sel = field.createEl("select", {
-        cls: "dropdown skill-layer-filter-select",
-        attr: { "aria-label": label },
-      });
-      sel.createEl("option", { value: "", text: allLabel });
-      for (const o of options) {
-        sel.createEl("option", { value: o.value, text: o.text });
-      }
-      sel.value = current;
-      sel.addEventListener("change", () => {
-        onChange(sel.value);
-        this.renderList();
-      });
-    };
-
-    addSelect(
+    this.addMultiSelect(
+      bar,
       "Filter by agent",
       "All agents",
+      "agents",
       distinct((s) => this.agentLabelOf(s)).map((v) => ({ value: v, text: v })),
-      this.filterAgent,
-      (v) => (this.filterAgent = v),
+      this.filterAgents,
     );
-    addSelect(
+    this.addMultiSelect(
+      bar,
       "Filter by harness",
       "All harnesses",
+      "harnesses",
       distinct((s) => this.plugin.harnessLabelFor(s.id)).map((v) => ({
         value: v,
         text: v,
       })),
-      this.filterHarness,
-      (v) => (this.filterHarness = v),
+      this.filterHarnesses,
     );
 
     // Tags: distinct across every item's resolved tags (case-insensitive).
@@ -248,27 +229,121 @@ export class SkillBrowserView extends ItemView {
         if (!tagByKey.has(k)) tagByKey.set(k, t.tag);
       }
     }
-    addSelect(
+    this.addMultiSelect(
+      bar,
       "Filter by tag",
       "All tags",
+      "tags",
       Array.from(tagByKey.keys())
         .sort()
         .map((k) => ({ value: k, text: `#${tagByKey.get(k) ?? k}` })),
-      this.filterTag,
-      (v) => (this.filterTag = v),
+      this.filterTags,
     );
 
-    addSelect(
+    this.addMultiSelect(
+      bar,
       "Filter by access",
       "Any access",
+      "surfaces",
       [
         { value: "rightclick", text: "Right-click" },
         { value: "ribbon", text: "Ribbon" },
-        { value: "either", text: "Right-click or ribbon" },
       ],
       this.filterAccess,
-      (v) => (this.filterAccess = v),
     );
+  }
+
+  /**
+   * A custom multi-select dropdown: a form-field-styled button showing the
+   * current selection, and a checkbox popup that stays open across toggles so
+   * multiple values can be picked. Selecting toggles membership in `selected`
+   * (OR within the facet) and re-renders the list live. Closes on outside click
+   * or Escape. `noun` labels the "N selected" summary (e.g. "agents").
+   */
+  private addMultiSelect(
+    bar: HTMLElement,
+    label: string,
+    allLabel: string,
+    noun: string,
+    options: { value: string; text: string }[],
+    selected: Set<string>,
+  ): void {
+    const field = bar.createDiv({ cls: "skill-layer-filter" });
+    const btn = field.createEl("button", {
+      cls: "skill-layer-filter-select",
+      attr: { "aria-label": label, "aria-haspopup": "listbox" },
+    });
+    const labelSpan = btn.createSpan({ cls: "skill-layer-filter-label" });
+    const chev = btn.createSpan({ cls: "skill-layer-filter-chevron" });
+    setIcon(chev, "chevron-down");
+
+    const summary = (): void => {
+      if (selected.size === 0) labelSpan.setText(allLabel);
+      else if (selected.size === 1) {
+        const only = Array.from(selected)[0];
+        const opt = options.find((o) => o.value === only);
+        labelSpan.setText(opt ? opt.text : `1 ${noun}`);
+      } else labelSpan.setText(`${selected.size} ${noun}`);
+    };
+    summary();
+
+    const menu = field.createDiv({
+      cls: "skill-layer-filter-menu",
+      attr: { role: "listbox", "aria-multiselectable": "true" },
+    });
+    for (const o of options) {
+      const row = menu.createDiv({
+        cls: "skill-layer-filter-option",
+        attr: { role: "option" },
+      });
+      const check = row.createSpan({ cls: "skill-layer-filter-check" });
+      row.createSpan({ cls: "skill-layer-filter-optlabel", text: o.text });
+      const sync = (): void => {
+        const on = selected.has(o.value);
+        check.empty();
+        if (on) setIcon(check, "check");
+        row.setAttr("aria-selected", String(on));
+      };
+      sync();
+      this.makeActivatable(row, () => {
+        if (selected.has(o.value)) selected.delete(o.value);
+        else selected.add(o.value);
+        sync();
+        summary();
+        this.renderList();
+      });
+    }
+
+    let open = false;
+    const onDocClick = (e: MouseEvent): void => {
+      if (!field.contains(e.target as Node)) close();
+    };
+    const close = (): void => {
+      if (!open) return;
+      open = false;
+      menu.removeClass("is-open");
+      btn.removeClass("is-open");
+      document.removeEventListener("click", onDocClick, true);
+    };
+    const openMenu = (): void => {
+      if (open) return;
+      open = true;
+      menu.addClass("is-open");
+      btn.addClass("is-open");
+      // Defer so the click that opened it doesn't immediately close it.
+      window.setTimeout(
+        () => document.addEventListener("click", onDocClick, true),
+        0,
+      );
+    };
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (open) close();
+      else openMenu();
+    });
+    btn.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    });
   }
 
   /** The Agents tab: a Refresh control + the discovered custom agents (M10). */
@@ -474,11 +549,12 @@ export class SkillBrowserView extends ItemView {
     }
   }
 
-  /** Set the tag dropdown filter (called from a row tag chip); toggles off if the
-   *  same tag is clicked again. */
+  /** Toggle a tag in the Tag facet (called from a row tag chip). Re-renders the
+   *  whole tab so the Tag dropdown's checkboxes stay in sync with the chips. */
   private toggleTagFilter(tagLower: string): void {
-    this.filterTag = this.filterTag === tagLower ? "" : tagLower;
-    this.renderList();
+    if (this.filterTags.has(tagLower)) this.filterTags.delete(tagLower);
+    else this.filterTags.add(tagLower);
+    this.renderActiveTab();
   }
 
   private matches(s: Skill): boolean {
@@ -493,23 +569,26 @@ export class SkillBrowserView extends ItemView {
         s.tags.some((t) => t.tag.toLowerCase().includes(q));
       if (!textHit) return false;
     }
-    // Dropdown filters (each "" = no constraint).
-    if (this.filterAgent && this.agentLabelOf(s) !== this.filterAgent) return false;
-    if (this.filterHarness && this.plugin.harnessLabelFor(s.id) !== this.filterHarness) {
+    // Multi-select facets: empty set = no constraint; else OR within the facet.
+    if (this.filterAgents.size && !this.filterAgents.has(this.agentLabelOf(s))) {
       return false;
     }
     if (
-      this.filterTag &&
-      !s.tags.some((t) => t.tag.toLowerCase() === this.filterTag)
+      this.filterHarnesses.size &&
+      !this.filterHarnesses.has(this.plugin.harnessLabelFor(s.id))
     ) {
       return false;
     }
-    if (this.filterAccess) {
-      const rc = this.plugin.isRightClickEnabled(s.id);
-      const pin = this.plugin.isPinned(s.id);
-      if (this.filterAccess === "rightclick" && !rc) return false;
-      if (this.filterAccess === "ribbon" && !pin) return false;
-      if (this.filterAccess === "either" && !rc && !pin) return false;
+    if (
+      this.filterTags.size &&
+      !s.tags.some((t) => this.filterTags.has(t.tag.toLowerCase()))
+    ) {
+      return false;
+    }
+    if (this.filterAccess.size) {
+      const rc = this.filterAccess.has("rightclick") && this.plugin.isRightClickEnabled(s.id);
+      const pin = this.filterAccess.has("ribbon") && this.plugin.isPinned(s.id);
+      if (!rc && !pin) return false;
     }
     return true;
   }
@@ -635,7 +714,7 @@ export class SkillBrowserView extends ItemView {
         cls:
           "skill-layer-chip " +
           originClass +
-          (this.filterTag === t.tag.toLowerCase() ? " is-active" : ""),
+          (this.filterTags.has(t.tag.toLowerCase()) ? " is-active" : ""),
       });
       chip.createSpan({ cls: "skill-layer-chip-label", text: `#${t.tag}` });
       if (t.origin === "folder") {
@@ -646,7 +725,7 @@ export class SkillBrowserView extends ItemView {
         chip.setAttr("aria-label", `${t.tag} (from description text — read-only)`);
       }
       // Clicking anywhere on the chip toggles its filter (keyboard-activatable).
-      chip.setAttr("aria-pressed", String(this.filterTag === t.tag.toLowerCase()));
+      chip.setAttr("aria-pressed", String(this.filterTags.has(t.tag.toLowerCase())));
       this.makeActivatable(chip, () => this.toggleTagFilter(t.tag.toLowerCase()));
       // Only frontmatter chips get a remove ×; it stops propagation (click AND
       // key) so removing doesn't also toggle the filter.

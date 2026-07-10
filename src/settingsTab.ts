@@ -167,6 +167,28 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           }),
       );
 
+    // --- Omnigent server (--server target) --------------------------------
+    new Setting(containerEl)
+      .setName("Omnigent server")
+      .setDesc(
+        "Passed as `omnigent run --server <value>` on every launch. Blank = " +
+          "omnigent's own default routing. Set a host URL (e.g. " +
+          "https://<app>.cloud.databricks.com) to use its models while work " +
+          "runs LOCALLY in the vault — this avoids the 'os_env.cwd must be a " +
+          "relative path' error from connecting directly to a remote server. " +
+          "Update it when your host URL changes. Use `local` to force the " +
+          "local server.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("(omnigent default)")
+          .setValue(settings.omnigentServerUrl)
+          .onChange(async (value) => {
+            settings.omnigentServerUrl = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // --- Default pinned ribbon icon ---------------------------------------
     // A pinned skill normally picks its OWN icon ("Pin to ribbon…" / "Change
     // icon" on a skill row, stored in skillIcons[id]). This global default is the

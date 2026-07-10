@@ -50,6 +50,7 @@ await esbuild.build({
 const {
   buildLaunchPrompt,
   buildOmnigentArgv,
+  isValidOmnigentServer,
   buildRightClickMenuItems,
   isAllowedOmnigentPath,
   resolveOmnigentBinary,
@@ -543,9 +544,8 @@ console.log("\n[f] argv shape for each launch form (Default / polly / custom)");
   // No `--harness` is EVER emitted (omnigent picks the harness).
   check("no --harness token in any form", ![argvDefault, argvPolly, argvCustom].some((a) => a.includes("--harness")));
 
-  // M11: `--server` is NEVER emitted — omnigent's own config.yaml decides server
-  // routing. Even a stale `serverUrl` property (from an old data.json) is ignored
-  // by the builder, in EVERY launch form. The prompt stays the final `-p` element.
+  // A stale `serverUrl` property (the M11 name, removed) is an UNKNOWN key now,
+  // so it is ignored — the builder only reads `server`. No `--server` emitted.
   const url = "https://omni.example";
   const sd = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "default" } });
   const sp = buildOmnigentArgv({ binaryPath: BIN, prompt, serverUrl: url, agent: { mode: "builtin", name: "polly" } });
@@ -554,10 +554,45 @@ console.log("\n[f] argv shape for each launch form (Default / polly / custom)");
   check("polly ignores stale serverUrl: [bin, polly, -p, prompt]", deepEq(sp, [BIN, "polly", "-p", prompt]));
   check("custom ignores stale serverUrl: [bin, run, <config>, -p, prompt]", deepEq(sc, [BIN, "run", GOOD_YAML, "-p", prompt]));
   for (const [n, a] of [["Default", sd], ["polly", sp], ["custom", sc]]) {
-    check(`${n}: NO --server token even with a stale serverUrl`, a.indexOf("--server") === -1);
+    check(`${n}: NO --server token from stale serverUrl`, a.indexOf("--server") === -1);
     eq(`${n}: prompt is the final element`, a[a.length - 1], prompt);
     eq(`${n}: the lone -p precedes the prompt`, a[a.length - 2], "-p");
   }
+
+  // M19: a VALID `server` value IS emitted as a single `--server <value>` pair,
+  // placed after any custom-agent positional and before `--harness`/`-p`.
+  const srvD = buildOmnigentArgv({ binaryPath: BIN, prompt, server: "local", agent: { mode: "default" } });
+  check("server=local (default agent): [bin, run, --server, local, -p, prompt]",
+    deepEq(srvD, [BIN, "run", "--server", "local", "-p", prompt]));
+  const srvUrl = buildOmnigentArgv({ binaryPath: BIN, prompt, server: url, agent: { mode: "default" } });
+  check("server=<url> emitted verbatim", deepEq(srvUrl, [BIN, "run", "--server", url, "-p", prompt]));
+  const srvC = buildOmnigentArgv({ binaryPath: BIN, prompt, server: url, agent: { mode: "custom", path: GOOD_YAML } });
+  check("server ordered after custom positional, before -p",
+    deepEq(srvC, [BIN, "run", GOOD_YAML, "--server", url, "-p", prompt]));
+  const srvH = buildOmnigentArgv({ binaryPath: BIN, prompt, server: url, harness: "codex", agent: { mode: "default" } });
+  check("server precedes --harness",
+    deepEq(srvH, [BIN, "run", "--server", url, "--harness", "codex", "-p", prompt]));
+  // Blank / whitespace-bearing values fail closed to NO --server.
+  for (const bad of ["", "   ", "has space", "two\ttabs", null, undefined]) {
+    const a = buildOmnigentArgv({ binaryPath: BIN, prompt, server: bad, agent: { mode: "default" } });
+    check(`server=${JSON.stringify(bad)} emits no --server`, a.indexOf("--server") === -1);
+  }
+  // A leading/trailing-whitespace-but-single-token value is trimmed then emitted.
+  const srvTrim = buildOmnigentArgv({ binaryPath: BIN, prompt, server: "  local  ", agent: { mode: "default" } });
+  check("server trimmed before emit", deepEq(srvTrim, [BIN, "run", "--server", "local", "-p", prompt]));
+
+  // isValidOmnigentServer predicate.
+  check("isValidOmnigentServer(local)", isValidOmnigentServer("local") === true);
+  check("isValidOmnigentServer(url)", isValidOmnigentServer(url) === true);
+  check("isValidOmnigentServer(blank)", isValidOmnigentServer("   ") === false);
+  check("isValidOmnigentServer(space)", isValidOmnigentServer("a b") === false);
+  check("isValidOmnigentServer(null)", isValidOmnigentServer(null) === false);
+
+  // The copyable CLI reflects a valid server too (shell-quoted).
+  const cli = buildSkillCliInvocation({ skillName: "humanize", server: url });
+  check("CLI invocation includes --server", cli.includes(`--server '${url}'`));
+  const cliNo = buildSkillCliInvocation({ skillName: "humanize", server: "has space" });
+  check("CLI invocation omits invalid server", !cliNo.includes("--server"));
 }
 
 // =====================================================================

@@ -150,24 +150,110 @@
 }
 
 /* Filter bar: a recessed DARK-grey panel (like the item cards) holding the
-   Agent / Harness / Tag / Access dropdowns. Wraps on narrow panes. */
+   Agent / Harness / Tag / Access multi-select dropdowns. Wraps on narrow panes. */
 .skill-layer-filterbar {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--size-2-2);
-  padding: var(--size-2-3);
+  gap: var(--size-2-3);
+  /* Roomier panel around the filters. */
+  padding: var(--size-4-3);
   margin-bottom: var(--size-4-2);
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
 }
 .skill-layer-filter {
+  position: relative; /* anchor for the popup menu */
   flex: 1 1 8em;
   min-width: 0;
 }
+
+/* The dropdown button — a form-field-styled control (not a raised button) so it
+   matches the old native dropdowns; shows the current selection + a chevron. */
 .skill-layer-filter-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-2-2);
   width: 100%;
+  height: var(--input-height);
+  padding: 0 var(--size-4-1);
   font-size: var(--font-ui-smaller);
+  text-align: left;
+  cursor: pointer;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  box-shadow: none;
+}
+.skill-layer-filter-select:hover {
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-primary);
+}
+.skill-layer-filter-select.is-open {
+  border-color: var(--background-modifier-border-focus);
+}
+.skill-layer-filter-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-layer-filter-chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.skill-layer-filter-chevron .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+}
+
+/* The checkbox popup panel. */
+.skill-layer-filter-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 100%;
+  max-width: 16em;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: var(--size-2-2);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+}
+.skill-layer-filter-menu:not(.is-open) {
+  display: none;
+}
+.skill-layer-filter-option {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  padding: var(--size-2-2) var(--size-2-3);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  white-space: nowrap;
+}
+.skill-layer-filter-option:hover {
+  background: var(--background-modifier-hover);
+}
+.skill-layer-filter-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+  color: var(--text-normal);
+}
+.skill-layer-filter-check .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
 }
 .skill-layer-refresh-icon {
   flex: 0 0 auto;
