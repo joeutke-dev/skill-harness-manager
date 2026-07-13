@@ -13,7 +13,7 @@
 //   - claude   → `claude --continue`     (most recent in this cwd)
 //   - codex    → `codex resume --last`   (most recent codex session)
 //   - isaac    → `isaac resume`          (interactive picker of recent sessions;
-//                the Databricks Claude Code CLI used by custom harnesses)
+//                a Claude Code CLI wrapper used by some custom harnesses)
 // A launch through any OTHER (generic) custom harness has no known resume story
 // and is not tracked. Precise per-conversation reconnect is a future iteration.
 

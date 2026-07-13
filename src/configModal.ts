@@ -197,7 +197,7 @@ export class LaunchModal extends Modal {
       attr: {
         rows: "5",
         placeholder:
-          "e.g. focus on the 7-Eleven account and include action items",
+          "e.g. summarize the latest meeting notes and list action items",
         "aria-label": `Extra prompt for ${skill.name}`,
       },
     });

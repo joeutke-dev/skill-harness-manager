@@ -1,5 +1,5 @@
 {
-  "name": "skill-layer-obsidian",
+  "name": "ai-skill-manager",
   "version": "0.1.0",
   "description": "Skill Layer — discover, browse, and pin AI skills (SKILL.md files) across your Obsidian vault, dot-folders, and external desktop directories.",
   "main": "main.js",

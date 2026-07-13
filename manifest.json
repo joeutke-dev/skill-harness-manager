@@ -1,10 +1,10 @@
 {
-  "id": "skill-layer",
-  "name": "Skill Layer",
-  "version": "0.1.0",
-  "minAppVersion": "1.5.0",
-  "description": "Discover, browse, and pin AI skills (SKILL.md files) scattered across your vault, dot-folders like .claude/skills, and external desktop dirs. Visibility + consolidation layer — no bundled LLM.",
-  "author": "Joe Utke",
-  "authorUrl": "https://github.com/joeutke-dev",
-  "isDesktopOnly": true
+	"id": "ai-skill-manager",
+	"name": "AI Skill Manager",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Discover, browse, and launch AI skills, commands, and agents from SKILL.md files across your vault and tool dot-folders.",
+	"author": "Joe Utke",
+	"authorUrl": "https://github.com/joeutke-dev",
+	"isDesktopOnly": true
 }

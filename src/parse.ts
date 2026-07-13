@@ -119,9 +119,7 @@ export function inferSourceLabel(absPath: string): string {
   if (p.includes("/.claude/")) return ".claude";
   if (p.includes("/.codex/") || p.includes("/codex/skills")) return "codex";
   if (p.includes("/.agents/")) return ".agents";
-  if (/\/(vibe|fe-[a-z0-9-]+)\//.test(p) || p.includes("/marketplace/")) {
-    return "vibe-marketplace";
-  }
+  if (p.includes("/marketplace/")) return "marketplace";
   if (p.includes("/omnigent/") || p.includes("/skills/")) return "omnigent-bundle";
   return "vault";
 }

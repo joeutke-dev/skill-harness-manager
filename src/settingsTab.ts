@@ -17,7 +17,7 @@ function inferKind(path: string): RootKind {
 }
 
 /**
- * The Skill Layer settings page (M11: slimmed to install/storage config only).
+ * The AI Skill Manager settings page (M11: slimmed to install/storage config only).
  * In order:
  *   1. Scan roots — the discovery dirs (enable/remove + add a root).
  *   2. Omnigent binary path — the install location.
@@ -173,7 +173,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
       .setDesc(
         "Passed as `omnigent run --server <value>` on every launch. Blank = " +
           "omnigent's own default routing. Set a host URL (e.g. " +
-          "https://<app>.cloud.databricks.com) to use its models while work " +
+          "https://your-omnigent-host) to use its models while work " +
           "runs LOCALLY in the vault — this avoids the 'os_env.cwd must be a " +
           "relative path' error from connecting directly to a remote server. " +
           "Update it when your host URL changes. Use `local` to force the " +
@@ -275,7 +275,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
             .setValue((h.resumeCommand ?? []).join(" "))
             .onChange(async (v) => {
               const err = await this.plugin.setCustomHarnessResume(h.id, v);
-              if (err) new Notice(`Skill Layer: ${err}`);
+              if (err) new Notice(`AI Skill Manager: ${err}`);
             }),
         );
     });
@@ -315,7 +315,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
               pendingHarnessCmd,
             );
             if (err) {
-              new Notice(`Skill Layer: ${err}`);
+              new Notice(`AI Skill Manager: ${err}`);
               return;
             }
             this.display();

@@ -155,7 +155,7 @@ export default class SkillLayerPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new SkillBrowserView(leaf, this),
     );
 
-    this.addRibbonIcon("layers", "Skill Layer: toggle skills browser", () => {
+    this.addRibbonIcon("brain-circuit", "AI Skill Manager: toggle skills browser", () => {
       void this.toggleView();
     });
 
@@ -311,7 +311,7 @@ export default class SkillLayerPlugin extends Plugin {
       const view = leaf.view;
       if (view instanceof SkillBrowserView) view.refresh();
     }
-    if (notify) new Notice(`Skill Layer: found ${this.skills.length} skills.`);
+    if (notify) new Notice(`AI Skill Manager: found ${this.skills.length} skills.`);
   }
 
   getSkills(): Skill[] {
@@ -341,7 +341,7 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /**
-   * Ribbon behavior: toggle the Skill Layer pane.
+   * Ribbon behavior: toggle the AI Skill Manager pane.
    * - Not open                → open + reveal (via activateView).
    * - Open but not active      → reveal/focus it (via activateView).
    * - Open AND active/visible  → close (detach its leaves).
@@ -389,7 +389,7 @@ export default class SkillLayerPlugin extends Plugin {
     await this.saveSettings();
     this.refreshViews();
     new Notice(
-      `Skill Layer: ${on ? "removed" : "added"} "${skill.name}" ${
+      `AI Skill Manager: ${on ? "removed" : "added"} "${skill.name}" ${
         on ? "from" : "to"
       } the right-click menu.`,
     );
@@ -1019,7 +1019,7 @@ export default class SkillLayerPlugin extends Plugin {
       menu.addItem((item) => {
         item
           .setTitle(it.title)
-          .setIcon("layers")
+          .setIcon("brain-circuit")
           .onClick(() => {
             const skill = this.getSkillById(it.skillId);
             if (skill) void this.launchSkill(skill, it.contextPath);
@@ -1099,7 +1099,7 @@ export default class SkillLayerPlugin extends Plugin {
   /** Set the global default pinned-ribbon icon; refresh fallback-driven ribbons. */
   async setDefaultPinnedIcon(iconId: string, onDone?: () => void): Promise<void> {
     if (!this.iconResolves(iconId)) {
-      new Notice(`Skill Layer: "${iconId}" is not a known icon.`);
+      new Notice(`AI Skill Manager: "${iconId}" is not a known icon.`);
       return;
     }
     this.settings.pinnedIcon = iconId;
@@ -1135,7 +1135,7 @@ export default class SkillLayerPlugin extends Plugin {
    */
   async setSkillIcon(skill: Skill, iconId: string, onDone?: () => void): Promise<void> {
     if (!this.iconResolves(iconId)) {
-      new Notice(`Skill Layer: "${iconId}" is not a known icon.`);
+      new Notice(`AI Skill Manager: "${iconId}" is not a known icon.`);
       return;
     }
     const wasPinned = this.isPinned(skill.id);
@@ -1153,7 +1153,7 @@ export default class SkillLayerPlugin extends Plugin {
     this.addPinnedCommand(skill); // no-op if already registered
 
     new Notice(
-      `Skill Layer: ${wasPinned ? "updated icon for" : "pinned"} "${skill.name}".`,
+      `AI Skill Manager: ${wasPinned ? "updated icon for" : "pinned"} "${skill.name}".`,
     );
     this.refreshViews();
     onDone?.();
@@ -1214,7 +1214,7 @@ export default class SkillLayerPlugin extends Plugin {
     if (this.ribbonIcons.has(skill.id)) return;
     const el = this.addRibbonIcon(
       this.iconFor(skill.id),
-      `Skill Layer: Run ${skill.name}`,
+      `AI Skill Manager: Run ${skill.name}`,
       () => void this.launchSkill(this.getSkillById(skill.id) ?? skill),
     );
     this.ribbonIcons.set(skill.id, el);
@@ -1595,12 +1595,12 @@ export default class SkillLayerPlugin extends Plugin {
   ): Promise<void> {
     // Desktop + filesystem capability gate.
     if (!this.detector.canScanExternal()) {
-      new Notice("Skill Layer: launching requires the desktop app.");
+      new Notice("AI Skill Manager: launching requires the desktop app.");
       return;
     }
     const cwd = this.detector.vaultBasePath();
     if (!cwd) {
-      new Notice("Skill Layer: could not resolve the vault path; not launching.");
+      new Notice("AI Skill Manager: could not resolve the vault path; not launching.");
       return;
     }
 
@@ -1695,7 +1695,7 @@ export default class SkillLayerPlugin extends Plugin {
     const argv = buildCustomHarnessArgv({ command: harness.command, prompt, agent });
     if (!argv) {
       new Notice(
-        `Skill Layer: custom harness "${harness.label}" has an invalid command; not launching.`,
+        `AI Skill Manager: custom harness "${harness.label}" has an invalid command; not launching.`,
       );
       return;
     }
@@ -1704,7 +1704,7 @@ export default class SkillLayerPlugin extends Plugin {
     const binary = argv[0];
     if (!nodePath.isAbsolute(binary) || !fs.existsSync(binary)) {
       new Notice(
-        `Skill Layer: custom harness "${harness.label}" binary not found: ${binary}`,
+        `AI Skill Manager: custom harness "${harness.label}" binary not found: ${binary}`,
       );
       return;
     }
@@ -1741,14 +1741,14 @@ export default class SkillLayerPlugin extends Plugin {
     });
     if (resolution.status === "invalid-override") {
       new Notice(
-        'Skill Layer: invalid omnigent binary path (must be an absolute path ' +
+        'AI Skill Manager: invalid omnigent binary path (must be an absolute path ' +
           'to a binary named "omnigent"). Launch aborted.',
       );
       return null;
     }
     if (resolution.status === "not-found") {
       new Notice(
-        "Skill Layer: omnigent binary not found. Set its path in Settings → Skill Layer.",
+        "AI Skill Manager: omnigent binary not found. Set its path in Settings → AI Skill Manager.",
       );
       return null;
     }
@@ -1772,10 +1772,9 @@ export default class SkillLayerPlugin extends Plugin {
     successNotice: string,
     label = "omnigent",
   ): void {
-    // GUI apps inherit a thin launchd PATH; the binary execs sub-tools, so
-    // widen PATH (de-duped) without mutating process.env. /opt/homebrew/bin is
-    // required so omnigent can find the Homebrew `databricks` CLI it uses to
-    // authenticate to its remote server (absent from the launchd PATH).
+    // GUI apps inherit a thin launchd PATH; the launched binary execs sub-tools
+    // (and any sibling CLIs it depends on), so widen PATH (de-duped) with the
+    // common install dirs without mutating process.env.
     const env = {
       ...process.env,
       PATH: augmentPath(process.env.PATH, [
@@ -1798,7 +1797,7 @@ export default class SkillLayerPlugin extends Plugin {
       });
     } catch (err) {
       console.error("[skill-layer] spawn threw:", err);
-      new Notice(`Skill Layer: could not launch ${label} (${String(err)}).`);
+      new Notice(`AI Skill Manager: could not launch ${label} (${String(err)}).`);
       return;
     }
 
@@ -1809,13 +1808,13 @@ export default class SkillLayerPlugin extends Plugin {
     });
     child.on("error", (err) => {
       console.error("[skill-layer] spawn error:", err);
-      new Notice(`Skill Layer: failed to launch ${label} — ${err.message}`);
+      new Notice(`AI Skill Manager: failed to launch ${label} — ${err.message}`);
     });
     child.on("exit", (code) => {
       if (code && code !== 0) {
         const tail = stderrTail.trim().split("\n").slice(-3).join(" ");
         new Notice(
-          `Skill Layer: ${label} exited ${code}${tail ? ` — ${tail}` : ""}`,
+          `AI Skill Manager: ${label} exited ${code}${tail ? ` — ${tail}` : ""}`,
         );
       }
     });
@@ -1918,11 +1917,11 @@ export default class SkillLayerPlugin extends Plugin {
       const label = s.harnessLabel ?? s.tool;
       let hint: string;
       if (userResume && userResume.length > 0) {
-        hint = `Skill Layer: resume may have failed. Check the Resume command for the "${label}" harness (Settings -> Skill Layer -> Custom harnesses).`;
+        hint = `AI Skill Manager: resume may have failed. Check the Resume command for the "${label}" harness (Settings -> AI Skill Manager -> Custom harnesses).`;
       } else if (s.tool === "custom") {
-        hint = `Skill Layer: could not auto-resume this "${label}" session. Set a Resume command for the harness (Settings -> Skill Layer -> Custom harnesses).`;
+        hint = `AI Skill Manager: could not auto-resume this "${label}" session. Set a Resume command for the harness (Settings -> AI Skill Manager -> Custom harnesses).`;
       } else {
-        hint = `Skill Layer: could not resume — the session may have ended or is no longer resumable.`;
+        hint = `AI Skill Manager: could not resume — the session may have ended or is no longer resumable.`;
       }
 
       const script = buildTerminalScript(argv, s.cwd, hint);
@@ -1936,7 +1935,7 @@ export default class SkillLayerPlugin extends Plugin {
       new Notice(`Connecting to "${s.skillName}" (${label}) in your terminal…`);
     } catch (e) {
       console.error("[skill-layer] openSessionTerminal failed:", e);
-      new Notice(`Skill Layer: could not open a terminal for this session.`);
+      new Notice(`AI Skill Manager: could not open a terminal for this session.`);
     }
   }
 
@@ -2072,18 +2071,18 @@ export default class SkillLayerPlugin extends Plugin {
    */
   async launchCustomAgent(agentPath: string): Promise<void> {
     if (!this.detector.canScanExternal()) {
-      new Notice("Skill Layer: launching requires the desktop app.");
+      new Notice("AI Skill Manager: launching requires the desktop app.");
       return;
     }
     const cwd = this.detector.vaultBasePath();
     if (!cwd) {
-      new Notice("Skill Layer: could not resolve the vault path; not launching.");
+      new Notice("AI Skill Manager: could not resolve the vault path; not launching.");
       return;
     }
     const real = this.validateAgentPath(agentPath);
     if (!real) {
       new Notice(
-        "Skill Layer: this agent path failed validation; not launching.",
+        "AI Skill Manager: this agent path failed validation; not launching.",
       );
       return;
     }
@@ -2114,7 +2113,7 @@ export default class SkillLayerPlugin extends Plugin {
     const real = this.validateAgentPath(agentPath);
     if (!real) {
       new Notice(
-        "Skill Layer: this agent path failed validation; nothing copied.",
+        "AI Skill Manager: this agent path failed validation; nothing copied.",
       );
       return;
     }
@@ -2143,7 +2142,7 @@ export default class SkillLayerPlugin extends Plugin {
   async addTag(skill: Skill, rawTag: string): Promise<void> {
     const tag = sanitizeTag(rawTag);
     if (!tag) {
-      new Notice("Skill Layer: not a valid tag.");
+      new Notice("AI Skill Manager: not a valid tag.");
       return;
     }
     const existing = skill.tags.find(
@@ -2151,11 +2150,11 @@ export default class SkillLayerPlugin extends Plugin {
     );
     if (existing) {
       if (existing.origin === "frontmatter") {
-        new Notice(`Skill Layer: "${skill.name}" already has the tag #${existing.tag}.`);
+        new Notice(`AI Skill Manager: "${skill.name}" already has the tag #${existing.tag}.`);
         return;
       }
       if (existing.origin === "folder") {
-        new Notice(`Skill Layer: #${existing.tag} is already auto-applied from the folder.`);
+        new Notice(`AI Skill Manager: #${existing.tag} is already auto-applied from the folder.`);
         return;
       }
       // origin === "description": fall through to promote it into frontmatter.
@@ -2183,13 +2182,13 @@ export default class SkillLayerPlugin extends Plugin {
       }
       await this.refreshSkillFromDisk(skill);
       new Notice(
-        `Skill Layer: ${op === "add" ? "added" : "removed"} #${tag} ${
+        `AI Skill Manager: ${op === "add" ? "added" : "removed"} #${tag} ${
           op === "add" ? "to" : "from"
         } "${skill.name}".`,
       );
     } catch (err) {
       console.error(`[skill-layer] tag ${op} failed for ${skill.path}:`, err);
-      new Notice(`Skill Layer: could not ${op} tag (see console).`);
+      new Notice(`AI Skill Manager: could not ${op} tag (see console).`);
     }
   }
 
@@ -2232,7 +2231,7 @@ export default class SkillLayerPlugin extends Plugin {
     // site (don't trust that the scan path implied capability).
     if (!isAdapter && !this.detector.canScanExternal()) {
       new Notice(
-        "Skill Layer: external file writes require the desktop app with filesystem access.",
+        "AI Skill Manager: external file writes require the desktop app with filesystem access.",
       );
       return false;
     }

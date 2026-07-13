@@ -1,4 +1,4 @@
-// Shared types for the Skill Layer plugin.
+// Shared types for the AI Skill Manager plugin.
 
 import type { CustomHarness, SkillAgent } from "./launch";
 import type { LaunchedSession } from "./sessions";
@@ -127,7 +127,7 @@ export interface SkillLayerSettings {
   /**
    * Omnigent `--server` target for launches (M19). Blank = omit `--server` so
    * omnigent uses its own config/default routing. A value (e.g. `local` or a
-   * host URL like `https://<app>.cloud.databricks.com`) is passed as
+   * host URL like `https://your-omnigent-host`) is passed as
    * `--server <value>` on every omnigent launch: with a host URL this selects
    * omnigent's local-runner + remote-server topology (work runs LOCALLY in the
    * vault, models come from the host), which sends a RELATIVE cwd the multi-
