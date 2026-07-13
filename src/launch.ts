@@ -367,6 +367,15 @@ export interface CustomHarness {
   id: string;
   label: string;
   command: string[];
+  /**
+   * Optional argv to RECONNECT to a session this harness started (M20 Sessions
+   * tab). `command[0]` is the absolute binary; the rest are inert args; NO
+   * `{prompt}` (resume continues an existing session). When set, it is what the
+   * Sessions-tab "Connect" runs for this harness — overriding the built-in
+   * defaults (claude/codex/isaac) and the generic best-effort guess. Absent =
+   * best-effort (`<binary> --continue`) with a terminal hint to configure this.
+   */
+  resumeCommand?: string[];
 }
 
 /** Strip ASCII control chars (incl. NUL / CR / LF) from an interpolated value. */

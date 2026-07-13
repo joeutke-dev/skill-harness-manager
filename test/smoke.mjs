@@ -159,6 +159,26 @@ const {
   joinHome,
 } = await import(pathToFileURL(foldersOut).href);
 
+// M20: pure session helpers (resume argv, terminal script, cwd encoding, prune).
+const sessionsOut = join(builtDir, "sessions.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "sessions.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: sessionsOut,
+  logLevel: "silent",
+});
+const {
+  SESSION_MAX_AGE_MS,
+  isSessionExpired,
+  sessionToolFromCommand,
+  buildResumeArgv,
+  buildTerminalScript,
+  resumeTargetLabel,
+  relativeTime,
+} = await import(pathToFileURL(sessionsOut).href);
+
 // hiddenFiles.ts imports `obsidian` (App type + FileSystemAdapter value) which
 // has no runtime JS package, so stub it — we only exercise the pure
 // `isRevealableHiddenPath` here, never the controller.
@@ -1092,8 +1112,8 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS are Skills, Commands, Agents, Harnesses", deepEq(TABS.map((t) => t.id), ["skills", "commands", "agents", "harnesses"]));
-  check("TABS labels are Skills / Commands / Agents / Harnesses", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Agents", "Harnesses"]));
+  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "commands", "sessions", "agents", "harnesses"]));
+  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Sessions", "Agents", "Harnesses"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
@@ -1744,6 +1764,70 @@ console.log("\n[M13] YAML-Viewer detection + in-vault TFile resolution + fallbac
       ["Claude"],
     ),
   );
+}
+
+// =====================================================================
+// (u) M20 — Sessions tab pure helpers.
+// =====================================================================
+console.log("\n[u] sessions: resume argv / terminal script / labels / prune");
+{
+  // sessionToolFromCommand: only claude/codex are resumable custom harnesses.
+  eq("tool: claude", sessionToolFromCommand("/opt/homebrew/bin/claude"), "claude");
+  eq("tool: codex", sessionToolFromCommand("/usr/local/bin/codex"), "codex");
+  eq("tool: isaac", sessionToolFromCommand("/usr/local/bin/isaac"), "isaac");
+  check("tool: other → null", sessionToolFromCommand("/usr/local/bin/aider") === null);
+
+  // buildResumeArgv: continue-latest per tool (no captured conversation id).
+  const omni = { tool: "omnigent", binaryPath: "/b/omnigent", cwd: "/v", startedAt: 0, key: "" };
+  check("omnigent resume: run -c", deepEq(buildResumeArgv(omni), ["/b/omnigent", "run", "-c"]));
+  check(
+    "omnigent resume with agent + server + harness",
+    deepEq(
+      buildResumeArgv({ ...omni, agentArg: "/a/vault-agent", server: "https://h", harness: "claude" }),
+      ["/b/omnigent", "run", "/a/vault-agent", "--server", "https://h", "--harness", "claude", "-c"],
+    ),
+  );
+  check(
+    "omnigent resume ignores blank server",
+    deepEq(buildResumeArgv({ ...omni, server: "  " }), ["/b/omnigent", "run", "-c"]),
+  );
+  const cl = { tool: "claude", binaryPath: "/b/claude", cwd: "/v", startedAt: 0, key: "" };
+  check("claude resume: --continue", deepEq(buildResumeArgv(cl), ["/b/claude", "--continue"]));
+  const cx = { tool: "codex", binaryPath: "/b/codex", cwd: "/v", startedAt: 0, key: "" };
+  check("codex resume: resume --last", deepEq(buildResumeArgv(cx), ["/b/codex", "resume", "--last"]));
+  const is = { tool: "isaac", binaryPath: "/b/isaac", cwd: "/v", startedAt: 0, key: "" };
+  check("isaac resume: resume", deepEq(buildResumeArgv(is), ["/b/isaac", "resume"]));
+  const cu = { tool: "custom", binaryPath: "/b/mytool", cwd: "/v", startedAt: 0, key: "" };
+  check("custom resume: best-effort --continue", deepEq(buildResumeArgv(cu), ["/b/mytool", "--continue"]));
+
+  // resumeTargetLabel describes the reconnect target.
+  check("label: omnigent default", resumeTargetLabel(omni).startsWith("omnigent · default agent"));
+  check(
+    "label: omnigent custom agent + harness",
+    resumeTargetLabel({ ...omni, agentArg: "/a/vault-agent", harness: "claude" }) ===
+      "omnigent · vault-agent · claude · continues latest",
+  );
+  check("label: claude", resumeTargetLabel(cl).includes("continues latest"));
+
+  // buildTerminalScript: cd into the (quoted) cwd, run the resume argv, and show
+  // the fail hint on non-zero exit.
+  const script = buildTerminalScript(["/b/omnigent", "run", "-c"], "/Users/joe/My Vault", 'set a "vibe" resume cmd');
+  check("script has shebang", script.startsWith("#!/bin/bash\n"));
+  check("script cd's into quoted cwd", script.includes("cd '/Users/joe/My Vault' || exit 1"));
+  check("script runs resume argv", script.includes("'/b/omnigent' 'run' '-c'"));
+  check("script checks exit code", script.includes('if [ "$code" -ne 0 ]'));
+  check("script embeds fail hint", script.includes('set a \\"vibe\\" resume cmd'));
+
+  // isSessionExpired: 12h boundary.
+  const now = 1_000_000_000_000;
+  check("fresh session not expired", isSessionExpired({ startedAt: now - 1000 }, now) === false);
+  check("11h59m not expired", isSessionExpired({ startedAt: now - (SESSION_MAX_AGE_MS - 60_000) }, now) === false);
+  check("12h+ expired", isSessionExpired({ startedAt: now - SESSION_MAX_AGE_MS - 1 }, now) === true);
+
+  // relativeTime formatting.
+  eq("relativeTime seconds", relativeTime(now - 5000, now), "5s ago");
+  eq("relativeTime minutes", relativeTime(now - 5 * 60_000, now), "5m ago");
+  eq("relativeTime hours", relativeTime(now - (2 * 60 + 15) * 60_000, now), "2h 15m ago");
 }
 
 // =====================================================================

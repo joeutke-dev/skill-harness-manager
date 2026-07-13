@@ -9,6 +9,7 @@ import {
   TABS,
 } from "./tabs";
 import { Skill } from "./types";
+import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
 
@@ -122,6 +123,7 @@ export class SkillBrowserView extends ItemView {
     c.empty();
     if (this.activeTab === "agents") this.renderAgentsTab(c);
     else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
+    else if (this.activeTab === "sessions") this.renderSessionsTab(c);
     else this.renderBrowserTab(c); // skills OR commands (same browser UI)
   }
 
@@ -344,6 +346,64 @@ export class SkillBrowserView extends ItemView {
     btn.addEventListener("keydown", (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     });
+  }
+
+  /** The Sessions tab (M20): resumable conversations the plugin launched, newest
+   *  first. Pruned live (dropped after 12h or when no longer resumable). Each row
+   *  shows the skill, tool, and start time, with a Connect (open terminal) action. */
+  private renderSessionsTab(c: HTMLElement): void {
+    const sessions = this.plugin.livePrunedSessions();
+    if (sessions.length === 0) {
+      this.renderEmptyState(
+        c,
+        "No recent sessions. Launch a skill and it appears here — sessions drop " +
+          "off after 12 hours or once they're no longer resumable.",
+      );
+      return;
+    }
+    const list = c.createDiv({ cls: "skill-layer-list" });
+    const now = Date.now();
+    for (const s of sessions) this.renderSessionRow(list, s, now);
+  }
+
+  /** One Sessions-tab row: skill + tool badge + start time, Connect / Forget. */
+  private renderSessionRow(
+    parent: HTMLElement,
+    s: LaunchedSession,
+    now: number,
+  ): void {
+    const el = parent.createDiv({ cls: "skill-layer-row" });
+    const main = el.createDiv({ cls: "skill-layer-row-main" });
+    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
+    nameLine.createSpan({ text: s.skillName, cls: "skill-layer-row-name" });
+    nameLine.createSpan({
+      text: s.harnessLabel ?? s.tool,
+      cls: "skill-layer-row-badge",
+    });
+
+    const started = new Date(s.startedAt);
+    main.createDiv({
+      cls: "skill-layer-row-desc",
+      text: `Started ${relativeTime(s.startedAt, now)} · ${started.toLocaleString()}`,
+    });
+    main.createDiv({ cls: "skill-layer-row-path", text: resumeTargetLabel(s) });
+
+    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+    const connect = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      attr: { "aria-label": `Connect to the ${s.skillName} session in a terminal` },
+    });
+    setIcon(connect.createSpan({ cls: "skill-layer-action-icon" }), "terminal");
+    connect.createSpan({ text: " Connect" });
+    connect.addEventListener("click", () => this.plugin.openSessionTerminal(s));
+
+    const forget = actions.createEl("button", {
+      cls: "skill-layer-action",
+      attr: { "aria-label": `Forget the ${s.skillName} session` },
+    });
+    setIcon(forget.createSpan({ cls: "skill-layer-action-icon" }), "x");
+    forget.createSpan({ text: " Forget" });
+    forget.addEventListener("click", () => void this.plugin.forgetSession(s.key));
   }
 
   /** The Agents tab: a Refresh control + the discovered custom agents (M10). */

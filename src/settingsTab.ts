@@ -247,7 +247,8 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           "Each skill row's Harness dropdown lists them.",
       );
 
-    // Existing custom harnesses, each removable.
+    // Existing custom harnesses, each removable, each with an optional Resume
+    // command used by the Sessions tab's Connect button (M20).
     settings.harnesses.forEach((h) => {
       new Setting(containerEl)
         .setName(h.label)
@@ -259,6 +260,22 @@ export class SkillLayerSettingTab extends PluginSettingTab {
             .onClick(async () => {
               await this.plugin.removeCustomHarness(h.id);
               this.display();
+            }),
+        );
+      new Setting(containerEl)
+        .setName("↳ Resume command")
+        .setDesc(
+          "Optional. What the Sessions-tab Connect runs to reconnect to a " +
+            "session from this harness (absolute binary, no {prompt}). Blank = " +
+            "best-effort. Example: /usr/local/bin/isaac resume",
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("(best-effort)")
+            .setValue((h.resumeCommand ?? []).join(" "))
+            .onChange(async (v) => {
+              const err = await this.plugin.setCustomHarnessResume(h.id, v);
+              if (err) new Notice(`Skill Layer: ${err}`);
             }),
         );
     });

@@ -9,7 +9,12 @@ import type { CustomAgent } from "./launch";
 
 /** The browser tabs. Skills + Commands are the item browsers (M18); Agents
  *  (M10) and Harnesses (M15.3) are config lists. */
-export type SkillLayerTab = "skills" | "commands" | "agents" | "harnesses";
+export type SkillLayerTab =
+  | "skills"
+  | "commands"
+  | "sessions"
+  | "agents"
+  | "harnesses";
 
 /** The tab shown on first open. */
 export const DEFAULT_TAB: SkillLayerTab = "skills";
@@ -18,6 +23,7 @@ export const DEFAULT_TAB: SkillLayerTab = "skills";
 export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "commands", label: "Commands" },
+  { id: "sessions", label: "Sessions" },
   { id: "agents", label: "Agents" },
   { id: "harnesses", label: "Harnesses" },
 ];

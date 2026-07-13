@@ -75,6 +75,14 @@ import {
   sanitizeTag,
 } from "./parse";
 import { SkillLayerSettingTab } from "./settingsTab";
+import {
+  buildResumeArgv,
+  buildTerminalScript,
+  LaunchedSession,
+  SESSION_MAX_AGE_MS,
+  sessionToolFromCommand,
+  SessionTool,
+} from "./sessions";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import { DEFAULT_SETTINGS, Skill, SkillLayerSettings } from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
@@ -208,8 +216,6 @@ export default class SkillLayerPlugin extends Plugin {
     if (this.rescanTimer !== null) window.clearTimeout(this.rescanTimer);
     // Restore the hidden-file adapter patch (function swap is synchronous).
     this.hiddenFiles?.teardown();
-    // Detach the browser view leaves.
-    this.app.workspace.detachLeavesOfType(SKILL_LAYER_VIEW);
     // Explicitly remove tracked ribbon icons (Obsidian also cleans these, but
     // we own the Map so we leave nothing dangling).
     for (const el of this.ribbonIcons.values()) el.remove();
@@ -801,6 +807,38 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /** Remove a custom harness by id, and clear any skill selections pointing at it. */
+  /**
+   * Set (or clear, when blank) a custom harness's Resume command (M20). Parsed
+   * like the launch command but WITHOUT a `{prompt}` requirement (resume
+   * continues an existing session); the binary must still be an absolute path.
+   * Returns an error string on invalid input, else null.
+   */
+  async setCustomHarnessResume(
+    id: string,
+    commandLine: string,
+  ): Promise<string | null> {
+    const h = this.settings.harnesses.find((x) => x.id === id);
+    if (!h) return "Harness not found.";
+    const line = commandLine.trim();
+    if (!line) {
+      delete h.resumeCommand;
+      await this.saveSettings();
+      return null;
+    }
+    const argv = parseHarnessCommandLine(line);
+    if (
+      !Array.isArray(argv) ||
+      argv.length === 0 ||
+      !argv.every((t) => typeof t === "string" && t.length > 0) ||
+      !nodePath.isAbsolute(argv[0])
+    ) {
+      return "Invalid resume command: the first token (binary) must be an ABSOLUTE path. Example: /usr/local/bin/isaac resume";
+    }
+    h.resumeCommand = argv;
+    await this.saveSettings();
+    return null;
+  }
+
   async removeCustomHarness(id: string): Promise<void> {
     this.settings.harnesses = this.settings.harnesses.filter((h) => h.id !== id);
     // Drop any per-skill selection that referenced this now-deleted harness.
@@ -1629,6 +1667,13 @@ export default class SkillLayerPlugin extends Plugin {
         contextPath ? ` on ${nodePath.basename(contextPath)}` : ""
       } in omnigent — it should appear in the omnigent UI shortly.`,
     );
+    // Record the session for the Sessions tab (M20) — immediately, so it shows
+    // up the moment the user launches (no server round-trip to observe).
+    this.recordSession("omnigent", skill.name, cwd, binaryPath, {
+      agentArg: agent.mode === "custom" ? agent.path : undefined,
+      harness: resolvedH.kind === "omnigent" ? resolvedH.name : undefined,
+      server: this.settings.omnigentServerUrl,
+    });
   }
 
   /**
@@ -1668,6 +1713,17 @@ export default class SkillLayerPlugin extends Plugin {
       cwd,
       `Launching "${skillName}" via "${harness.label}" — it should start shortly.`,
       harness.label,
+    );
+    // Universal tracking (M20): record EVERY custom-harness launch. Recognized
+    // binaries (claude/codex/isaac) get their built-in resume; anything else is
+    // tracked as "custom" and Connect does a best-effort resume with a hint to
+    // set a Resume command for the harness.
+    this.recordSession(
+      sessionToolFromCommand(binary) ?? "custom",
+      skillName,
+      cwd,
+      binary,
+      { harnessId: harness.id, harnessLabel: harness.label },
     );
   }
 
@@ -1768,6 +1824,120 @@ export default class SkillLayerPlugin extends Plugin {
     // Spawn succeeded; the run's real success/failure is async (an 'error' or
     // non-zero 'exit' will Notice above), so don't assert success here.
     new Notice(successNotice);
+  }
+
+  // --- Sessions (Sessions tab, M20) --------------------------------------
+
+  /**
+   * Record a launched session IMMEDIATELY (instant feedback — no capture race).
+   * The launch is headless/detached and, for remote-server runs, the conversation
+   * lives server-side with no reliable local artifact to poll, so we don't try to
+   * pin a conversation id; reconnect uses each tool's "continue latest" (see
+   * `buildResumeArgv`). Deduped-ish by tool+time. Never throws.
+   */
+  private recordSession(
+    tool: SessionTool,
+    skillName: string,
+    cwd: string,
+    binaryPath: string,
+    extra: {
+      agentArg?: string;
+      harness?: string;
+      server?: string;
+      harnessId?: string;
+      harnessLabel?: string;
+    } = {},
+  ): void {
+    try {
+      const startedAt = Date.now();
+      const rec: LaunchedSession = {
+        key: `${tool}:${startedAt}:${Math.random().toString(36).slice(2, 8)}`,
+        tool,
+        skillName,
+        binaryPath,
+        cwd,
+        startedAt,
+      };
+      if (extra.agentArg) rec.agentArg = extra.agentArg;
+      if (extra.harness) rec.harness = extra.harness;
+      if (extra.server && extra.server.trim()) rec.server = extra.server.trim();
+      if (extra.harnessId) rec.harnessId = extra.harnessId;
+      if (extra.harnessLabel) rec.harnessLabel = extra.harnessLabel;
+      this.settings.sessions.push(rec);
+      void this.saveSettings();
+      this.refreshViews();
+    } catch (e) {
+      console.error("[skill-layer] recordSession failed:", e);
+    }
+  }
+
+  /**
+   * Prune sessions older than 12h, persisting if anything changed. Returns the
+   * survivors, newest-first. Called by the Sessions tab on render so the list is
+   * always live. (Resumability can't be verified without a captured conversation
+   * id — a future iteration; for now age is the sole prune criterion.)
+   */
+  livePrunedSessions(): LaunchedSession[] {
+    const now = Date.now();
+    const kept = this.settings.sessions.filter(
+      (s) => now - s.startedAt < SESSION_MAX_AGE_MS,
+    );
+    if (kept.length !== this.settings.sessions.length) {
+      this.settings.sessions = kept;
+      void this.saveSettings();
+    }
+    return [...kept].sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /** Remove one tracked session (the Sessions-tab "Forget" action). */
+  async forgetSession(key: string): Promise<void> {
+    this.settings.sessions = this.settings.sessions.filter((s) => s.key !== key);
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  /**
+   * Reconnect to a session: write its resume command to a temp executable
+   * `.command` script and `open` it, which launches the user's DEFAULT terminal
+   * and runs `omnigent/claude/codex resume …` in the vault cwd. Never throws.
+   */
+  openSessionTerminal(s: LaunchedSession): void {
+    try {
+      // Resume argv precedence: (1) a Resume command the user set on the custom
+      // harness; (2) the built-in default / best-effort guess (buildResumeArgv).
+      const harness = s.harnessId
+        ? this.settings.harnesses.find((h) => h.id === s.harnessId)
+        : undefined;
+      const userResume = harness?.resumeCommand;
+      const argv =
+        userResume && userResume.length > 0 && nodePath.isAbsolute(userResume[0])
+          ? userResume
+          : buildResumeArgv(s);
+
+      // Failure hint shown in the terminal if the resume command exits non-zero.
+      const label = s.harnessLabel ?? s.tool;
+      let hint: string;
+      if (userResume && userResume.length > 0) {
+        hint = `Skill Layer: resume may have failed. Check the Resume command for the "${label}" harness (Settings -> Skill Layer -> Custom harnesses).`;
+      } else if (s.tool === "custom") {
+        hint = `Skill Layer: could not auto-resume this "${label}" session. Set a Resume command for the harness (Settings -> Skill Layer -> Custom harnesses).`;
+      } else {
+        hint = `Skill Layer: could not resume — the session may have ended or is no longer resumable.`;
+      }
+
+      const script = buildTerminalScript(argv, s.cwd, hint);
+      const file = `${os.tmpdir()}/skill-layer-resume-${s.tool}-${Date.now()}.command`;
+      fs.writeFileSync(file, script, { mode: 0o755 });
+      const child = spawn("/usr/bin/open", [file], {
+        stdio: "ignore",
+        detached: true,
+      });
+      child.unref?.();
+      new Notice(`Connecting to "${s.skillName}" (${label}) in your terminal…`);
+    } catch (e) {
+      console.error("[skill-layer] openSessionTerminal failed:", e);
+      new Notice(`Skill Layer: could not open a terminal for this session.`);
+    }
   }
 
   // --- Custom agents (Agents tab, M10) -----------------------------------

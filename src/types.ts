@@ -1,6 +1,7 @@
 // Shared types for the Skill Layer plugin.
 
 import type { CustomHarness, SkillAgent } from "./launch";
+import type { LaunchedSession } from "./sessions";
 
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
@@ -148,6 +149,12 @@ export interface SkillLayerSettings {
    */
   showHiddenFolders: boolean;
   /**
+   * Sessions the plugin has launched (M20), newest-appended. Each is a resumable
+   * omnigent/claude/codex conversation shown in the Sessions tab. Pruned on view
+   * (dropped when older than 12h or no longer resumable). Plugin-local state.
+   */
+  sessions: LaunchedSession[];
+  /**
    * Global default pinned-ribbon icon — the fallback used by any pinned skill
    * that has no per-skill icon in `skillIcons`. Set via the settings selector
    * (also the migration fallback for pins created before per-skill icons).
@@ -172,4 +179,5 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   omnigentServerUrl: "",
   appendVaultAnchor: true,
   showHiddenFolders: false,
+  sessions: [],
 };
