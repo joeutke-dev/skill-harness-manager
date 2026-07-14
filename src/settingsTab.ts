@@ -346,7 +346,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
           }),
       )
       .addButton((btn) =>
-        btn.setButtonText("Reload harnesses from disk").onClick(async () => {
+        btn.setButtonText("Reload").onClick(async () => {
           await this.plugin.reloadSettingsFromDisk();
           this.display();
         }),

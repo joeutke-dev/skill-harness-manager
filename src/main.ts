@@ -315,8 +315,8 @@ export default class SkillLayerPlugin extends Plugin {
       `   literal token {prompt}; leave every other key in the file unchanged; write valid JSON.`,
       `   Optional: add "resumeCommand": ["<absolute CLI>", "<resume flags>"] (no {prompt}) to`,
       `   enable the Sessions tab's "Connect" button.`,
-      `4. Tell me to click "Reload harnesses from disk" in the plugin settings (or reload the`,
-      `   plugin) so the new harness appears.`,
+      `4. Tell me to click "Reload" in the plugin settings (or reload the plugin) so the`,
+      `   new harness appears.`,
     ].join("\n");
   }
 
