@@ -1,7 +1,10 @@
-# Dependencies — the only thing excluded. Built artifacts (main.js, styles.css,
-# manifest.json) ARE committed so the folder can be copied straight into
-# .obsidian/plugins/skill-layer/ and loaded.
+# Dependencies
 node_modules/
+
+# Build output — built by CI on tag push and uploaded to the GitHub release,
+# not committed (Obsidian sample-plugin convention).
+main.js
+*.js.map
 
 # Logs
 npm-debug.log*

@@ -46,7 +46,20 @@ filtering, and tagging work without one.
   command used by the Sessions tab).
 - **Show hidden folders** — optionally reveal dot-folders in the file explorer.
 
-## Build
+## Install
+
+**From Obsidian (recommended):** Settings → Community plugins → Browse → search
+**"Skill & Harness Manager"** → Install → Enable. No Node, no building — Obsidian
+downloads the prebuilt files for you.
+
+**Manual / pre-release:** download `main.js`, `manifest.json`, and `styles.css`
+from the [latest release](https://github.com/joeutke-dev/skill-harness-manager/releases)
+into `<vault>/.obsidian/plugins/skill-harness-manager/`, then enable it in
+Settings → Community plugins.
+
+## Development
+
+Only needed if you're building from source:
 
 ```bash
 npm install
@@ -56,11 +69,11 @@ npm run smoke       # pure-logic smoke tests
 npm run build       # tsc + esbuild production → main.js
 ```
 
-## Install manually
-
-Copy `main.js`, `styles.css`, and `manifest.json` into
-`<vault>/.obsidian/plugins/skill-harness-manager/`, then enable **Skill & Harness Manager**
-in *Settings → Community plugins*.
+Releases are automated: pushing a tag (`git tag 0.1.1 && git push --tags`) runs
+`.github/workflows/release.yml`, which builds and publishes `main.js`,
+`manifest.json`, and `styles.css` as release assets. Bump the version with
+`npm version patch|minor|major` (updates `manifest.json` + `versions.json` via
+`version-bump.mjs`).
 
 ## License
 
