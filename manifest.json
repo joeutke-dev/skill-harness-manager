@@ -1,7 +1,7 @@
 {
 	"id": "skill-harness-manager",
 	"name": "Skill and Harness Manager",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"minAppVersion": "1.5.0",
 	"description": "Browse and launch AI skills, commands, and agents from your vault and tool dot-folders, and manage the harnesses that run them.",
 	"author": "Joe Utke",
