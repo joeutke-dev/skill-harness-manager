@@ -1,79 +1,122 @@
 # Skill and Harness Manager
 
-A desktop-only Obsidian plugin that discovers, browses, and launches the AI
-**skills, commands, and agents** scattered across your vault and your coding
-tools' dot-folders (`.claude/`, `.codex/`, `.cursor/`, `.agents/`, …) — in one
-place, with a ribbon icon and command-palette access.
+**Consolidate, organize, and manage your AI skills — right inside your vault.**
 
-> No bundled model, no inference, no network calls. It *discovers, displays, and
-> launches* — the actual work runs in whatever AI CLI you point it at.
+If you've collected AI *skills* (`SKILL.md` files), commands, and agents across
+different tools — `.claude/`, `.codex/`, `.cursor/`, `.agents/`, marketplace
+folders, loose notes — they're scattered and hard to actually *use*. Skill and
+Harness Manager brings them into one place, lets you organize and filter them,
+and makes them **launchable with a click** so AI becomes a first-class part of
+how you work in your vault.
 
-## What it does
+> No bundled model, no inference, no network calls of its own. It discovers,
+> organizes, and launches — the actual work runs in whatever AI CLI you point it
+> at (Claude Code, Codex, omnigent, or your own).
 
-- **Unified browser** (`brain-circuit` ribbon icon) with tabs:
-  - **Skills** / **Commands** — every `SKILL.md` / command file found across your
-    scan roots, grouped into a collapsible source-folder tree, each shown with its
-    description and tags.
-  - **Sessions** — the launches you've started, with a **Connect** button that
-    reopens the session in your terminal (per-tool resume). Auto-pruned after 12h.
-  - **Agents** / **Harnesses** — discovered agents and the launchers you can run
-    skills through.
-- **Filter bar** — multi-select dropdowns for agent, harness, tag, and access
-  (right-click / ribbon), plus free-text search.
-- **Launch** — run a skill through omnigent or a custom harness you define (any
-  absolute binary with a `{prompt}` token). Spawned with `shell: false` and array
-  arguments; the plugin passes only the invocation, never your file contents.
-- **Pin to ribbon** — pin any skill to its own ribbon icon (searchable Lucide
-  picker) and register a command for it.
-- **Right-click launch** — enable a skill in the file-explorer context menu to run
-  it against the clicked file.
-- **Tagging** — resolves tags from frontmatter, description `#tags`, and folder
-  location; the only writes the plugin makes are explicit tag add/remove on the
-  frontmatter `tags:` field.
+## Why it's useful
+
+Deeper AI integration into your vault, triggered from where you already work:
+
+- **Reformat a markdown note with one click** — pin a "clean up markdown" skill
+  to the sidebar and run it on the current file.
+- **Process an audio file** — right-click a recording and run a
+  transcribe/summarize skill against it.
+- **Trigger daily automations** — kick off a daily-note or digest skill from a
+  ribbon button.
+- …and anything else you can capture as a skill.
+
+## How you launch skills
+
+Skills can be run from wherever is most convenient:
+
+- **Right-click a file** in the file explorer → run a skill *targeting that file*
+  (great for "reformat this note", "transcribe this audio", "summarize this").
+- **Sidebar buttons** — pin any skill to its own ribbon icon (with a custom
+  Lucide icon) to create one-click launchers for the skills you use most.
+- **Command palette** — every pinned skill also registers a command.
+- **The browser view** — open the unified browser and launch anything from there.
+
+## The browser
+
+A single view (`brain-circuit` ribbon icon) with tabs:
+
+- **Skills** / **Commands** — everything discovered across your scan roots,
+  grouped into a collapsible source-folder tree, each with its description and
+  tags. Multi-select filters by agent, harness, tag, and access, plus search.
+- **Sessions** — the launches you've started, with a **Connect** button that
+  reopens the session in your terminal. Auto-pruned after 12h.
+- **Agents** / **Harnesses** — the agents you can run skills as, and the
+  launchers that actually run them.
+
+## Harnesses (how skills get run)
+
+A **harness** is the command that actually executes a skill — usually an AI CLI.
+omnigent is supported out of the box; you can add your own for Claude Code,
+Codex, or anything else.
+
+**Add one manually:** Settings → *Skill and Harness Manager* → **Custom
+harnesses** → give it a name and a one-line command whose first token is the
+absolute path to the binary and which contains the `{prompt}` placeholder, e.g.:
+
+```
+/opt/homebrew/bin/claude -p {prompt}
+```
+
+The plugin substitutes the skill's prompt into `{prompt}` and runs it (no shell,
+array arguments). Optionally set a **Resume command** so the Sessions tab's
+*Connect* can reopen a session.
+
+**Let the model add itself:** run this prompt inside your CLI (Claude Code,
+Codex, omnigent, …) and it will register itself as a harness. The same prompt is
+available with a copy button in the plugin's settings.
+
+```
+Register yourself as a launch harness in my Obsidian "Skill and Harness Manager" plugin.
+
+1. Open the plugin config JSON at:
+   <vault>/.obsidian/plugins/skill-harness-manager/data.json
+2. Parse it as JSON and ensure it has a top-level "harnesses" array (create it if missing).
+3. Append ONE entry describing how to run YOU non-interactively with a single prompt:
+     {
+       "id": "<short-kebab-id>",
+       "label": "<your product name>",
+       "command": ["<absolute path to your CLI>", "<non-interactive flags>", "{prompt}"]
+     }
+   Rules: command[0] must be an absolute path; exactly one element must contain the
+   literal token {prompt}; leave every other key in the file unchanged; write back valid JSON.
+   Optional: add "resumeCommand": ["<absolute CLI>", "<resume flags>"] (no {prompt}) to enable
+   the Sessions tab's "Connect" button.
+4. Tell me to reload the plugin (Settings → Community plugins → toggle it off and on),
+   after which the new harness appears in the plugin.
+```
 
 ## Requirements
 
-Desktop only (uses Node/Electron to scan folders and launch CLIs). Launching a
-skill requires the external CLI you configure (e.g. `omnigent`); browsing,
-filtering, and tagging work without one.
-
-## Settings
-
-- **Scan roots** — the directories to discover skills/commands/agents in
-  (vault-relative or absolute). Sensible defaults are pre-seeded.
-- **Omnigent binary path** and **Omnigent server** — optional launch config.
-- **Custom harnesses** — define your own launch command (and an optional resume
-  command used by the Sessions tab).
-- **Show hidden folders** — optionally reveal dot-folders in the file explorer.
+Desktop only — it scans folders and launches local CLIs. Launching a skill needs
+whatever CLI you configure; browsing, organizing, tagging, and filtering work
+without one.
 
 ## Install
 
-**From Obsidian (recommended):** Settings → Community plugins → Browse → search
-**"Skill and Harness Manager"** → Install → Enable. No Node, no building — Obsidian
-downloads the prebuilt files for you.
+**From Obsidian:** Settings → Community plugins → Browse → search
+**"Skill and Harness Manager"** → Install → Enable. No Node, no building.
 
 **Manual / pre-release:** download `main.js`, `manifest.json`, and `styles.css`
 from the [latest release](https://github.com/joeutke-dev/skill-harness-manager/releases)
-into `<vault>/.obsidian/plugins/skill-harness-manager/`, then enable it in
-Settings → Community plugins.
+into `<vault>/.obsidian/plugins/skill-harness-manager/`, then enable it.
 
 ## Development
 
-Only needed if you're building from source:
-
 ```bash
 npm install
-npm run typecheck   # tsc --noEmit (strict)
-npm run lint        # eslint
-npm run smoke       # pure-logic smoke tests
-npm run build       # tsc + esbuild production → main.js
+npm run typecheck
+npm run lint
+npm run smoke
+npm run build
 ```
 
-Releases are automated: pushing a tag (`git tag 0.1.1 && git push --tags`) runs
-`.github/workflows/release.yml`, which builds and publishes `main.js`,
-`manifest.json`, and `styles.css` as release assets. Bump the version with
-`npm version patch|minor|major` (updates `manifest.json` + `versions.json` via
-`version-bump.mjs`).
+Releases are automated: push a tag (`git tag 0.1.2 && git push --tags`) and
+`.github/workflows/release.yml` builds and publishes the assets.
 
 ## License
 

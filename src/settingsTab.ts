@@ -321,5 +321,39 @@ export class SkillLayerSettingTab extends PluginSettingTab {
             this.display();
           }),
       );
+
+    // Register-by-prompt: let an AI CLI add ITSELF as a harness. The user copies
+    // this prompt, runs it in Claude Code / Codex / omnigent, and the model edits
+    // data.json; "Reload harnesses from disk" then picks it up.
+    const prompt = this.plugin.harnessRegistrationPrompt();
+    new Setting(containerEl)
+      .setName("Or let a model register itself")
+      .setDesc(
+        "Copy this prompt and run it inside your AI CLI (Claude Code, Codex, " +
+          "omnigent, …). It will add itself as a harness, then click Reload.",
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Copy prompt")
+          .setCta()
+          .onClick(async () => {
+            try {
+              await navigator.clipboard.writeText(prompt);
+              new Notice("Skill and Harness Manager: prompt copied.");
+            } catch {
+              new Notice("Skill and Harness Manager: copy failed (see prompt below).");
+            }
+          }),
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Reload harnesses from disk").onClick(async () => {
+          await this.plugin.reloadSettingsFromDisk();
+          this.display();
+        }),
+      );
+    // Show the prompt itself (read-only) so it's visible/selectable even if
+    // clipboard access is unavailable.
+    const pre = containerEl.createEl("pre", { cls: "skill-layer-prompt-block" });
+    pre.createEl("code", { text: prompt });
   }
 }

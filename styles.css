@@ -748,3 +748,17 @@ body .tree-item-self.is-flashing {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* Copyable harness-registration prompt in settings. */
+.skill-layer-prompt-block {
+  max-height: 220px;
+  overflow: auto;
+  padding: var(--size-4-2);
+  margin: var(--size-2-3) 0 var(--size-4-3);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+  user-select: text;
+}

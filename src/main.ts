@@ -287,6 +287,48 @@ export default class SkillLayerPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /** Absolute path to this plugin's data.json (config lives outside the vault
+   *  markdown, under the configured config dir). Used by the "register a harness
+   *  by prompt" flow so a model can edit it directly. */
+  dataJsonPath(): string {
+    const base = this.detector.vaultBasePath() ?? "<vault>";
+    return `${base}/${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
+  }
+
+  /** A copy-paste prompt the user runs inside their AI CLI (Claude Code, Codex,
+   *  omnigent, …) so the model registers ITSELF as a custom harness by appending
+   *  to `harnesses` in data.json. `dataPath` is embedded so no guesswork. */
+  harnessRegistrationPrompt(): string {
+    return [
+      `Register yourself as a launch "harness" in my Obsidian "Skill and Harness Manager" plugin.`,
+      ``,
+      `1. Open this plugin config JSON file:`,
+      `   ${this.dataJsonPath()}`,
+      `2. Parse it as JSON and ensure it has a top-level "harnesses" array (create it if missing).`,
+      `3. Append ONE entry describing how to run YOU non-interactively with a single prompt:`,
+      `     {`,
+      `       "id": "<short-kebab-id>",`,
+      `       "label": "<your product name>",`,
+      `       "command": ["<absolute path to your CLI>", "<non-interactive flags>", "{prompt}"]`,
+      `     }`,
+      `   Rules: command[0] must be an absolute path; exactly one element must contain the`,
+      `   literal token {prompt}; leave every other key in the file unchanged; write valid JSON.`,
+      `   Optional: add "resumeCommand": ["<absolute CLI>", "<resume flags>"] (no {prompt}) to`,
+      `   enable the Sessions tab's "Connect" button.`,
+      `4. Tell me to click "Reload harnesses from disk" in the plugin settings (or reload the`,
+      `   plugin) so the new harness appears.`,
+    ].join("\n");
+  }
+
+  /** Re-read data.json from disk into memory + refresh the UI. Lets a harness the
+   *  user registered via the prompt (which edits data.json directly) show up
+   *  without a full plugin reload. */
+  async reloadSettingsFromDisk(): Promise<void> {
+    await this.loadSettings();
+    this.refreshViews();
+    new Notice("Skill and Harness Manager: reloaded settings from disk.");
+  }
+
   // --- Detection ---------------------------------------------------------
   canScanExternal(): boolean {
     return this.detector.canScanExternal();
