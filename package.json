@@ -1,7 +1,7 @@
 {
-  "name": "ai-skill-manager",
+  "name": "skill-harness-manager",
   "version": "0.1.0",
-  "description": "Skill Layer — discover, browse, and pin AI skills (SKILL.md files) across your Obsidian vault, dot-folders, and external desktop directories.",
+  "description": "Browse and launch AI skills, commands, and agents from your vault and tool dot-folders, and manage the harnesses that run them.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

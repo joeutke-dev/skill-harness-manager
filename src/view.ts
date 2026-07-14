@@ -41,7 +41,7 @@ export class SkillBrowserView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "AI Skill Manager";
+    return "Skill & Harness Manager";
   }
 
   getIcon(): string {
@@ -482,7 +482,7 @@ export class SkillBrowserView extends ItemView {
   /**
    * The Harnesses tab (M15.3), DISPLAY-ONLY. Shows (1) the harnesses omnigent has
    * configured — discovered by running `omnigent config list` — and (2) the
-   * user's custom harnesses. Add/remove is done in Settings → AI Skill Manager (this
+   * user's custom harnesses. Add/remove is done in Settings → Skill & Harness Manager (this
    * tab links there). A Refresh button re-runs discovery. Selecting a harness
    * per skill happens on the skill row's "Harness" dropdown, which this feeds.
    */
@@ -514,7 +514,7 @@ export class SkillBrowserView extends ItemView {
     }
 
     const hint = c.createDiv({ cls: "skill-layer-count" });
-    hint.setText("Add custom harnesses in Settings → AI Skill Manager.");
+    hint.setText("Add custom harnesses in Settings → Skill & Harness Manager.");
 
     const list = c.createDiv({ cls: "skill-layer-list" });
     // Omnigent-discovered (configured) harnesses.
@@ -561,7 +561,7 @@ export class SkillBrowserView extends ItemView {
       this.renderEmptyState(
         container,
         all.length === 0
-          ? `No ${noun}s found. Add scan roots in Settings → AI Skill Manager, then Rescan.`
+          ? `No ${noun}s found. Add scan roots in Settings → Skill & Harness Manager, then Rescan.`
           : `No ${noun}s match the current filters.`,
       );
       return;

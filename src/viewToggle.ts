@@ -5,7 +5,7 @@
 export type ToggleAction = "open" | "reveal" | "close";
 
 /**
- * Decide what the AI Skill Manager ribbon should do, given:
+ * Decide what the Skill & Harness Manager ribbon should do, given:
  *  - `exists`: a SKILL_LAYER_VIEW leaf is currently open, and
  *  - `isActiveVisible`: that leaf is the active/focused (visible) leaf.
  *

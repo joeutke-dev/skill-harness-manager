@@ -17,7 +17,7 @@ function inferKind(path: string): RootKind {
 }
 
 /**
- * The AI Skill Manager settings page (M11: slimmed to install/storage config only).
+ * The Skill & Harness Manager settings page (M11: slimmed to install/storage config only).
  * In order:
  *   1. Scan roots — the discovery dirs (enable/remove + add a root).
  *   2. Omnigent binary path — the install location.
@@ -275,7 +275,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
             .setValue((h.resumeCommand ?? []).join(" "))
             .onChange(async (v) => {
               const err = await this.plugin.setCustomHarnessResume(h.id, v);
-              if (err) new Notice(`AI Skill Manager: ${err}`);
+              if (err) new Notice(`Skill & Harness Manager: ${err}`);
             }),
         );
     });
@@ -315,7 +315,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
               pendingHarnessCmd,
             );
             if (err) {
-              new Notice(`AI Skill Manager: ${err}`);
+              new Notice(`Skill & Harness Manager: ${err}`);
               return;
             }
             this.display();

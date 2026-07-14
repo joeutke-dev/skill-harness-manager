@@ -1,4 +1,4 @@
-# AI Skill Manager
+# Skill & Harness Manager
 
 A desktop-only Obsidian plugin that discovers, browses, and launches the AI
 **skills, commands, and agents** scattered across your vault and your coding
@@ -59,7 +59,7 @@ npm run build       # tsc + esbuild production → main.js
 ## Install manually
 
 Copy `main.js`, `styles.css`, and `manifest.json` into
-`<vault>/.obsidian/plugins/ai-skill-manager/`, then enable **AI Skill Manager**
+`<vault>/.obsidian/plugins/skill-harness-manager/`, then enable **Skill & Harness Manager**
 in *Settings → Community plugins*.
 
 ## License

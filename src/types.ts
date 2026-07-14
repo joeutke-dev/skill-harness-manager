@@ -1,4 +1,4 @@
-// Shared types for the AI Skill Manager plugin.
+// Shared types for the Skill & Harness Manager plugin.
 
 import type { CustomHarness, SkillAgent } from "./launch";
 import type { LaunchedSession } from "./sessions";
