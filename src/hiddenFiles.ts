@@ -109,7 +109,7 @@ export class HiddenFilesController {
   private patchAdapter(): void {
     if (this.originalReconcileDeletion) return; // already patched
     const adapter = this.adapter();
-    const original = adapter.reconcileDeletion.bind(adapter) as OriginalReconcile;
+    const original: OriginalReconcile = adapter.reconcileDeletion.bind(adapter);
     this.originalReconcileDeletion = original;
     adapter.reconcileDeletion = async (realPath: string, path: string) => {
       if (isRevealableHiddenPath(path, this.configDir)) {

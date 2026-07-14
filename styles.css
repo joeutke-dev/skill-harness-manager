@@ -1,13 +1,13 @@
 /* Skill Layer — all styling lives here; no inline JS styles. */
 
+/* Higher specificity (leaf ancestor + both classes on the element) beats
+   Obsidian's `.workspace-leaf-content .view-content { padding }` without
+   !important, so the tab STRIP fills the full width + top of the pane (no gap).
+   Side/bottom padding lives on the content below (.skill-layer-tabcontent). */
+.workspace-leaf-content .view-content.skill-layer-view {
+  padding: 0;
+}
 .skill-layer-view {
-  /* No padding on the view — so the tab STRIP fills the full width and reaches
-     the very top of the pane (no gap). Side/bottom padding lives on the content
-     below (.skill-layer-tabcontent). !important because this element is also
-     Obsidian's `.view-content`, and the app stylesheet's contextual
-     `.workspace-leaf-content .view-content { padding }` rule (higher specificity)
-     would otherwise reintroduce a gap around the strip. */
-  padding: 0 !important;
   /* Never scroll horizontally (avoids the pane shifting when a tab is focused). */
   overflow-x: hidden;
   /* Body/page = the LIGHTER grey (--background-secondary-alt). The active tab and
@@ -65,9 +65,7 @@
   width: 9.8em;
   background: transparent;
   border: none;
-  /* !important: Obsidian's default <button> box-shadow otherwise leaks in the
-     non-hover state. The keyboard focus ring is re-added below with !important. */
-  box-shadow: none !important;
+  box-shadow: none;
   /* Tab height (~15% shorter than the prior +5px). */
   padding: calc(var(--size-4-3) + 2.5px) var(--size-4-2);
   color: var(--text-muted);
@@ -85,8 +83,10 @@
 }
 
 /* Short vertical divider between adjacent INACTIVE tabs (a centered pseudo, so
-   no width shift). Suppressed on the last tab and next to the active tab. */
-.skill-layer-tab:not(.is-active):not(:last-child)::after {
+   no width shift). The `has-divider` class is set in JS (renderTabBar) only when
+   this tab is inactive, not last, and its next sibling is also inactive — which
+   avoids a `:has()` selector (flagged for performance). */
+.skill-layer-tab.has-divider::after {
   content: "";
   position: absolute;
   right: 0;
@@ -95,13 +95,10 @@
   width: 1px;
   background: var(--background-modifier-border);
 }
-.skill-layer-tab:not(.is-active):has(+ .skill-layer-tab.is-active)::after {
-  display: none;
-}
 
 .skill-layer-tab:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--background-modifier-border-focus) !important;
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
 }
 
 /* Active tab: page color, rounded top, concave flare feet into the strip. */
@@ -120,19 +117,18 @@
   bottom: 0;
   width: var(--radius-l);
   height: var(--radius-l);
-  background: var(--background-secondary-alt);
 }
-/* #0000/#000 are MASK operators (transparent/opaque), not theme colors — they
-   carve the concave quarter-circle at each foot's outer-top corner. */
+/* A radial-gradient BACKGROUND (not a CSS mask — avoids the partially-supported
+   mask feature) carves the concave quarter-circle: transparent within the radius
+   from the outer-top corner, page color beyond, so each foot flares the active
+   tab into the darker strip. #0000 = transparent. */
 .skill-layer-tab.is-active::before {
   left: calc(-1 * var(--radius-l));
-  -webkit-mask: radial-gradient(circle at top left, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
-  mask: radial-gradient(circle at top left, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+  background: radial-gradient(circle at top left, #0000 var(--radius-l), var(--background-secondary-alt) calc(var(--radius-l) + 0.5px));
 }
 .skill-layer-tab.is-active::after {
   right: calc(-1 * var(--radius-l));
-  -webkit-mask: radial-gradient(circle at top right, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
-  mask: radial-gradient(circle at top right, #0000 var(--radius-l), #000 calc(var(--radius-l) + 0.5px));
+  background: radial-gradient(circle at top right, #0000 var(--radius-l), var(--background-secondary-alt) calc(var(--radius-l) + 0.5px));
 }
 
 
@@ -440,8 +436,7 @@
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  row-gap: var(--size-4-1);
-  column-gap: var(--size-4-2);
+  gap: var(--size-4-1) var(--size-4-2);
 }
 
 .skill-layer-action {
@@ -541,12 +536,14 @@
 /* When Open file reveals a skill's folder, Obsidian plays its built-in yellow
    "flash" highlight on the revealed nav item. It reads as tacky here, so suppress
    the flash (the folder still scrolls into view + shows as the active item). */
-.nav-folder-title.is-flashing,
-.nav-file-title.is-flashing,
-.tree-item-self.is-flashing {
-  animation: none !important;
-  background-color: transparent !important;
-  box-shadow: none !important;
+/* `body` prefix raises specificity above Obsidian's `.nav-*-title.is-flashing`
+   rule so we win without !important. */
+body .nav-folder-title.is-flashing,
+body .nav-file-title.is-flashing,
+body .tree-item-self.is-flashing {
+  animation: none;
+  background-color: transparent;
+  box-shadow: none;
 }
 
 /* Launch modal: full-width prompt textarea + muted hint line. */

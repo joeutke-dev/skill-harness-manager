@@ -1031,7 +1031,7 @@ export default class SkillLayerPlugin extends Plugin {
   /** True if `id` renders to an <svg> glyph via `setIcon` (naming-scheme agnostic). */
   private iconResolves(id: string): boolean {
     if (!id) return false;
-    const el = document.createElement("div");
+    const el = activeDocument.createElement("div");
     setIcon(el, id);
     // Confirm an actual <svg> was inserted (not merely some child node), so an
     // unknown id that produces a non-SVG node can't false-positive.
@@ -2039,10 +2039,11 @@ export default class SkillLayerPlugin extends Plugin {
   private async openInYamlViewer(fileToOpen: string): Promise<boolean> {
     const tfile = this.pathToVaultTFile(fileToOpen);
     if (
+      !(tfile instanceof TFile) ||
       !canOpenInYamlViewer({
         viewerEnabled: this.isYamlViewerEnabled(),
         fileToOpen,
-        hasTFile: tfile !== null,
+        hasTFile: true,
       })
     ) {
       return false;
@@ -2050,7 +2051,7 @@ export default class SkillLayerPlugin extends Plugin {
     try {
       await this.app.workspace.getLeaf(false).setViewState({
         type: YAML_VIEWER_VIEW_TYPE,
-        state: { file: (tfile as TFile).path },
+        state: { file: tfile.path },
         active: true,
       });
       return true;

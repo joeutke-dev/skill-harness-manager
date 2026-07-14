@@ -83,12 +83,19 @@ export class SkillBrowserView extends ItemView {
   /** The Skills | Agents tab bar; clicking a tab switches the rendered content. */
   private renderTabBar(root: HTMLElement): void {
     const bar = root.createDiv({ cls: "skill-layer-tabbar", attr: { role: "tablist" } });
-    for (const tab of TABS) {
+    TABS.forEach((tab, i) => {
       const active = this.activeTab === tab.id;
+      // Show a divider after this tab only when it AND its next sibling are both
+      // inactive (computed here so the CSS needn't use a `:has()` selector).
+      const next = TABS[i + 1];
+      const divider = !active && next !== undefined && this.activeTab !== next.id;
       // A DIV (role=tab), NOT a <button> — Obsidian's default button chrome
       // (background, padding, box-shadow) interferes with the Chrome-tab CSS.
       const btn = bar.createEl("div", {
-        cls: "skill-layer-tab" + (active ? " is-active" : ""),
+        cls:
+          "skill-layer-tab" +
+          (active ? " is-active" : "") +
+          (divider ? " has-divider" : ""),
         text: tab.label,
         attr: {
           role: "tab",
@@ -113,7 +120,7 @@ export class SkillBrowserView extends ItemView {
           activate();
         }
       });
-    }
+    });
   }
 
   /** Render the content for the active tab into the tab-content container. */
@@ -271,6 +278,9 @@ export class SkillBrowserView extends ItemView {
     selected: Set<string>,
   ): void {
     const field = bar.createDiv({ cls: "skill-layer-filter" });
+    // The document this view lives in (handles pop-out windows correctly, and
+    // keeps add/removeEventListener on the same document).
+    const doc = field.ownerDocument;
     const btn = field.createEl("button", {
       cls: "skill-layer-filter-select",
       attr: { "aria-label": label, "aria-haspopup": "listbox" },
@@ -325,7 +335,7 @@ export class SkillBrowserView extends ItemView {
       open = false;
       menu.removeClass("is-open");
       btn.removeClass("is-open");
-      document.removeEventListener("click", onDocClick, true);
+      doc.removeEventListener("click", onDocClick, true);
     };
     const openMenu = (): void => {
       if (open) return;
@@ -334,7 +344,7 @@ export class SkillBrowserView extends ItemView {
       btn.addClass("is-open");
       // Defer so the click that opened it doesn't immediately close it.
       window.setTimeout(
-        () => document.addEventListener("click", onDocClick, true),
+        () => doc.addEventListener("click", onDocClick, true),
         0,
       );
     };
@@ -459,15 +469,17 @@ export class SkillBrowserView extends ItemView {
     });
     setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
     launchBtn.createSpan({ text: " Launch session" });
-    launchBtn.addEventListener("click", () =>
-      this.plugin.launchCustomAgent(row.path),
-    );
+    launchBtn.addEventListener("click", () => {
+      void this.plugin.launchCustomAgent(row.path);
+    });
 
     const openBtn = actions.createEl("button", {
       cls: "skill-layer-action",
       text: "Open file",
     });
-    openBtn.addEventListener("click", () => this.plugin.openCustomAgent(row.path));
+    openBtn.addEventListener("click", () => {
+      void this.plugin.openCustomAgent(row.path);
+    });
 
     const cfgBtn = actions.createEl("button", {
       cls: "skill-layer-action skill-layer-action-gear",

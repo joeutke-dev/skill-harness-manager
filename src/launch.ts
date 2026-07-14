@@ -380,7 +380,7 @@ export interface CustomHarness {
 
 /** Strip ASCII control chars (incl. NUL / CR / LF) from an interpolated value. */
 export function stripControlChars(s: string): string {
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- intentional: strip C0/C1 control chars (incl. NUL/CR/LF) so an interpolated value can't inject newlines/terminators into a spawned command
   return s.replace(/[\x00-\x1f\x7f]/g, "");
 }
 
@@ -393,9 +393,13 @@ export function stripControlChars(s: string): string {
  */
 export function isValidCustomHarnessCommand(command: unknown): command is string[] {
   if (!Array.isArray(command) || command.length === 0) return false;
-  if (!command.every((t) => typeof t === "string" && t.length > 0)) return false;
-  if (!nodePath.isAbsolute(command[0])) return false;
-  return command.some((t) => t.includes(HARNESS_PROMPT_PLACEHOLDER));
+  const arr = command as unknown[];
+  if (!arr.every((t) => typeof t === "string" && t.length > 0)) return false;
+  const strs = arr as string[];
+  return (
+    nodePath.isAbsolute(strs[0]) &&
+    strs.some((t) => t.includes(HARNESS_PROMPT_PLACEHOLDER))
+  );
 }
 
 /**

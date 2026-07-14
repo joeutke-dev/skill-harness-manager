@@ -26,7 +26,6 @@ const MAX_DEPTH = 12;
 const IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
-  ".obsidian",
   ".trash",
   ".DS_Store",
 ]);
@@ -217,7 +216,7 @@ export class Detector {
     for (const f of listed.files) out.push(f);
     for (const sub of listed.folders) {
       const name = sub.replace(/\/+$/, "").split("/").pop() ?? "";
-      if (IGNORED_DIRS.has(name)) continue;
+      if (IGNORED_DIRS.has(name) || name === this.app.vault.configDir) continue;
       await this.walkAdapter(sub, depth + 1, out);
     }
   }
@@ -292,7 +291,9 @@ export class Detector {
     for (const entry of entries) {
       const full = nodePath.join(dir, entry.name);
       if (entry.isDirectory() || entry.isSymbolicLink()) {
-        if (IGNORED_DIRS.has(entry.name)) continue;
+        if (IGNORED_DIRS.has(entry.name) || entry.name === this.app.vault.configDir) {
+          continue;
+        }
         // Stat through symlinks so we descend into linked directories too.
         let isDir = entry.isDirectory();
         if (entry.isSymbolicLink()) {
