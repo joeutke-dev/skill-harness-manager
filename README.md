@@ -4,18 +4,17 @@
 
 If you've collected AI *skills* (`SKILL.md` files), commands, and agents across
 different tools — `.claude/`, `.codex/`, `.cursor/`, `.agents/`, marketplace
-folders, loose notes — they're scattered and hard to actually *use*. Skill and
-Harness Manager brings them into one place, lets you organize and filter them,
-and makes them **launchable with a click** so AI becomes a first-class part of
-how you work in your vault.
+folders, loose notes — they end up scattered and hard to actually use. This
+plugin gathers them into one place, lets you organize, filter, and tag them, and
+makes each one runnable with a click.
 
-> No bundled model, no inference, no network calls of its own. It discovers,
-> organizes, and launches — the actual work runs in whatever AI CLI you point it
+> No bundled model, no inference, no network calls of its own. It finds,
+> organizes, and launches; the actual work runs in whatever AI CLI you point it
 > at (Claude Code, Codex, omnigent, or your own).
 
-## Why it's useful
+## What you can do with it
 
-Deeper AI integration into your vault, triggered from where you already work:
+Run AI where you already work:
 
 - **Reformat a markdown note with one click** — pin a "clean up markdown" skill
   to the sidebar and run it on the current file.
@@ -34,7 +33,7 @@ Skills can be run from wherever is most convenient:
 - **Sidebar buttons** — pin any skill to its own ribbon icon (with a custom
   Lucide icon) to create one-click launchers for the skills you use most.
 - **Command palette** — every pinned skill also registers a command.
-- **The browser view** — open the unified browser and launch anything from there.
+- **The browser view** — open it and launch anything from there.
 
 ## The browser
 

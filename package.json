@@ -1,7 +1,7 @@
 {
   "name": "skill-harness-manager",
   "version": "0.1.2",
-  "description": "Browse and launch AI skills, commands, and agents from your vault and tool dot-folders, and manage the harnesses that run them.",
+  "description": "Keep your AI skills, commands, and agents in one place and run them from your vault — from the ribbon, the command palette, or by right-clicking a file.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
