@@ -1,4 +1,4 @@
-# Skill & Harness Manager
+# Skill and Harness Manager
 
 A desktop-only Obsidian plugin that discovers, browses, and launches the AI
 **skills, commands, and agents** scattered across your vault and your coding
@@ -49,7 +49,7 @@ filtering, and tagging work without one.
 ## Install
 
 **From Obsidian (recommended):** Settings → Community plugins → Browse → search
-**"Skill & Harness Manager"** → Install → Enable. No Node, no building — Obsidian
+**"Skill and Harness Manager"** → Install → Enable. No Node, no building — Obsidian
 downloads the prebuilt files for you.
 
 **Manual / pre-release:** download `main.js`, `manifest.json`, and `styles.css`
