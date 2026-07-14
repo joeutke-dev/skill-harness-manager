@@ -1,7 +1,7 @@
 {
 	"id": "skill-harness-manager",
 	"name": "Skill and Harness Manager",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"minAppVersion": "1.5.0",
 	"description": "Consolidate, organize, and launch your AI skills, commands, and agents from one place — from the ribbon, the command palette, or by right-clicking a file.",
 	"author": "Joe Utke",

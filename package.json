@@ -1,6 +1,6 @@
 {
   "name": "skill-harness-manager",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browse and launch AI skills, commands, and agents from your vault and tool dot-folders, and manage the harnesses that run them.",
   "main": "main.js",
   "scripts": {
