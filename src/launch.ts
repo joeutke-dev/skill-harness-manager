@@ -1018,13 +1018,23 @@ export function decodeAgentChoice(value: string): SkillAgent {
 export function omnigentCandidatePaths(
   override: string | undefined,
   homedir: string,
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
   const candidates: string[] = [];
   const ov = override?.trim();
   if (ov) candidates.push(ov);
-  candidates.push(`${homedir}/.local/bin/${OMNIGENT_BIN_NAME}`);
-  candidates.push(`/usr/local/bin/${OMNIGENT_BIN_NAME}`);
-  candidates.push(`/opt/homebrew/bin/${OMNIGENT_BIN_NAME}`);
+  if (platform === "win32") {
+    // Windows: uv-installed tools live under %USERPROFILE%\.local\bin; the binary
+    // carries an executable extension. (Auto-detect is best-effort on Windows —
+    // users typically set an explicit path in Settings.)
+    for (const ext of [".exe", ".cmd", ".bat"]) {
+      candidates.push(nodePath.join(homedir, ".local", "bin", OMNIGENT_BIN_NAME + ext));
+    }
+  } else {
+    candidates.push(`${homedir}/.local/bin/${OMNIGENT_BIN_NAME}`);
+    candidates.push(`/usr/local/bin/${OMNIGENT_BIN_NAME}`);
+    candidates.push(`/opt/homebrew/bin/${OMNIGENT_BIN_NAME}`);
+  }
   return candidates;
 }
 
@@ -1036,7 +1046,16 @@ export function omnigentCandidatePaths(
  */
 export function isAllowedOmnigentPath(p: string): boolean {
   if (!p) return false;
-  return nodePath.isAbsolute(p) && nodePath.basename(p) === OMNIGENT_BIN_NAME;
+  if (!nodePath.isAbsolute(p)) return false;
+  // Accept the bare binary name, or a Windows executable form
+  // (omnigent.exe / .cmd / .bat) so the allowlist works cross-platform.
+  const base = nodePath.basename(p).toLowerCase();
+  return (
+    base === OMNIGENT_BIN_NAME ||
+    base === `${OMNIGENT_BIN_NAME}.exe` ||
+    base === `${OMNIGENT_BIN_NAME}.cmd` ||
+    base === `${OMNIGENT_BIN_NAME}.bat`
+  );
 }
 
 export type BinaryResolution =

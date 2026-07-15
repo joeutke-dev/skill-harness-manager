@@ -100,7 +100,20 @@ export function buildTerminalScript(
   argv: string[],
   cwd: string,
   failHint: string,
-): string {
+  platform: NodeJS.Platform = process.platform,
+): { ext: string; content: string } {
+  if (platform === "win32") {
+    return { ext: ".bat", content: buildBatchScript(argv, cwd, failHint) };
+  }
+  // macOS uses `.command` (double-clickable / `open`-able in Terminal); other
+  // Unix uses `.sh`. Both share the same bash body.
+  return {
+    ext: platform === "darwin" ? ".command" : ".sh",
+    content: buildBashScript(argv, cwd, failHint),
+  };
+}
+
+function buildBashScript(argv: string[], cwd: string, failHint: string): string {
   const cmd = argv.map(shellSingleQuote).join(" ");
   const hint = failHint.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return [
@@ -114,6 +127,23 @@ export function buildTerminalScript(
     "fi",
     "",
   ].join("\n");
+}
+
+function buildBatchScript(argv: string[], cwd: string, failHint: string): string {
+  const q = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+  const cmd = argv.map(q).join(" ");
+  // Strip cmd.exe-special characters from the hint so `echo` prints it literally.
+  const safeHint = failHint.replace(/[%&|<>^()"]/g, " ");
+  return [
+    "@echo off",
+    `cd /d ${q(cwd)}`,
+    cmd,
+    "if not errorlevel 1 goto :done",
+    "echo.",
+    `echo ${safeHint}`,
+    ":done",
+    "",
+  ].join("\r\n");
 }
 
 /** Short label describing the reconnect target (shown on the row). */

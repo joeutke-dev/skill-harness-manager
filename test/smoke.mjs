@@ -53,6 +53,7 @@ const {
   isValidOmnigentServer,
   buildRightClickMenuItems,
   isAllowedOmnigentPath,
+  omnigentCandidatePaths,
   resolveOmnigentBinary,
   resolveAgentLaunch,
   isAllowedBuiltinAgent,
@@ -466,6 +467,16 @@ console.log("\n[M1] Binary allowlist + fail-closed resolution + PATH augment");
   check("reject relative path", !isAllowedOmnigentPath("omnigent"));
   check("reject wrong basename", !isAllowedOmnigentPath("/usr/local/bin/not-omnigent"));
   check("reject empty", !isAllowedOmnigentPath(""));
+  // Cross-platform: accept the Windows executable forms (path-absolute per host).
+  check("allow omnigent.exe", isAllowedOmnigentPath("/usr/local/bin/omnigent.exe"));
+  check("allow omnigent.cmd", isAllowedOmnigentPath("/usr/local/bin/omnigent.cmd"));
+  check("reject not-omnigent.exe", !isAllowedOmnigentPath("/usr/local/bin/not-omnigent.exe"));
+  // Candidate paths branch by platform.
+  const winCand = omnigentCandidatePaths(undefined, "/home/me", "win32");
+  check("win candidates include omnigent.exe", winCand.some((p) => p.endsWith("omnigent.exe")));
+  check("win candidates include omnigent.cmd", winCand.some((p) => p.endsWith("omnigent.cmd")));
+  const macCand = omnigentCandidatePaths(undefined, "/home/me", "darwin");
+  check("mac candidates include homebrew omnigent", macCand.includes("/opt/homebrew/bin/omnigent"));
 
   const exists = (p) => p === "/opt/homebrew/bin/omnigent";
   const ok = resolveOmnigentBinary({ override: "", homedir: "/Users/x", exists });
@@ -1809,14 +1820,23 @@ console.log("\n[u] sessions: resume argv / terminal script / labels / prune");
   );
   check("label: claude", resumeTargetLabel(cl).includes("continues latest"));
 
-  // buildTerminalScript: cd into the (quoted) cwd, run the resume argv, and show
-  // the fail hint on non-zero exit.
-  const script = buildTerminalScript(["/b/omnigent", "run", "-c"], "/Users/joe/My Vault", 'set a "vibe" resume cmd');
-  check("script has shebang", script.startsWith("#!/bin/bash\n"));
-  check("script cd's into quoted cwd", script.includes("cd '/Users/joe/My Vault' || exit 1"));
-  check("script runs resume argv", script.includes("'/b/omnigent' 'run' '-c'"));
-  check("script checks exit code", script.includes('if [ "$code" -ne 0 ]'));
-  check("script embeds fail hint", script.includes('set a \\"vibe\\" resume cmd'));
+  // buildTerminalScript is platform-aware and returns { ext, content }.
+  const mac = buildTerminalScript(["/b/omnigent", "run", "-c"], "/Users/joe/My Vault", 'set a "vibe" resume cmd', "darwin");
+  check("mac ext .command", mac.ext === ".command");
+  check("mac has shebang", mac.content.startsWith("#!/bin/bash\n"));
+  check("mac cd's into quoted cwd", mac.content.includes("cd '/Users/joe/My Vault' || exit 1"));
+  check("mac runs resume argv", mac.content.includes("'/b/omnigent' 'run' '-c'"));
+  check("mac checks exit code", mac.content.includes('if [ "$code" -ne 0 ]'));
+  check("mac embeds fail hint", mac.content.includes('set a \\"vibe\\" resume cmd'));
+  const lin = buildTerminalScript(["/b/codex", "resume", "--last"], "/v", "h", "linux");
+  check("linux ext .sh", lin.ext === ".sh");
+  check("linux bash body", lin.content.startsWith("#!/bin/bash\n"));
+  const win = buildTerminalScript(["C:\\bin\\claude.exe", "--continue"], "C:\\My Vault", "set a resume cmd (Settings)", "win32");
+  check("win ext .bat", win.ext === ".bat");
+  check("win cd /d quoted", win.content.includes('cd /d "C:\\My Vault"'));
+  check("win quotes argv", win.content.includes('"C:\\bin\\claude.exe" "--continue"'));
+  check("win errorlevel guard", win.content.includes("if not errorlevel 1 goto :done"));
+  check("win hint stripped of specials", win.content.includes("echo set a resume cmd  Settings ") && !win.content.includes("("));
 
   // isSessionExpired: 12h boundary.
   const now = 1_000_000_000_000;

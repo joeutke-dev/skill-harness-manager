@@ -963,20 +963,14 @@ export default class SkillLayerPlugin extends Plugin {
     });
     if (resolution.status !== "ok") return finish([]);
 
-    const env = {
-      ...process.env,
-      PATH: augmentPath(process.env.PATH, [
-        "/usr/local/bin",
-        `${os.homedir()}/.local/bin`,
-        "/opt/homebrew/bin",
-      ]),
-    };
+    const env = this.launchEnv();
     let child;
     try {
       // Fixed args only; no user input. stdout piped for parsing; stderr/stdin ignored.
       child = spawn(resolution.path, ["config", "list"], {
         env,
         shell: false,
+        windowsHide: true,
         stdio: ["ignore", "pipe", "ignore"],
       });
     } catch (err) {
@@ -1808,33 +1802,39 @@ export default class SkillLayerPlugin extends Plugin {
    * the real vault. `successNotice` is shown once spawn succeeds. `label` names
    * the process in error Notices (defaults to "omnigent").
    */
+  /**
+   * Env for a launched child: process.env with PATH widened by the platform's
+   * common install dirs (GUI apps inherit a thin launchd PATH on macOS). Never
+   * mutates process.env.
+   */
+  private launchEnv(): NodeJS.ProcessEnv {
+    const home = os.homedir();
+    const extras =
+      process.platform === "win32"
+        ? [nodePath.join(home, ".local", "bin")]
+        : ["/usr/local/bin", `${home}/.local/bin`, "/opt/homebrew/bin"];
+    return { ...process.env, PATH: augmentPath(process.env.PATH, extras) };
+  }
+
   private spawnOmnigent(
     argv: string[],
     cwd: string,
     successNotice: string,
     label = "omnigent",
   ): void {
-    // GUI apps inherit a thin launchd PATH; the launched binary execs sub-tools
-    // (and any sibling CLIs it depends on), so widen PATH (de-duped) with the
-    // common install dirs without mutating process.env.
-    const env = {
-      ...process.env,
-      PATH: augmentPath(process.env.PATH, [
-        "/usr/local/bin",
-        `${os.homedir()}/.local/bin`,
-        "/opt/homebrew/bin",
-      ]),
-    };
+    const env = this.launchEnv();
 
     let child;
     try {
-      // argv[0] is the binary; the rest are inert array args. shell:false.
+      // argv[0] is the binary; the rest are inert array args. shell:false
+      // (never true — the prompt is untrusted) so args are never shell-parsed.
       // stdio: ignore stdin+stdout at the OS level (no unconsumed pipe); keep
       // stderr piped for bounded error-surfacing.
       child = spawn(argv[0], argv.slice(1), {
         cwd,
         env,
         shell: false,
+        windowsHide: true,
         stdio: ["ignore", "ignore", "pipe"],
       });
     } catch (err) {
@@ -1966,12 +1966,30 @@ export default class SkillLayerPlugin extends Plugin {
         hint = `Skill and Harness Manager: could not resume — the session may have ended or is no longer resumable.`;
       }
 
-      const script = buildTerminalScript(argv, s.cwd, hint);
-      const file = `${os.tmpdir()}/skill-layer-resume-${s.tool}-${Date.now()}.command`;
-      fs.writeFileSync(file, script, { mode: 0o755 });
-      const child = spawn("/usr/bin/open", [file], {
+      const plat = process.platform;
+      const { ext, content } = buildTerminalScript(argv, s.cwd, hint, plat);
+      const file = `${os.tmpdir()}/skill-harness-resume-${s.tool}-${Date.now()}${ext}`;
+      fs.writeFileSync(file, content, plat === "win32" ? {} : { mode: 0o755 });
+
+      // Open the script in the user's terminal, per platform.
+      let opener: string;
+      let openerArgs: string[];
+      if (plat === "win32") {
+        // `start "" file.bat` opens it in a new console window.
+        opener = "cmd.exe";
+        openerArgs = ["/c", "start", "", file];
+      } else if (plat === "darwin") {
+        opener = "/usr/bin/open";
+        openerArgs = [file];
+      } else {
+        // Linux: best-effort — the user's terminal, else x-terminal-emulator.
+        opener = process.env.TERMINAL || "x-terminal-emulator";
+        openerArgs = ["-e", "bash", file];
+      }
+      const child = spawn(opener, openerArgs, {
         stdio: "ignore",
         detached: true,
+        windowsHide: false,
       });
       child.unref?.();
       new Notice(`Connecting to "${s.skillName}" (${label}) in your terminal…`);

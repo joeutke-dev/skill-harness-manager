@@ -166,9 +166,61 @@ export class Detector {
     return skills;
   }
 
-  // --- Path 2: DataAdapter recursive walk (dot-folders) ------------------
+  // --- Path 2: dot-folders (.claude/, .codex/, …) ------------------------
   private async scanAdapterRoot(root: ScanRoot): Promise<Skill[]> {
     const base = this.vaultBasePath();
+    // On desktop, walk dot-folders with Node `fs`. Obsidian's `adapter.list()`
+    // does NOT surface hidden dot-folders (e.g. `.claude/`) on Windows the way it
+    // does on macOS (Windows marks dot-prefixed folders hidden), so relying on it
+    // silently drops those skills. `fs` lists them on every OS. The adapter path
+    // remains as a fallback for environments without filesystem access.
+    if (base && this.canScanExternal()) {
+      return this.scanAdapterRootViaFs(root, base);
+    }
+    return this.scanAdapterRootViaAdapter(root, base);
+  }
+
+  /** Desktop dot-folder walk via Node `fs` (cross-platform, sees hidden dirs). */
+  private async scanAdapterRootViaFs(
+    root: ScanRoot,
+    base: string,
+  ): Promise<Skill[]> {
+    const skills: Skill[] = [];
+    const absStart = nodePath.join(base, root.path);
+    let rootReal: string;
+    try {
+      rootReal = await fs.promises.realpath(absStart);
+    } catch {
+      return []; // root folder absent — nothing to scan
+    }
+    const files: string[] = [];
+    await this.walkFs(absStart, rootReal, 0, files, new Set<string>());
+    for (const abs of files) {
+      if (!isMarkdown(abs)) continue;
+      let content: string;
+      try {
+        content = await fs.promises.readFile(abs, "utf8");
+      } catch (err) {
+        console.error(`[skill-layer] fs.readFile failed for ${abs}:`, err);
+        continue;
+      }
+      // Vault-relative, forward-slash path (matches adapter ids for dedupe).
+      const rel = nodePath.relative(base, abs).split(nodePath.sep).join("/");
+      const fm = parseFrontmatter(content);
+      const fields = evaluateSkill(rel, fm, () => firstHeading(content));
+      if (!fields) continue;
+      skills.push(
+        this.makeSkill(fields, normalizePath(abs), rel, root.path, "adapter", fm.tags ?? [], rel),
+      );
+    }
+    return skills;
+  }
+
+  /** Fallback dot-folder walk via Obsidian's adapter (non-desktop). */
+  private async scanAdapterRootViaAdapter(
+    root: ScanRoot,
+    base: string | null,
+  ): Promise<Skill[]> {
     const start = normalizePath(root.path);
     const skills: Skill[] = [];
     const adapter = this.app.vault.adapter;
