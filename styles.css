@@ -943,3 +943,8 @@ body .tree-item-self.is-flashing {
 .skill-layer-view.skill-layer-minimal .skill-layer-tab.is-active::after {
   background: radial-gradient(circle at top right, #0000 var(--radius-l), var(--background-primary) calc(var(--radius-l) + 0.5px));
 }
+
+/* Off-screen file input used only to trigger the native folder picker. */
+.skill-layer-hidden-input {
+  display: none;
+}
