@@ -91,6 +91,7 @@ const {
   resolveSkillHarness,
   parseHarnessCommandLine,
   parseConfiguredHarnesses,
+  toInteractiveArgv,
 } = await import(pathToFileURL(outfile).href);
 
 // M10: pure tab-state + Agents-tab render-model helpers (no Obsidian).
@@ -176,9 +177,31 @@ const {
   sessionToolFromCommand,
   buildResumeArgv,
   buildTerminalScript,
+  buildRawTerminalScript,
   resumeTargetLabel,
   relativeTime,
 } = await import(pathToFileURL(sessionsOut).href);
+
+// Preferred-terminal registry + detection + opener command (pure; fs injected).
+const terminalOut = join(builtDir, "terminal.mjs");
+await esbuild.build({
+  entryPoints: [join(here, "..", "src", "terminal.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: terminalOut,
+  logLevel: "silent",
+});
+const {
+  KNOWN_TERMINALS,
+  terminalById,
+  terminalBinCandidates,
+  detectInstalledTerminals,
+  resolvePreferredTerminal,
+  buildOpenerCommand,
+  buildDefaultOpener,
+  TMUX_SESSION,
+} = await import(pathToFileURL(terminalOut).href);
 
 // hiddenFiles.ts imports `obsidian` (App type + FileSystemAdapter value) which
 // has no runtime JS package, so stub it — we only exercise the pure
@@ -1123,8 +1146,8 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "commands", "sessions", "agents", "harnesses"]));
-  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Sessions", "Agents", "Harnesses"]));
+  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "commands", "scripts", "sessions", "agents", "harnesses"]));
+  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Scripts", "Sessions", "Agents", "Harnesses"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
@@ -1824,6 +1847,7 @@ console.log("\n[u] sessions: resume argv / terminal script / labels / prune");
   const mac = buildTerminalScript(["/b/omnigent", "run", "-c"], "/Users/joe/My Vault", 'set a "vibe" resume cmd', "darwin");
   check("mac ext .command", mac.ext === ".command");
   check("mac has shebang", mac.content.startsWith("#!/bin/bash\n"));
+  check("mac self-deletes ($0)", mac.content.includes('rm -f "$0"'));
   check("mac cd's into quoted cwd", mac.content.includes("cd '/Users/joe/My Vault' || exit 1"));
   check("mac runs resume argv", mac.content.includes("'/b/omnigent' 'run' '-c'"));
   check("mac checks exit code", mac.content.includes('if [ "$code" -ne 0 ]'));
@@ -1848,6 +1872,109 @@ console.log("\n[u] sessions: resume argv / terminal script / labels / prune");
   eq("relativeTime seconds", relativeTime(now - 5000, now), "5s ago");
   eq("relativeTime minutes", relativeTime(now - 5 * 60_000, now), "5m ago");
   eq("relativeTime hours", relativeTime(now - (2 * 60 + 15) * 60_000, now), "2h 15m ago");
+}
+
+// =====================================================================
+// Preferred terminal: detection, fail-closed resolve, opener command.
+// =====================================================================
+console.log("\n[terminal] Preferred-terminal registry + detection + opener");
+{
+  const HOME = "/Users/me";
+  // auto is always first + always detected; GUI emulators need an app bundle.
+  check("auto is first known terminal", KNOWN_TERMINALS[0].id === "auto");
+
+  // Ghostty present as an APP BUNDLE ONLY (no CLI binary) + tmux binary present.
+  const tmuxBin = "/opt/homebrew/bin/tmux";
+  const present = new Set(["/Applications/Ghostty.app", tmuxBin]);
+  const detected = detectInstalledTerminals({
+    homedir: HOME,
+    appDirs: ["/Applications"],
+    exists: (p) => present.has(p),
+    platform: "darwin",
+  });
+  check("auto always detected", detected.some((d) => d.def.id === "auto"));
+  check("Ghostty detected (app bundle present)", detected.some((d) => d.def.id === "ghostty" && d.binPath === undefined));
+  check("tmux detected with bin path", detected.some((d) => d.def.id === "tmux" && d.binPath === tmuxBin));
+  check("iTerm NOT detected (no bundle)", !detected.some((d) => d.def.id === "iterm"));
+
+  // When the ghostty CLI binary IS present, detection attaches its path.
+  const withBin = detectInstalledTerminals({
+    homedir: HOME,
+    appDirs: ["/Applications"],
+    exists: (p) => p === "/opt/homebrew/bin/ghostty" || p === "/Applications/Ghostty.app",
+    platform: "darwin",
+  });
+  const ghosttyBin = withBin.find((d) => d.def.id === "ghostty");
+  check("Ghostty detected with CLI binPath when present", ghosttyBin?.binPath === "/opt/homebrew/bin/ghostty");
+
+  // Off macOS, only auto is offered.
+  const linux = detectInstalledTerminals({ homedir: HOME, appDirs: ["/Applications"], exists: () => true, platform: "linux" });
+  check("non-macOS → only auto", linux.length === 1 && linux[0].def.id === "auto");
+
+  // resolvePreferredTerminal fails closed to auto.
+  eq("preferred honored when detected", resolvePreferredTerminal("ghostty", detected).def.id, "ghostty");
+  eq("stale preferred → auto", resolvePreferredTerminal("iterm", detected).def.id, "auto");
+  eq("blank preferred → auto", resolvePreferredTerminal("", detected).def.id, "auto");
+
+  // buildOpenerCommand: app-bundle-only Ghostty falls back to `open -na … -e bash`.
+  const ghostty = resolvePreferredTerminal("ghostty", detected);
+  const gop = buildOpenerCommand({ terminal: ghostty, scriptPath: "/tmp/s.command", platform: "darwin" });
+  check("Ghostty (app only) opener uses open -na … -e bash", gop.bin === "/usr/bin/open" && gop.args.includes("Ghostty") && gop.args.includes("-e") && gop.args[gop.args.length - 1] === "/tmp/s.command");
+  // With the CLI binary, the reliable `ghostty -e bash <script>` form is used.
+  const gopBin = buildOpenerCommand({ terminal: ghosttyBin, scriptPath: "/tmp/s.command", platform: "darwin" });
+  check("Ghostty (CLI) opener is `ghostty -e bash <script>`", deepEq(gopBin, { bin: "/opt/homebrew/bin/ghostty", args: ["-e", "bash", "/tmp/s.command"] }));
+  const tmux = resolvePreferredTerminal("tmux", detected);
+  const top = buildOpenerCommand({ terminal: tmux, scriptPath: "/tmp/s.command", platform: "darwin" });
+  check("tmux opener new-session -A -s", top.bin === tmuxBin && deepEq(top.args, ["new-session", "-A", "-s", TMUX_SESSION, "bash", "/tmp/s.command"]));
+  const auto = resolvePreferredTerminal("", detected);
+  const aop = buildOpenerCommand({ terminal: auto, scriptPath: "/tmp/s.command", platform: "darwin" });
+  check("auto opener is default `open <script>`", deepEq(aop, { bin: "/usr/bin/open", args: ["/tmp/s.command"] }));
+
+  // Default opener per platform.
+  check("default opener win32 uses start", deepEq(buildDefaultOpener("C:\\s.bat", "win32"), { bin: "cmd.exe", args: ["/c", "start", "", "C:\\s.bat"] }));
+  check("default opener linux uses $TERMINAL/bash", deepEq(buildDefaultOpener("/tmp/s.sh", "linux", "kitty"), { bin: "kitty", args: ["-e", "bash", "/tmp/s.sh"] }));
+
+  // bin candidates probe standard dirs.
+  check("tmux bin candidates include /opt/homebrew/bin", terminalBinCandidates("tmux", HOME, "darwin").includes("/opt/homebrew/bin/tmux"));
+  check("terminalById resolves", terminalById("tmux").id === "tmux");
+}
+
+// =====================================================================
+// Raw terminal script (Bash Scripts tab): embeds body verbatim after a cd.
+// =====================================================================
+console.log("\n[cli] buildRawTerminalScript embeds the body after cd");
+{
+  const mac = buildRawTerminalScript("vibe update\necho done", "/My Vault", "darwin");
+  check("mac ext .command", mac.ext === ".command");
+  check("mac shebang first", mac.content.startsWith("#!/bin/bash\n"));
+  check("mac self-deletes ($0)", mac.content.includes('rm -f "$0"'));
+  check("mac cd quoted after self-delete", mac.content.includes("cd '/My Vault' || exit 1"));
+  check("mac embeds body verbatim", mac.content.includes("vibe update\necho done"));
+  const win = buildRawTerminalScript("vibe update", "C:\\My Vault", "win32");
+  check("win ext .bat", win.ext === ".bat");
+  check("win cd /d quoted", win.content.includes('cd /d "C:\\My Vault"'));
+  check("win embeds body", win.content.includes("vibe update"));
+}
+
+// =====================================================================
+// Terminal mode: interactive argv (strip headless -p) + keep-open script.
+// =====================================================================
+console.log("\n[terminal] interactive argv + keep-open");
+{
+  // -p / --print are stripped so the CLI opens interactively; prompt stays.
+  check("strips -p", deepEq(toInteractiveArgv(["/b/isaac", "-p", "Use the x skill."]), ["/b/isaac", "Use the x skill."]));
+  check("strips --print", deepEq(toInteractiveArgv(["/b/claude", "--print", "hi"]), ["/b/claude", "hi"]));
+  check("binary always kept", toInteractiveArgv(["/b/isaac", "-p", "x"])[0] === "/b/isaac");
+  check("no headless flag → unchanged", deepEq(toInteractiveArgv(["/b/omnigent", "run", "x"]), ["/b/omnigent", "run", "x"]));
+  check("empty argv safe", deepEq(toInteractiveArgv([]), []));
+
+  // keepOpen appends an interactive shell so the window stays usable.
+  const open = buildTerminalScript(["/b/isaac", "x"], "/v", "h", "darwin", true);
+  check("keepOpen mac execs interactive shell", open.content.includes('exec "${SHELL:-/bin/bash}" -i'));
+  const noOpen = buildTerminalScript(["/b/isaac", "x"], "/v", "h", "darwin", false);
+  check("no keepOpen → no exec shell", !noOpen.content.includes("exec \"${SHELL"));
+  const winOpen = buildTerminalScript(["C:\\b\\isaac.exe", "x"], "C:\\v", "h", "win32", true);
+  check("keepOpen win uses cmd /k", winOpen.content.includes("cmd /k"));
 }
 
 // =====================================================================

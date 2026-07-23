@@ -42,10 +42,32 @@ A single view (`brain-circuit` ribbon icon) with tabs:
 - **Skills** / **Commands** — everything discovered across your scan roots,
   grouped into a collapsible source-folder tree, each with its description and
   tags. Multi-select filters by agent, harness, tag, and access, plus search.
+- **Scripts** — your own bash scripts (add a name, description, and body right in
+  the tab). Each script runs on click, in a terminal or headless, per its own
+  setting — handy for maintenance commands like updating or launching a harness.
 - **Sessions** — the launches you've started, with a **Connect** button that
   reopens the session in your terminal. Auto-pruned after 12h.
 - **Agents** / **Harnesses** — the agents you can run skills as, and the
   launchers that actually run them.
+
+The plugin also seeds one **example skill** into `.agents/skills/` on first run
+(tagged `#example`) so a fresh install has something to explore. Editing or
+deleting it is safe — it is never recreated.
+
+## Launch modes: headless or terminal
+
+Every skill/command can run one of two ways:
+
+- **Headless** — spawned in the background (omnigent or a custom harness);
+  progress surfaces via notices and the Sessions tab.
+- **Terminal** — runs the *same* harness command, but visibly in a terminal
+  window in the vault so you can watch it and interact.
+
+Set the **default launch mode** and your **preferred terminal** in Settings →
+*General*. The preferred-terminal list is autodetected from the emulators you
+have installed (Terminal, iTerm, Ghostty, kitty, WezTerm, Warp, tmux); *Auto*
+uses your OS default terminal. Override the mode per skill in its ⚙ Configure
+panel.
 
 ## Harnesses (how skills get run)
 

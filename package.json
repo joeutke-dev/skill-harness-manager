@@ -1,6 +1,6 @@
 {
   "name": "skill-harness-manager",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Keep your AI skills, commands, and agents in one place and run them from your vault — from the ribbon, the command palette, or by right-clicking a file.",
   "main": "main.js",
   "scripts": {

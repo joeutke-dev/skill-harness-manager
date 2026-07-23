@@ -1,6 +1,7 @@
 // Pure parsing helpers — no Obsidian or Node imports, so they are trivially
 // testable and safe to use from every code path.
 
+import { toolFolderForPath } from "./folders";
 import { SkillTag } from "./types";
 
 export interface ParsedFrontmatter {
@@ -111,14 +112,17 @@ export function firstHeading(content: string): string | null {
 }
 
 /**
- * Infer a harness/source label from an absolute path. Order matters — more
- * specific patterns first.
+ * Infer a source-folder label from an absolute path, used to GROUP items in the
+ * browser. Prefer the ACTUAL tool folder the item lives under (e.g.
+ * `.claude/skills`, `.codex/prompts`, `.claude/agents`) so the group header names
+ * the real folder being read. Falls back to broader patterns for paths outside
+ * the known tool folders (marketplace bundles, loose omnigent bundles, or a plain
+ * vault note).
  */
 export function inferSourceLabel(absPath: string): string {
+  const toolFolder = toolFolderForPath(absPath);
+  if (toolFolder) return toolFolder;
   const p = absPath.replace(/\\/g, "/").toLowerCase();
-  if (p.includes("/.claude/")) return ".claude";
-  if (p.includes("/.codex/") || p.includes("/codex/skills")) return "codex";
-  if (p.includes("/.agents/")) return ".agents";
   if (p.includes("/marketplace/")) return "marketplace";
   if (p.includes("/omnigent/") || p.includes("/skills/")) return "omnigent-bundle";
   return "vault";

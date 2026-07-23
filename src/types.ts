@@ -3,6 +3,33 @@
 import type { CustomHarness, SkillAgent } from "./launch";
 import type { LaunchedSession } from "./sessions";
 
+/**
+ * How a skill/command/script is launched:
+ * - `headless` — spawned detached (the prior behavior); output surfaces only via
+ *   Notices and the Sessions tab.
+ * - `terminal` — opens the user's default terminal running the preferred CLI (or,
+ *   for a script, the script body) interactively in the vault.
+ */
+export type LaunchMode = "headless" | "terminal";
+
+/**
+ * A user-defined bash script (Bash Scripts tab). Stored plugin-local in data.json;
+ * `body` is a full shell script authored by the user and run ONLY on an explicit
+ * click (same trust model as custom harnesses). `launchMode` is per-script.
+ */
+export interface BashScript {
+  /** Stable id (generated from the label). */
+  id: string;
+  /** Display name. */
+  label: string;
+  /** Optional one-line description shown on the row. */
+  description?: string;
+  /** The shell script body (multi-line allowed). */
+  body: string;
+  /** headless (detached, Notices only) or terminal (visible, live output). */
+  launchMode: LaunchMode;
+}
+
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
 
@@ -155,6 +182,46 @@ export interface SkillLayerSettings {
    */
   sessions: LaunchedSession[];
   /**
+   * Preferred TERMINAL EMULATOR id (a `KNOWN_TERMINALS` id from `terminal.ts`)
+   * used for TERMINAL launches — which terminal app opens to run the skill's
+   * harness command. Blank / "auto" = the OS default terminal. Re-validated
+   * fail-closed at launch by `resolvePreferredTerminal` against the
+   * actually-detected set, so a stale/uninstalled id falls back to auto.
+   * Plugin-local state.
+   */
+  preferredTerminal: string;
+  /**
+   * Global default launch mode for skills/commands (headless or terminal). A
+   * per-item override in `skillLaunchMode` wins when present. Default `headless`
+   * (the prior behavior). Plugin-local state.
+   */
+  defaultLaunchMode: LaunchMode;
+  /**
+   * Per-item launch-mode OVERRIDE, keyed by skill/command id (the same stable
+   * path used across the other per-skill maps). Absent key = use
+   * `defaultLaunchMode`. Plugin-local state; never written into any SKILL.md.
+   */
+  skillLaunchMode: Record<string, LaunchMode>;
+  /**
+   * User-defined bash scripts (Bash Scripts tab). Each is `{id,label,description?,
+   * body,launchMode}`; the body runs only on explicit click. Managed from the
+   * tab's add/edit form. Plugin-local state — never written into any SKILL.md.
+   */
+  bashScripts: BashScript[];
+  /**
+   * Preferred width (px) the browser side panel opens at, so the ribbon/command
+   * open always uses a consistent "proper" width rather than whatever the user
+   * last dragged the sidebar to. Applied best-effort to the right sidebar's
+   * container on open (undocumented layout internals; no-ops if unavailable).
+   */
+  panelWidth: number;
+  /**
+   * True once the bundled example skill has been seeded to
+   * `<vault>/.agents/skills/`. Set after the first successful seed so deleting the
+   * example never recreates it. Plugin-local state.
+   */
+  seededExample?: boolean;
+  /**
    * Global default pinned-ribbon icon — the fallback used by any pinned skill
    * that has no per-skill icon in `skillIcons`. Set via the settings selector
    * (also the migration fallback for pins created before per-skill icons).
@@ -180,4 +247,9 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   appendVaultAnchor: true,
   showHiddenFolders: false,
   sessions: [],
+  preferredTerminal: "",
+  defaultLaunchMode: "headless",
+  skillLaunchMode: {},
+  bashScripts: [],
+  panelWidth: 520,
 };

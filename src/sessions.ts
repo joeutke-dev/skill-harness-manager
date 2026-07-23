@@ -101,23 +101,65 @@ export function buildTerminalScript(
   cwd: string,
   failHint: string,
   platform: NodeJS.Platform = process.platform,
+  keepOpen = false,
 ): { ext: string; content: string } {
   if (platform === "win32") {
-    return { ext: ".bat", content: buildBatchScript(argv, cwd, failHint) };
+    return { ext: ".bat", content: buildBatchScript(argv, cwd, failHint, keepOpen) };
   }
   // macOS uses `.command` (double-clickable / `open`-able in Terminal); other
   // Unix uses `.sh`. Both share the same bash body.
   return {
     ext: platform === "darwin" ? ".command" : ".sh",
-    content: buildBashScript(argv, cwd, failHint),
+    content: buildBashScript(argv, cwd, failHint, keepOpen),
   };
 }
 
-function buildBashScript(argv: string[], cwd: string, failHint: string): string {
+/**
+ * A terminal script that `cd`s into `cwd` and runs a RAW user-authored script
+ * `body` (the Bash Scripts tab). Unlike `buildTerminalScript` this embeds the
+ * body verbatim (it IS shell source the user wrote), not a quoted argv. `cwd` is
+ * still POSIX/quote-escaped. Used for the visible-terminal script-run path.
+ */
+export function buildRawTerminalScript(
+  body: string,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform,
+): { ext: string; content: string } {
+  if (platform === "win32") {
+    return {
+      ext: ".bat",
+      content: ["@echo off", `cd /d "${cwd.replace(/"/g, '""')}"`, body, ""].join(
+        "\r\n",
+      ),
+    };
+  }
+  return {
+    ext: platform === "darwin" ? ".command" : ".sh",
+    content: [
+      "#!/bin/bash",
+      // Self-delete so terminal session-restore (e.g. Ghostty/macOS reopen) can't
+      // re-run this script and spawn a duplicate. The open fd keeps running fine.
+      'rm -f "$0"',
+      `cd ${shellSingleQuote(cwd)} || exit 1`,
+      body,
+      "",
+    ].join("\n"),
+  };
+}
+
+function buildBashScript(
+  argv: string[],
+  cwd: string,
+  failHint: string,
+  keepOpen = false,
+): string {
   const cmd = argv.map(shellSingleQuote).join(" ");
   const hint = failHint.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return [
+  const lines = [
     "#!/bin/bash",
+    // Self-delete so terminal session-restore (e.g. Ghostty/macOS reopen) can't
+    // re-run this script and spawn a duplicate. The open fd keeps running fine.
+    'rm -f "$0"',
     `cd ${shellSingleQuote(cwd)} || exit 1`,
     cmd,
     "code=$?",
@@ -125,16 +167,25 @@ function buildBashScript(argv: string[], cwd: string, failHint: string): string 
     '  echo ""',
     `  echo "${hint}"`,
     "fi",
-    "",
-  ].join("\n");
+  ];
+  // Keep the window usable after the command exits: drop into an interactive
+  // shell in the same cwd so the user can continue (e.g. resume the session).
+  if (keepOpen) lines.push('exec "${SHELL:-/bin/bash}" -i');
+  lines.push("");
+  return lines.join("\n");
 }
 
-function buildBatchScript(argv: string[], cwd: string, failHint: string): string {
+function buildBatchScript(
+  argv: string[],
+  cwd: string,
+  failHint: string,
+  keepOpen = false,
+): string {
   const q = (s: string): string => `"${s.replace(/"/g, '""')}"`;
   const cmd = argv.map(q).join(" ");
   // Strip cmd.exe-special characters from the hint so `echo` prints it literally.
   const safeHint = failHint.replace(/[%&|<>^()"]/g, " ");
-  return [
+  const lines = [
     "@echo off",
     `cd /d ${q(cwd)}`,
     cmd,
@@ -142,8 +193,11 @@ function buildBatchScript(argv: string[], cwd: string, failHint: string): string
     "echo.",
     `echo ${safeHint}`,
     ":done",
-    "",
-  ].join("\r\n");
+  ];
+  // Keep the console open with a fresh prompt so the user can continue.
+  if (keepOpen) lines.push("cmd /k");
+  lines.push("");
+  return lines.join("\r\n");
 }
 
 /** Short label describing the reconnect target (shown on the row). */

@@ -46,7 +46,24 @@ export class SkillConfigModal extends Modal {
     c.empty();
     const skill = this.skill;
 
-    // Order (M16): Harness → Agent → Add to Ribbon → right-click → Copy.
+    // Order: Launch mode → Harness → Agent → Add to Ribbon → right-click → Copy.
+
+    // 0) Per-skill LAUNCH MODE override (headless vs terminal). "" = use the
+    // global default set in Settings. Terminal mode opens the preferred CLI.
+    new Setting(c)
+      .setName("Launch mode")
+      .setDesc(
+        "How Run launches this. Default uses the global setting. Terminal opens your preferred CLI in a terminal.",
+      )
+      .addDropdown((d) => {
+        d.addOption("", `Default (${this.plugin.settings.defaultLaunchMode})`);
+        d.addOption("headless", "Headless");
+        d.addOption("terminal", "Terminal");
+        d.setValue(this.plugin.launchModeOptionValue(skill.id));
+        d.onChange(async (v) => {
+          await this.plugin.setSkillLaunchMode(skill.id, v);
+        });
+      });
 
     // 1) Per-skill HARNESS (M15). Omnigent harnesses are labelled "omnigent - X"
     // to distinguish them from user-defined custom harnesses.
@@ -260,6 +277,62 @@ export class AgentConfigModal extends Modal {
           .setButtonText("Copy")
           .onClick(() => void this.plugin.copyCustomAgentInvocation(this.agentPath)),
       );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * A minimal single-line text prompt modal — used to ask for a new skill/command
+ * name before creating it. Calls `onSubmit(value)` with the trimmed input (only
+ * when non-empty); Enter submits, Cancel/Escape closes without calling back.
+ */
+export class PromptModal extends Modal {
+  private title: string;
+  private placeholder: string;
+  private ctaLabel: string;
+  private onSubmit: (value: string) => void;
+
+  constructor(
+    app: App,
+    opts: { title: string; placeholder?: string; cta?: string; onSubmit: (value: string) => void },
+  ) {
+    super(app);
+    this.title = opts.title;
+    this.placeholder = opts.placeholder ?? "";
+    this.ctaLabel = opts.cta ?? "Create";
+    this.onSubmit = opts.onSubmit;
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(this.title);
+    this.modalEl.addClass("skill-layer-config-modal");
+    const input = this.contentEl.createEl("input", {
+      cls: "skill-layer-prompt-input",
+      attr: { type: "text", placeholder: this.placeholder, "aria-label": this.title },
+    });
+    window.setTimeout(() => input.focus(), 0);
+
+    let done = false;
+    const submit = (): void => {
+      const v = input.value.trim();
+      if (!v || done) return;
+      done = true;
+      this.close();
+      this.onSubmit(v);
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+
+    const buttons = new Setting(this.contentEl);
+    buttons.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()));
+    buttons.addButton((b) => b.setButtonText(this.ctaLabel).setCta().onClick(submit));
   }
 
   onClose(): void {

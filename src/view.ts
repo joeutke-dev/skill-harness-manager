@@ -1,17 +1,24 @@
-import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
-import { AgentConfigModal, LaunchModal, SkillConfigModal } from "./configModal";
+import { ItemView, Menu, Notice, WorkspaceLeaf, setIcon } from "obsidian";
+import { AgentConfigModal, LaunchModal, PromptModal, SkillConfigModal } from "./configModal";
+import { inferSourceLabel } from "./parse";
 import type SkillLayerPlugin from "./main";
-import {
-  AgentRowModel,
-  buildAgentsTabModel,
-  DEFAULT_TAB,
-  SkillLayerTab,
-  TABS,
-} from "./tabs";
-import { Skill } from "./types";
+import { DEFAULT_TAB, SkillLayerTab, TABS } from "./tabs";
+import { BashScript, LaunchMode, Skill } from "./types";
 import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
+
+/** A row in the Agents tab (unified across omnigent bundles + Claude/Codex subagents). */
+interface AgentBrowserRow {
+  title: string;
+  subtitle: string;
+  /** Absolute launch/open path (a bundle dir/YAML, or a subagent `.md`). */
+  path: string;
+  /** Source-folder group label, e.g. `.omnigent/agent-configs` or `.claude/agents`. */
+  folder: string;
+  /** True only for omnigent bundle agents (standalone `omnigent run` launchable). */
+  launchable: boolean;
+}
 
 export class SkillBrowserView extends ItemView {
   private plugin: SkillLayerPlugin;
@@ -24,10 +31,14 @@ export class SkillBrowserView extends ItemView {
   /** Access facet — any of {"rightclick","ribbon"}; both = union. */
   private filterAccess = new Set<string>();
   private listEl: HTMLElement | null = null;
-  /** Collapsed source-folder groups in the tree (M18), keyed by group label. */
-  private collapsedGroups = new Set<string>();
+  /** EXPANDED source-folder groups in the tree, keyed by group label. Sections
+   *  default to COLLAPSED; membership here means the user opened it this session. */
+  private expandedGroups = new Set<string>();
   /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
   private activeTab: SkillLayerTab = DEFAULT_TAB;
+  /** Scripts tab: id of the script currently loaded into the add/edit form ("" =
+   *  the form is in "add new" mode). */
+  private editingScriptId = "";
   /** Container the active tab's content renders into (below the tab bar). */
   private tabContentEl: HTMLElement | null = null;
 
@@ -70,6 +81,11 @@ export class SkillBrowserView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("skill-layer-view");
+    // Tag the view when the Minimal theme is active so styles.css can special-case
+    // it: Minimal collapses --background-secondary(-alt) to the page color, which
+    // flattens the browser-tab look, so a scoped override restores a distinct
+    // strip. Every other theme keeps the original colors untouched.
+    root.toggleClass("skill-layer-minimal", this.isMinimalTheme());
 
     // No rescan button (it ate the top space) — the view rescans on open and on
     // file changes; per-tab Refresh controls remain on Agents/Harnesses. The tab
@@ -80,13 +96,24 @@ export class SkillBrowserView extends ItemView {
     this.renderActiveTab();
   }
 
+  /** True when the Minimal community theme is the active theme (read from the
+   *  untyped `customCss` API — `theme`/`cssTheme` holds the active theme name). */
+  private isMinimalTheme(): boolean {
+    const css = (this.app as unknown as {
+      customCss?: { theme?: string; cssTheme?: string };
+    }).customCss;
+    const name = css?.theme ?? css?.cssTheme ?? "";
+    return name === "Minimal";
+  }
+
   /** The Skills | Agents tab bar; clicking a tab switches the rendered content. */
   private renderTabBar(root: HTMLElement): void {
     const bar = root.createDiv({ cls: "skill-layer-tabbar", attr: { role: "tablist" } });
     TABS.forEach((tab, i) => {
       const active = this.activeTab === tab.id;
       // Show a divider after this tab only when it AND its next sibling are both
-      // inactive (computed here so the CSS needn't use a `:has()` selector).
+      // inactive — so the lines on BOTH sides of the selected tab disappear (the
+      // active tab flares out of the strip and needs no flanking dividers).
       const next = TABS[i + 1];
       const divider = !active && next !== undefined && this.activeTab !== next.id;
       // A DIV (role=tab), NOT a <button> — Obsidian's default button chrome
@@ -131,7 +158,10 @@ export class SkillBrowserView extends ItemView {
     if (this.activeTab === "agents") this.renderAgentsTab(c);
     else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
     else if (this.activeTab === "sessions") this.renderSessionsTab(c);
+    else if (this.activeTab === "scripts") this.renderScriptsTab(c);
     else this.renderBrowserTab(c); // skills OR commands (same browser UI)
+    // Every tab ends with a muted purpose blurb (icon + 1–2 sentences).
+    this.renderTabFooter(c, this.tabFooterText(this.activeTab));
   }
 
   /** The active browser tab's item kind + label noun. */
@@ -146,6 +176,36 @@ export class SkillBrowserView extends ItemView {
     const empty = parent.createDiv({ cls: "skill-layer-empty" });
     setIcon(empty.createSpan(), "brain-circuit");
     empty.createSpan({ text });
+  }
+
+  /**
+   * A per-tab purpose footer: the same muted brain-circuit glyph + one-to-two
+   * sentence description of what the tab is for, pinned at the bottom of the tab.
+   * Shown on every tab (even when it has content) so the tab's purpose is always
+   * visible — mirrors the Scripts empty-state the user liked.
+   */
+  private renderTabFooter(parent: HTMLElement, text: string): void {
+    const footer = parent.createDiv({ cls: "skill-layer-empty skill-layer-tab-footer" });
+    setIcon(footer.createSpan(), "brain-circuit");
+    footer.createSpan({ text });
+  }
+
+  /** One-to-two sentence purpose blurb per tab (shown at the tab's bottom). */
+  private tabFooterText(tab: SkillLayerTab): string {
+    switch (tab) {
+      case "commands":
+        return "Commands are Markdown prompt files invoked as /name (e.g. in .claude/commands/) — the simpler, single-file form of a skill. Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
+      case "scripts":
+        return "Create scripts to quickly trigger automations and operations — like a command to update or launch a harness — in your preferred terminal or in the background.";
+      case "sessions":
+        return "Sessions are the skills and scripts you've launched. Use the Connect button to connect to the session in your terminal; sessions are removed after 12 hours.";
+      case "agents":
+        return "Agents are AI assistants that direct their own tools and steps to complete a task, defined in config (e.g. YAML) or code (a Python SDK). Launch a session with one, or open its config to edit it.";
+      case "harnesses":
+        return "A harness is the runtime that actually runs an agent — it feeds the prompt to the model, executes its tool calls, and loops until the task is done. Harnesses you've configured (e.g. in omnigent) are detected automatically; add your own in Settings.";
+      default:
+        return "Skills are reusable instructions in a SKILL.md file (frontmatter + steps) that an assistant loads when relevant or you invoke as /name. They live in a tool's skills folder (e.g. .claude/skills/). Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
+    }
   }
 
   /** The Skills/Commands browser tab (search + filters + facet + rows). Shared
@@ -358,6 +418,148 @@ export class SkillBrowserView extends ItemView {
     });
   }
 
+  /**
+   * The Scripts tab: an add/edit form (name, description, body, launch mode) at
+   * the top, then a row per saved bash script with Run / Edit / Copy / Delete.
+   * Scripts are stored in settings; each carries its own launch mode. The form
+   * doubles as the editor — clicking Edit on a row loads it here.
+   */
+  private renderScriptsTab(c: HTMLElement): void {
+    this.renderScriptForm(c);
+    // No dedicated empty-state — the always-on tab footer describes the purpose.
+    const list = c.createDiv({ cls: "skill-layer-list" });
+    for (const s of this.plugin.getBashScripts()) this.renderScriptRow(list, s);
+  }
+
+  /** The add/edit form for a bash script (top of the Scripts tab). */
+  private renderScriptForm(c: HTMLElement): void {
+    const editing = this.editingScriptId
+      ? this.plugin.getBashScripts().find((s) => s.id === this.editingScriptId)
+      : undefined;
+
+    const form = c.createDiv({ cls: "skill-layer-script-form" });
+    form.createEl("div", {
+      cls: "skill-layer-script-form-title",
+      text: editing ? `Edit “${editing.label}”` : "Add a script",
+    });
+
+    const nameInput = form.createEl("input", {
+      cls: "skill-layer-script-name",
+      attr: { type: "text", placeholder: "Name (e.g. vibe update)", "aria-label": "Script name" },
+    });
+    nameInput.value = editing?.label ?? "";
+
+    const descInput = form.createEl("input", {
+      cls: "skill-layer-script-desc",
+      attr: { type: "text", placeholder: "Description (optional)", "aria-label": "Script description" },
+    });
+    descInput.value = editing?.description ?? "";
+
+    const bodyInput = form.createEl("textarea", {
+      cls: "skill-layer-script-body",
+      attr: {
+        rows: "5",
+        placeholder: "#!/bin/bash\nvibe update",
+        "aria-label": "Script body",
+      },
+    });
+    bodyInput.value = editing?.body ?? "";
+
+    const controls = form.createDiv({ cls: "skill-layer-script-controls" });
+    const modeSelect = controls.createEl("select", {
+      cls: "skill-layer-script-mode",
+      attr: { "aria-label": "Launch mode" },
+    });
+    modeSelect.createEl("option", { value: "terminal", text: "Terminal" });
+    modeSelect.createEl("option", { value: "headless", text: "Headless" });
+    modeSelect.value = editing?.launchMode ?? "terminal";
+
+    const save = controls.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      text: editing ? "Save" : "Add script",
+    });
+    save.addEventListener("click", () => {
+      void this.submitScriptForm(
+        nameInput.value,
+        descInput.value,
+        bodyInput.value,
+        modeSelect.value as LaunchMode,
+      );
+    });
+
+    if (editing) {
+      const cancel = controls.createEl("button", { cls: "skill-layer-action", text: "Cancel" });
+      cancel.addEventListener("click", () => {
+        this.editingScriptId = "";
+        this.renderActiveTab();
+      });
+    }
+  }
+
+  /** Persist the script form (add or update), then reset + re-render. */
+  private async submitScriptForm(
+    label: string,
+    description: string,
+    body: string,
+    mode: LaunchMode,
+  ): Promise<void> {
+    const err = this.editingScriptId
+      ? await this.plugin.updateBashScript(this.editingScriptId, label, body, mode, description)
+      : await this.plugin.addBashScript(label, body, mode, description);
+    if (err) {
+      new Notice(`Skill and Harness Manager: ${err}`);
+      return;
+    }
+    this.editingScriptId = "";
+    this.renderActiveTab();
+  }
+
+  /** One Scripts-tab row: name + mode badge + description, Run / Edit / Copy / Delete. */
+  private renderScriptRow(parent: HTMLElement, s: BashScript): void {
+    const el = parent.createDiv({ cls: "skill-layer-row" });
+    const main = el.createDiv({ cls: "skill-layer-row-main" });
+    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
+    nameLine.createSpan({ text: s.label, cls: "skill-layer-row-name" });
+    nameLine.createSpan({ text: s.launchMode, cls: "skill-layer-row-badge" });
+    if (s.description) {
+      main.createDiv({ cls: "skill-layer-row-desc", text: s.description });
+    }
+    main
+      .createDiv({ cls: "skill-layer-row-path", text: s.body.split("\n")[0] })
+      .setAttr("title", s.body);
+
+    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+    const run = actions.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      attr: { "aria-label": `Run ${s.label}` },
+    });
+    setIcon(run.createSpan({ cls: "skill-layer-action-icon" }), "play");
+    run.createSpan({ text: " Run" });
+    run.addEventListener("click", () => this.plugin.runBashScript(s.id));
+
+    const edit = actions.createEl("button", { cls: "skill-layer-action", text: "Edit" });
+    edit.addEventListener("click", () => {
+      this.editingScriptId = s.id;
+      this.renderActiveTab();
+    });
+
+    const copy = actions.createEl("button", { cls: "skill-layer-action", text: "Copy" });
+    copy.addEventListener("click", () => {
+      void navigator.clipboard
+        .writeText(s.body)
+        .then(() => new Notice("Copied script to clipboard."))
+        .catch(() => new Notice("Copy failed."));
+    });
+
+    const del = actions.createEl("button", {
+      cls: "skill-layer-action",
+      attr: { "aria-label": `Delete ${s.label}` },
+    });
+    setIcon(del.createSpan({ cls: "skill-layer-action-icon" }), "trash");
+    del.createSpan({ text: " Delete" });
+    del.addEventListener("click", () => void this.plugin.removeBashScript(s.id));
+  }
+
   /** The Sessions tab (M20): resumable conversations the plugin launched, newest
    *  first. Pruned live (dropped after 12h or when no longer resumable). Each row
    *  shows the skill, tool, and start time, with a Connect (open terminal) action. */
@@ -416,32 +618,97 @@ export class SkillBrowserView extends ItemView {
     forget.addEventListener("click", () => void this.plugin.forgetSession(s.key));
   }
 
-  /** The Agents tab: a Refresh control + the discovered custom agents (M10). */
+  /**
+   * The Agents tab: a Refresh control + every discovered agent, grouped by its
+   * actual source folder (like Skills/Commands). Agents come from two sources:
+   *  • omnigent bundle agents (`.omnigent/agent-configs`) — LAUNCHABLE as a
+   *    standalone `omnigent run <agent>` session;
+   *  • Claude/Codex/Cursor subagents (`.claude/agents`, `.codex/agents`, …) —
+   *    NOT standalone-launchable (they run via a harness), so they show only
+   *    Open file.
+   */
   private renderAgentsTab(c: HTMLElement): void {
-    // Refresh control — re-scan custom agents. refreshCustomAgents re-renders open views.
     const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
     const refreshBtn = toolbar.createEl("button", {
       cls: "skill-layer-rescan",
-      attr: { "aria-label": "Refresh custom agents" },
+      attr: { "aria-label": "Refresh agents" },
     });
     setIcon(refreshBtn, "refresh-cw");
     refreshBtn.createSpan({ text: "Refresh" });
     refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
 
-    const agents = this.plugin.getCustomAgents();
-    const model = buildAgentsTabModel(agents);
-
-    if (model.empty) {
-      this.renderEmptyState(c, model.text);
+    const rows = this.buildAgentRows();
+    if (rows.length === 0) {
+      this.renderEmptyState(
+        c,
+        "No agents found. Define one in .omnigent/agent-configs/ (omnigent) or " +
+          ".claude/agents / .codex/agents (Claude/Codex), then Refresh.",
+      );
       return;
     }
 
+    // Group by source folder, sorted, mirroring the Skills tab's tree.
+    const groups = new Map<string, AgentBrowserRow[]>();
+    for (const r of rows) {
+      const g = groups.get(r.folder) ?? [];
+      g.push(r);
+      groups.set(r.folder, g);
+    }
     const list = c.createDiv({ cls: "skill-layer-list" });
-    for (const row of model.rows) this.renderAgentRow(list, row);
+    for (const label of Array.from(groups.keys()).sort()) {
+      const items = groups.get(label) ?? [];
+      const collapsed = !this.expandedGroups.has(label); // default-closed
+      const folder = list.createDiv({ cls: "skill-layer-tree-folder" });
+      const title = folder.createDiv({
+        cls: "skill-layer-tree-folder-title",
+        attr: {
+          "aria-expanded": String(!collapsed),
+          "aria-label": `${label} (${items.length} agent${items.length === 1 ? "" : "s"})`,
+        },
+      });
+      const chevron = title.createSpan({ cls: "skill-layer-tree-chevron" });
+      setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+      title.createSpan({ cls: "skill-layer-tree-folder-name", text: label });
+      this.makeActivatable(title, () => {
+        if (collapsed) this.expandedGroups.add(label);
+        else this.expandedGroups.delete(label);
+        this.renderActiveTab();
+      });
+      if (!collapsed) {
+        const children = folder.createDiv({ cls: "skill-layer-tree-children" });
+        for (const row of items) this.renderAgentRow(children, row);
+      }
+    }
   }
 
-  /** One Agents-tab row: name + description, with Open / Launch / Copy actions. */
-  private renderAgentRow(parent: HTMLElement, row: AgentRowModel): void {
+  /** Unified agent rows across omnigent bundles + Claude/Codex/Cursor subagents. */
+  private buildAgentRows(): AgentBrowserRow[] {
+    const rows: AgentBrowserRow[] = [];
+    // omnigent bundle agents — launchable standalone via `omnigent run`.
+    for (const a of this.plugin.getCustomAgents()) {
+      rows.push({
+        title: a.name,
+        subtitle: a.description ?? "",
+        path: a.path,
+        folder: ".omnigent/agent-configs",
+        launchable: true,
+      });
+    }
+    // Claude/Codex/Cursor subagents — grouped by their real agents folder.
+    for (const a of this.plugin.getClaudeAgents()) {
+      rows.push({
+        title: a.name,
+        subtitle: a.description ?? "",
+        path: a.path,
+        folder: inferSourceLabel(a.path),
+        launchable: false,
+      });
+    }
+    return rows;
+  }
+
+  /** One Agents-tab row. Launchable (omnigent) rows get Launch + ⚙; others get Open only. */
+  private renderAgentRow(parent: HTMLElement, row: AgentBrowserRow): void {
     const el = parent.createDiv({ cls: "skill-layer-row" });
 
     const main = el.createDiv({ cls: "skill-layer-row-main" });
@@ -450,7 +717,6 @@ export class SkillBrowserView extends ItemView {
       text: row.title,
       cls: "skill-layer-row-name",
     });
-    // Description as subtitle when present; also a title tooltip on the name.
     if (row.subtitle) nameEl.setAttr("title", row.subtitle);
     nameLine.createSpan({ text: "agent", cls: "skill-layer-row-badge" });
 
@@ -459,19 +725,20 @@ export class SkillBrowserView extends ItemView {
     }
     main.createDiv({ cls: "skill-layer-row-path", text: row.path });
 
-    // Cleaned-up row (M16), mirroring the Skills tab: Launch session + Open file
-    // stay inline; Copy invocation moves into the ⚙ Configuration modal.
     const actions = el.createDiv({ cls: "skill-layer-row-actions" });
 
-    const launchBtn = actions.createEl("button", {
-      cls: "skill-layer-action skill-layer-action-launch",
-      attr: { "aria-label": `Launch a session with ${row.title}` },
-    });
-    setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
-    launchBtn.createSpan({ text: " Launch session" });
-    launchBtn.addEventListener("click", () => {
-      void this.plugin.launchCustomAgent(row.path);
-    });
+    // Only omnigent bundle agents can be launched as a standalone session.
+    if (row.launchable) {
+      const launchBtn = actions.createEl("button", {
+        cls: "skill-layer-action skill-layer-action-launch",
+        attr: { "aria-label": `Launch a session with ${row.title}` },
+      });
+      setIcon(launchBtn.createSpan({ cls: "skill-layer-action-icon" }), "play");
+      launchBtn.createSpan({ text: " Launch session" });
+      launchBtn.addEventListener("click", () => {
+        void this.plugin.launchCustomAgent(row.path);
+      });
+    }
 
     const openBtn = actions.createEl("button", {
       cls: "skill-layer-action",
@@ -481,14 +748,17 @@ export class SkillBrowserView extends ItemView {
       void this.plugin.openCustomAgent(row.path);
     });
 
-    const cfgBtn = actions.createEl("button", {
-      cls: "skill-layer-action skill-layer-action-gear",
-      attr: { "aria-label": `Configure ${row.title}` },
-    });
-    setIcon(cfgBtn, "settings");
-    cfgBtn.addEventListener("click", () =>
-      new AgentConfigModal(this.app, this.plugin, row.path, row.title).open(),
-    );
+    // The ⚙ (Copy invocation) is omnigent-specific, so only on launchable rows.
+    if (row.launchable) {
+      const cfgBtn = actions.createEl("button", {
+        cls: "skill-layer-action skill-layer-action-gear",
+        attr: { "aria-label": `Configure ${row.title}` },
+      });
+      setIcon(cfgBtn, "settings");
+      cfgBtn.addEventListener("click", () =>
+        new AgentConfigModal(this.app, this.plugin, row.path, row.title).open(),
+      );
+    }
   }
 
   /**
@@ -566,33 +836,43 @@ export class SkillBrowserView extends ItemView {
     container.empty();
 
     const { items: all, noun } = this.browsing;
+    const kind: "skill" | "command" = this.activeTab === "commands" ? "command" : "skill";
+    const unfiltered = !this.filter && !this.hasActiveFacets();
 
     const skills = all.filter((s) => this.matches(s));
 
-    if (skills.length === 0) {
-      this.renderEmptyState(
-        container,
-        all.length === 0
-          ? `No ${noun}s found. Add scan roots in Settings → Skill and Harness Manager, then Rescan.`
-          : `No ${noun}s match the current filters.`,
-      );
-      return;
-    }
-
     // Group by source folder, rendered as a collapsible tree that mirrors
-    // Obsidian's file explorer: a folder title (chevron + name + count) with the
-    // items nested under a left indent-guide line, so items read as belonging to
-    // their source folder (.claude, .agents, cursor, …).
+    // Obsidian's file explorer.
     const groups = new Map<string, Skill[]>();
     for (const s of skills) {
       const g = groups.get(s.sourceLabel) ?? [];
       g.push(s);
       groups.set(s.sourceLabel, g);
     }
+    // When unfiltered, also surface tool folders that EXIST on disk but hold no
+    // items yet (e.g. a folder the user just added) so each has a section with a
+    // per-section "+" to add its first skill/command.
+    if (unfiltered) {
+      for (const seg of this.plugin.existingToolFolders(kind)) {
+        if (!groups.has(seg)) groups.set(seg, []);
+      }
+    }
+
+    if (groups.size === 0) {
+      this.renderEmptyState(
+        container,
+        all.length === 0
+          ? `No ${noun}s found yet. Use “+ Add folder” below to create one, or add scan roots in Settings.`
+          : `No ${noun}s match the current filters.`,
+      );
+      // Still show the add-folder control below the empty state.
+      if (unfiltered) this.renderAddFolderRow(container, kind);
+      return;
+    }
 
     for (const label of Array.from(groups.keys()).sort()) {
       const items = groups.get(label) ?? [];
-      const collapsed = this.collapsedGroups.has(label);
+      const collapsed = !this.expandedGroups.has(label); // default-closed
       const folder = container.createDiv({ cls: "skill-layer-tree-folder" });
 
       // A DIV (role=button), NOT a <button> — Obsidian's default button chrome
@@ -609,16 +889,128 @@ export class SkillBrowserView extends ItemView {
       setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
       title.createSpan({ cls: "skill-layer-tree-folder-name", text: label });
       this.makeActivatable(title, () => {
-        if (collapsed) this.collapsedGroups.delete(label);
-        else this.collapsedGroups.add(label);
+        if (collapsed) this.expandedGroups.add(label);
+        else this.expandedGroups.delete(label);
         this.renderList();
       });
+      // Per-section "+": create a new skill/command in THIS tool folder. Only for
+      // real tool-folder groups (a segment we know how to create into).
+      if (this.plugin.addableFolderSegments(kind).includes(label)) {
+        const add = title.createSpan({
+          cls: "skill-layer-tree-add",
+          attr: {
+            "aria-label": `Add a ${noun} in ${label}`,
+            title: `Add a ${noun} in ${label}`,
+            role: "button",
+            tabindex: "0",
+          },
+        });
+        setIcon(add.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
+        add.createSpan({ text: `Add a ${noun}` });
+        const onAdd = (e: Event) => {
+          e.stopPropagation(); // don't toggle the folder collapse
+          this.promptCreateItem(kind, label);
+        };
+        add.addEventListener("click", onAdd);
+        add.addEventListener("keydown", (e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onAdd(e);
+          }
+        });
+      }
 
       if (!collapsed) {
         const children = folder.createDiv({ cls: "skill-layer-tree-children" });
+        if (items.length === 0) {
+          children.createDiv({
+            cls: "skill-layer-tree-empty",
+            text: `No ${noun}s here yet — use + to add one.`,
+          });
+        }
         for (const skill of items) this.renderRow(children, skill);
       }
     }
+
+    // Bottom "+ Add folder" — create a new tool folder from the prescanned list.
+    if (unfiltered) this.renderAddFolderRow(container, kind);
+  }
+
+  /** True when any multi-select facet filter is active (affects add-affordance visibility). */
+  private hasActiveFacets(): boolean {
+    return (
+      this.filterAgents.size > 0 ||
+      this.filterHarnesses.size > 0 ||
+      this.filterTags.size > 0 ||
+      this.filterAccess.size > 0
+    );
+  }
+
+  /**
+   * The "Add folder" affordance: a centered round "+" (styled like the per-section
+   * add button) that sits just above the tab-footer divider. Picks a prescanned
+   * tool folder to create. Hidden entirely when every standard folder exists.
+   */
+  private renderAddFolderRow(container: HTMLElement, kind: "skill" | "command"): void {
+    const existing = new Set(this.plugin.existingToolFolders(kind));
+    const addable = this.plugin.addableFolderSegments(kind).filter((s) => !existing.has(s));
+    if (addable.length === 0) return;
+    const row = container.createDiv({ cls: "skill-layer-addfolder" });
+    const btn = row.createEl("div", {
+      cls: "skill-layer-tree-add",
+      attr: {
+        "aria-label": `Add a ${kind} folder`,
+        title: `Add a ${kind} folder`,
+        role: "button",
+        tabindex: "0",
+      },
+    });
+    setIcon(btn.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
+    btn.createSpan({ text: `Add a ${kind} folder` });
+    const onAdd = () => this.promptAddFolder(addable);
+    btn.addEventListener("click", onAdd);
+    btn.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onAdd();
+      }
+    });
+  }
+
+  /** Show a chooser of prescanned tool folders; creating one adds an empty section. */
+  private promptAddFolder(segments: string[]): void {
+    const menu = new Menu();
+    for (const seg of segments) {
+      menu.addItem((item) =>
+        item
+          .setTitle(seg)
+          .setIcon("folder")
+          .onClick(async () => {
+            const err = await this.plugin.createToolFolder(seg);
+            if (err) new Notice(`Skill and Harness Manager: ${err}`);
+          }),
+      );
+    }
+    // Anchor near the button: show at the current mouse position.
+    menu.showAtMouseEvent(
+      (activeWindow.event as MouseEvent) ?? new MouseEvent("click"),
+    );
+  }
+
+  /** Prompt for a name, then create a skill/command in `folderSeg` and open it. */
+  private promptCreateItem(kind: "skill" | "command", folderSeg: string): void {
+    new PromptModal(this.app, {
+      title: `New ${kind} in ${folderSeg}`,
+      placeholder: kind === "command" ? "command-name" : "skill-name",
+      cta: "Create",
+      onSubmit: async (name) => {
+        const err =
+          kind === "command"
+            ? await this.plugin.createCommandInFolder(folderSeg, name)
+            : await this.plugin.createSkillInFolder(folderSeg, name);
+        if (err) new Notice(`Skill and Harness Manager: ${err}`);
+      },
+    }).open();
   }
 
   /** Toggle a tag in the Tag facet (called from a row tag chip). Re-renders the
