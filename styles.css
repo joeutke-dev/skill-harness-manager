@@ -60,21 +60,29 @@
   position: relative;
   cursor: pointer;
   box-sizing: border-box;
-  /* Equal fixed width; stacked left with free space on the right. */
-  flex: 0 0 auto;
-  width: 9.8em;
+  /* Tabs SHARE the strip width and SHRINK to fit, so all six always fit a narrow
+     pane instead of overflowing and getting cut off. A preferred width with
+     shrink (flex: 1 1) + a small min so they stay readable; the strip's own
+     overflow clips nothing because they never exceed 100%. */
+  flex: 1 1 8.82em;
+  min-width: 0;
   background: transparent;
   border: none;
   box-shadow: none;
   /* Tab height (~15% shorter than the prior +5px). */
-  padding: calc(var(--size-4-3) + 2.5px) var(--size-4-2);
+  padding: calc(var(--size-4-3) + 2.5px) var(--size-4-1);
   color: var(--text-muted);
-  font-size: var(--font-ui-small);
+  /* 10% smaller than --font-ui-small. */
+  font-size: calc(var(--font-ui-small) * 0.9);
   font-weight: var(--font-medium);
   text-align: center;
   white-space: nowrap;
-  /* visible so the active tab's flare feet can extend past its edges. */
+  /* visible so the active tab's flare feet (::before/::after) can extend past
+     its edges — DON'T clip here or the browser-tab look breaks. The label itself
+     is ellipsized via text-overflow: it's fine because the flare-foot pseudos are
+     positioned OUTSIDE the box and unaffected by the text clip. */
   overflow: visible;
+  text-overflow: ellipsis;
   transition: color 0.1s ease;
 }
 
@@ -754,11 +762,184 @@ body .tree-item-self.is-flashing {
   max-height: 220px;
   overflow: auto;
   padding: var(--size-4-2);
-  margin: var(--size-2-3) 0 var(--size-4-3);
+  margin: 0;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
   font-size: var(--font-ui-smaller);
   white-space: pre-wrap;
   user-select: text;
+}
+
+/* Code-block-style copy container: the block plus a hover copy button in the
+   top-right corner, like Obsidian's own code blocks. */
+.skill-layer-copyblock {
+  position: relative;
+  margin: var(--size-2-3) 0 var(--size-4-3);
+}
+.skill-layer-copyblock-btn {
+  position: absolute;
+  top: var(--size-2-2);
+  right: var(--size-2-2);
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--size-2-1);
+  height: auto;
+  box-shadow: none;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.1s ease, color 0.1s ease;
+}
+/* Reveal the copy button on hover/focus of the block (always visible on touch). */
+.skill-layer-copyblock:hover .skill-layer-copyblock-btn,
+.skill-layer-copyblock-btn:focus-visible {
+  opacity: 1;
+}
+.skill-layer-copyblock-btn:hover {
+  color: var(--text-normal);
+}
+.skill-layer-copyblock-btn.is-copied {
+  color: var(--text-success);
+  opacity: 1;
+}
+.skill-layer-copyblock-btn .svg-icon {
+  width: var(--icon-s);
+  height: var(--icon-s);
+}
+
+/* Bash Scripts tab: the add/edit form at the top of the tab. */
+.skill-layer-script-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  padding: var(--size-4-3);
+  margin-bottom: var(--size-4-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+.skill-layer-script-form-title {
+  font-weight: var(--font-semibold);
+}
+.skill-layer-script-name,
+.skill-layer-script-desc {
+  width: 100%;
+  box-sizing: border-box;
+}
+.skill-layer-script-body {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 6em;
+  resize: vertical;
+  font-family: var(--font-monospace);
+}
+.skill-layer-script-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  flex-wrap: wrap;
+}
+
+/* Per-tab purpose footer: same muted glyph + copy as the empty state, but set
+   off with a top separator and a little breathing room so it reads as a footer
+   describing the tab (shown on every tab, even with content). */
+.skill-layer-tab-footer {
+  margin-top: var(--size-4-4);
+  padding-top: var(--size-4-3);
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Per-section "+ Add a skill" to add a new skill/command in that tool folder.
+   Sits at the right edge of the folder header (the folder name flexes to fill).
+   A subtle outlined pill with an icon + small label; normal text color so it's
+   readable, filling to the hover background on hover. */
+.skill-layer-tree-add {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--size-2-1);
+  padding: 2px var(--size-2-2);
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+.skill-layer-tree-add:hover {
+  background: var(--background-modifier-hover);
+}
+.skill-layer-tree-add-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.skill-layer-tree-add .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+  stroke-width: 2.5px;
+}
+
+/* Placeholder line inside an empty tool-folder section. */
+.skill-layer-tree-empty {
+  padding: var(--size-2-2) var(--size-2-3);
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-style: italic;
+}
+
+/* "Add folder" affordance: a centered pill above the tab-footer divider. */
+.skill-layer-addfolder {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--size-4-3);
+}
+
+/* New-item name prompt modal input. */
+.skill-layer-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: var(--size-4-2);
+}
+
+/* ============================================================================
+   MINIMAL THEME OVERRIDE (scoped; applied only when the view carries
+   .skill-layer-minimal, set by the plugin when Minimal is the active theme).
+   Minimal collapses --background-secondary / --background-secondary-alt to the
+   same value as --background-primary, which flattens the browser-tab look (no
+   distinct strip, flare-feet blend away). Here — and ONLY here — we substitute a
+   derived, guaranteed-distinct strip shade so the tabs read the same as they do
+   under every other theme. Other themes never hit this block, so their original
+   (great-looking) colors are untouched.
+   ============================================================================ */
+.skill-layer-view.skill-layer-minimal {
+  /* A strip shade mixed from the page toward the text color — always distinct
+     from the page in both light and dark Minimal variants. */
+  --skl-strip: color-mix(in srgb, var(--background-primary) 94%, var(--text-normal));
+}
+/* Strip, cards, and panels use the derived shade. */
+.skill-layer-view.skill-layer-minimal .skill-layer-tabbar,
+.skill-layer-view.skill-layer-minimal .skill-layer-filterbar,
+.skill-layer-view.skill-layer-minimal .skill-layer-row,
+.skill-layer-view.skill-layer-minimal .skill-layer-script-form,
+.skill-layer-view.skill-layer-minimal .skill-layer-script-body {
+  background: var(--skl-strip);
+}
+/* Active tab + its concave flare-feet stay on the page color so the tab reads as
+   part of the page, flaring out of the (now-distinct) strip. */
+.skill-layer-view.skill-layer-minimal .skill-layer-tab.is-active {
+  background: var(--background-primary);
+}
+.skill-layer-view.skill-layer-minimal .skill-layer-tab.is-active::before {
+  background: radial-gradient(circle at top left, #0000 var(--radius-l), var(--background-primary) calc(var(--radius-l) + 0.5px));
+}
+.skill-layer-view.skill-layer-minimal .skill-layer-tab.is-active::after {
+  background: radial-gradient(circle at top right, #0000 var(--radius-l), var(--background-primary) calc(var(--radius-l) + 0.5px));
 }

@@ -449,6 +449,28 @@ export function encodeCustomHarnessChoice(id: string): string {
 }
 
 /**
+ * The print/headless flags used by the supported CLIs. In these modes the CLI
+ * answers the single prompt and EXITS — correct for a headless (background)
+ * launch, but wrong for a TERMINAL launch where the user wants to keep chatting.
+ */
+const HEADLESS_FLAGS = new Set(["-p", "--print"]);
+
+/**
+ * Transform a headless launch argv into an INTERACTIVE one for a terminal launch:
+ * drop any print/headless flag (`-p` / `--print`) so the CLI opens an interactive
+ * session SEEDED with the prompt (which stays as an inert positional/message)
+ * instead of printing-and-exiting. `argv[0]` (the binary) and every other token —
+ * including the prompt — pass through unchanged and un-split, so this adds NO new
+ * shell/tokenization surface. If the argv contains no headless flag it is returned
+ * as-is. Pure / unit-testable.
+ */
+export function toInteractiveArgv(argv: string[]): string[] {
+  if (!Array.isArray(argv) || argv.length === 0) return argv;
+  // Keep argv[0] (binary) always; filter headless flags from the rest.
+  return [argv[0], ...argv.slice(1).filter((t) => !HEADLESS_FLAGS.has(t))];
+}
+
+/**
  * Split a single-line custom-harness command into an argv array. This is a PLAIN
  * whitespace split — NOT a shell-words tokenizer: there is no quote handling, no
  * backslash escapes, no metacharacter interpretation (that whole defect class is

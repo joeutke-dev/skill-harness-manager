@@ -16,6 +16,14 @@ import {
 } from "obsidian";
 import { Detector } from "./detector";
 import {
+  buildOpenerCommand,
+  DetectedTerminal,
+  detectInstalledTerminals,
+  resolvePreferredTerminal,
+  TMUX_SESSION,
+} from "./terminal";
+import { EXAMPLE_SKILL_BODY, EXAMPLE_SKILL_REL_PATH } from "./example";
+import {
   DEFAULT_PINNED_ICON,
   elementHasSvg,
   pinAction,
@@ -57,6 +65,7 @@ import {
   resolveSkillHarness,
   safeCustomAgentRealPath,
   SkillAgent,
+  toInteractiveArgv,
 } from "./launch";
 import {
   agentFolderSegments,
@@ -64,6 +73,7 @@ import {
   defaultSkillScanRoots,
   homeSkillRootPaths,
   joinHome,
+  skillFolderSegments,
 } from "./folders";
 import { HiddenFilesController, isRevealableHiddenPath } from "./hiddenFiles";
 import {
@@ -76,6 +86,7 @@ import {
 } from "./parse";
 import { SkillLayerSettingTab } from "./settingsTab";
 import {
+  buildRawTerminalScript,
   buildResumeArgv,
   buildTerminalScript,
   LaunchedSession,
@@ -84,7 +95,13 @@ import {
   SessionTool,
 } from "./sessions";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
-import { DEFAULT_SETTINGS, Skill, SkillLayerSettings } from "./types";
+import {
+  BashScript,
+  DEFAULT_SETTINGS,
+  LaunchMode,
+  Skill,
+  SkillLayerSettings,
+} from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
 import { decideToggleAction } from "./viewToggle";
 import {
@@ -115,6 +132,9 @@ export default class SkillLayerPlugin extends Plugin {
 
   /** Cached custom agents discovered from `<vault>/.omnigent/agent-configs`. */
   private customAgents: CustomAgent[] = [];
+
+  /** Cached terminal emulators detected on disk (for the preferred-terminal dropdown). */
+  private detectedTerminals: DetectedTerminal[] = [];
 
   /** Cached Claude subagents (M17) from `<vault>/.claude/agents` + `~/.claude/agents`. */
   private claudeAgents: ClaudeAgent[] = [];
@@ -203,6 +223,11 @@ export default class SkillLayerPlugin extends Plugin {
       // Discover omnigent-configured harnesses (best-effort, non-blocking) so the
       // per-skill Harness dropdown + Harnesses tab reflect the user's omnigent.
       void this.discoverConfiguredHarnesses();
+      // Detect installed terminal emulators for the preferred-terminal setting.
+      this.detectTerminals();
+      // Seed the bundled example skill on first run (no-op after the first seed
+      // or if the file already exists). Non-blocking; never throws.
+      void this.seedExampleSkill();
     });
 
     // Keep the Open/Close-file button labels accurate and tear down a temporary
@@ -281,10 +306,224 @@ export default class SkillLayerPlugin extends Plugin {
         havePaths.add(root.path);
       }
     }
+    // Migration: the earlier default panel width (420) was too narrow for all six
+    // tabs; bump a still-default value up to the new 520. A width the user chose
+    // themselves (anything other than the old default) is left untouched.
+    if (this.settings.panelWidth === 420) this.settings.panelWidth = 520;
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  /**
+   * Seed the bundled example skill on first run. No-op when already seeded
+   * (`seededExample`), when the vault base can't be resolved / isn't a desktop
+   * filesystem, or when the file already exists (so a user who edited it isn't
+   * clobbered and a deleted one isn't recreated). Writes via Node `fs` because
+   * `.agents/` is a hidden dot-folder outside the Vault API index. Never throws.
+   */
+  private async seedExampleSkill(): Promise<void> {
+    if (this.settings.seededExample) return;
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return;
+    try {
+      const abs = nodePath.join(base, EXAMPLE_SKILL_REL_PATH);
+      if (!fs.existsSync(abs)) {
+        await fs.promises.mkdir(nodePath.dirname(abs), { recursive: true });
+        await fs.promises.writeFile(abs, EXAMPLE_SKILL_BODY, "utf8");
+      }
+      // Mark seeded even if the file already existed, so we stop probing.
+      this.settings.seededExample = true;
+      await this.saveSettings();
+      await this.rescan();
+    } catch (err) {
+      console.error("[skill-layer] example skill seed failed:", err);
+    }
+  }
+
+  // --- Creating skills / commands / folders (Skills & Commands tabs) ------
+  /**
+   * The tool-folder segments a NEW skill or command folder can be added into
+   * (`.claude/skills`, `.codex/prompts`, …), for the "add folder" picker. Skills
+   * use the skills segments; commands use the command segments.
+   */
+  addableFolderSegments(kind: "skill" | "command"): string[] {
+    return kind === "command" ? commandFolderSegments() : skillFolderSegments();
+  }
+
+  /**
+   * The tool-folder segments (for `kind`) that currently EXIST on disk in the
+   * vault — used to render empty sections so a freshly-created (still-empty)
+   * folder shows up with its per-section "+". Desktop-gated; [] when unavailable.
+   */
+  existingToolFolders(kind: "skill" | "command"): string[] {
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return [];
+    return this.addableFolderSegments(kind).filter((seg) => {
+      try {
+        return fs.statSync(nodePath.join(base, seg)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Create a tool folder (e.g. `.claude/skills`) in the vault if absent, then
+   * rescan so its (empty) section appears. Returns a user-facing error string, or
+   * null on success. Desktop-gated; `seg` must be one of the known segments.
+   */
+  async createToolFolder(seg: string): Promise<string | null> {
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return "Requires the desktop app.";
+    if (!this.addableFolderSegments("skill").includes(seg) &&
+        !this.addableFolderSegments("command").includes(seg)) {
+      return "Unknown folder.";
+    }
+    try {
+      await fs.promises.mkdir(nodePath.join(base, seg), { recursive: true });
+      await this.rescan();
+      return null;
+    } catch (err) {
+      console.error("[skill-layer] createToolFolder failed:", err);
+      return "Could not create the folder.";
+    }
+  }
+
+  /**
+   * Create a new SKILL inside the tool folder `folderSeg`: `<folderSeg>/<name>/
+   * SKILL.md` with a minimal frontmatter stub, then open it in Obsidian (like the
+   * Open file button). Returns an error string, or null on success. The name is
+   * sanitized to a safe folder name; refuses to overwrite an existing file.
+   */
+  async createSkillInFolder(folderSeg: string, rawName: string): Promise<string | null> {
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return "Requires the desktop app.";
+    const name = this.sanitizeItemName(rawName);
+    if (!name) return "Please enter a valid name.";
+    const relPath = `${folderSeg}/${name}/SKILL.md`;
+    const abs = nodePath.join(base, relPath);
+    if (fs.existsSync(abs)) return `A skill named "${name}" already exists here.`;
+    const body = `---\nname: ${name}\ndescription: \n---\n\n# ${name}\n\n`;
+    try {
+      await fs.promises.mkdir(nodePath.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, body, "utf8");
+    } catch (err) {
+      console.error("[skill-layer] createSkillInFolder failed:", err);
+      return "Could not create the skill file.";
+    }
+    await this.rescan();
+    await this.openCreatedFile(relPath, abs);
+    return null;
+  }
+
+  /**
+   * Create a new COMMAND inside the tool folder `folderSeg`: `<folderSeg>/
+   * <name>.md` (any markdown in a commands folder is a command), then open it in
+   * Obsidian. Returns an error string, or null on success.
+   */
+  async createCommandInFolder(folderSeg: string, rawName: string): Promise<string | null> {
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return "Requires the desktop app.";
+    const name = this.sanitizeItemName(rawName);
+    if (!name) return "Please enter a valid name.";
+    const relPath = `${folderSeg}/${name}.md`;
+    const abs = nodePath.join(base, relPath);
+    if (fs.existsSync(abs)) return `A command named "${name}" already exists here.`;
+    const body = `# ${name}\n\n`;
+    try {
+      await fs.promises.mkdir(nodePath.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, body, "utf8");
+    } catch (err) {
+      console.error("[skill-layer] createCommandInFolder failed:", err);
+      return "Could not create the command file.";
+    }
+    await this.rescan();
+    await this.openCreatedFile(relPath, abs);
+    return null;
+  }
+
+  /** A safe folder/file base name from user input (kebab-ish, no path separators). */
+  private sanitizeItemName(raw: string): string {
+    return (raw ?? "")
+      .trim()
+      .replace(/[^A-Za-z0-9._ -]+/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "")
+      .slice(0, 60);
+  }
+
+  /**
+   * Open a just-created vault file in Obsidian. Tool folders are hidden
+   * dot-folders, so reuse the same temporary-reveal path as `openSkill`
+   * (`openHiddenSkillTemporarily`); fall back to the OS app if it never indexes.
+   */
+  private async openCreatedFile(vaultPath: string, absPath: string): Promise<void> {
+    const tfile = this.detector.resolveTFile(vaultPath);
+    if (tfile instanceof TFile) {
+      await this.openTFileAndRevealFolder(tfile);
+      return;
+    }
+    if (this.canRevealHiddenFolders() && !this.settings.showHiddenFolders) {
+      if (await this.openHiddenSkillTemporarily(vaultPath)) return;
+    }
+    try {
+      const result = await shell.openPath(absPath);
+      if (result) new Notice(`Could not open file: ${result}`);
+    } catch (err) {
+      console.error("[skill-layer] openCreatedFile failed:", err);
+    }
+  }
+
+  // --- Preferred terminal + launch mode ----------------------------------
+  /** Re-detect installed terminal emulators into the cache (app bundles + tmux). */
+  private detectTerminals(): void {
+    this.detectedTerminals = detectInstalledTerminals({
+      homedir: os.homedir(),
+      // Standard macOS app locations (system + per-user Applications).
+      appDirs: ["/Applications", nodePath.join(os.homedir(), "Applications")],
+      exists: (p) => fs.existsSync(p),
+    });
+  }
+
+  /** The terminal emulators detected on disk (for the settings dropdown). */
+  getDetectedTerminals(): DetectedTerminal[] {
+    return this.detectedTerminals;
+  }
+
+  /**
+   * The effective preferred terminal, resolved fail-closed to `auto` against the
+   * actually-detected set (a stale/uninstalled `preferredTerminal` falls back to
+   * the OS default terminal). Used by the terminal-launch path + settings UI.
+   */
+  resolvePreferredTerminal(): DetectedTerminal {
+    return resolvePreferredTerminal(this.settings.preferredTerminal, this.detectedTerminals);
+  }
+
+  /** The effective launch mode for a skill/command: per-item override, else the global default. */
+  effectiveLaunchMode(id: string): LaunchMode {
+    const override = this.settings.skillLaunchMode[id];
+    return override === "headless" || override === "terminal"
+      ? override
+      : this.settings.defaultLaunchMode;
+  }
+
+  /** The <select> value for a skill's launch mode ("" = Default/global). */
+  launchModeOptionValue(id: string): string {
+    const v = this.settings.skillLaunchMode[id];
+    return v === "headless" || v === "terminal" ? v : "";
+  }
+
+  /** Persist a skill's launch-mode override; "" / unknown deletes the key (→ global default). */
+  async setSkillLaunchMode(id: string, value: string): Promise<void> {
+    if (value === "headless" || value === "terminal") {
+      this.settings.skillLaunchMode[id] = value;
+    } else {
+      delete this.settings.skillLaunchMode[id];
+    }
+    await this.saveSettings();
+    this.refreshViews();
   }
 
   /** Absolute path to this plugin's data.json (config lives outside the vault
@@ -373,6 +612,7 @@ export default class SkillLayerPlugin extends Plugin {
       // Revealing an existing leaf does NOT re-fire onOpen, so refresh from
       // disk here to pick up external edits (incl. dot-folder / external roots).
       await this.rescan();
+      this.applyPanelWidth();
       return;
     }
     const leaf = workspace.getRightLeaf(false);
@@ -380,6 +620,34 @@ export default class SkillLayerPlugin extends Plugin {
     // A freshly created leaf's onOpen() runs the rescan itself.
     await leaf.setViewState({ type: SKILL_LAYER_VIEW, active: true });
     await workspace.revealLeaf(leaf);
+    this.applyPanelWidth();
+  }
+
+  /**
+   * Open the browser side panel at the configured `panelWidth` so it always uses
+   * a consistent width rather than whatever the sidebar was last dragged to. The
+   * right-sidebar width has no public API, so this sets the width on the right
+   * split's container element (undocumented internals) behind a guarded cast and
+   * a `requestAnimationFrame` (so it lands after the reveal lays out). Best-effort
+   * — silently no-ops if the internals aren't shaped as expected or on mobile.
+   */
+  private applyPanelWidth(): void {
+    const width = this.settings.panelWidth;
+    if (!width || width <= 0) return;
+    const rightSplit = (this.app.workspace as unknown as {
+      rightSplit?: { containerEl?: HTMLElement; collapsed?: boolean };
+    }).rightSplit;
+    const el = rightSplit?.containerEl;
+    if (!el) return;
+    window.requestAnimationFrame(() => {
+      try {
+        el.style.width = `${width}px`;
+        // Nudge Obsidian to reconcile the split sizes to the new width.
+        this.app.workspace.requestSaveLayout?.();
+      } catch (err) {
+        console.error("[skill-layer] applyPanelWidth failed:", err);
+      }
+    });
   }
 
   /**
@@ -905,6 +1173,127 @@ export default class SkillLayerPlugin extends Plugin {
     const taken = new Set(this.settings.harnesses.map((h) => h.id));
     while (taken.has(id)) id = `${base}-${n++}`;
     return id;
+  }
+
+  // --- Bash scripts (Scripts tab) ----------------------------------------
+  /** The user-defined bash scripts (for the Scripts tab). */
+  getBashScripts(): BashScript[] {
+    return this.settings.bashScripts;
+  }
+
+  /** A stable, collision-free bash-script id derived from the label. */
+  private generateBashScriptId(label: string): string {
+    const base =
+      label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 32) || "script";
+    let id = base;
+    let n = 2;
+    const taken = new Set(this.settings.bashScripts.map((s) => s.id));
+    while (taken.has(id)) id = `${base}-${n++}`;
+    return id;
+  }
+
+  /**
+   * Add a bash script from the Scripts-tab form. `label` names it; `body` is the
+   * script source (multi-line ok). Returns an error string on rejection, else
+   * null. A stable id is generated.
+   */
+  async addBashScript(
+    label: string,
+    body: string,
+    launchMode: LaunchMode,
+    description?: string,
+  ): Promise<string | null> {
+    const trimmedLabel = label.trim();
+    if (!trimmedLabel) return "Script needs a name.";
+    if (!body.trim()) return "Script body is empty.";
+    const script: BashScript = {
+      id: this.generateBashScriptId(trimmedLabel),
+      label: trimmedLabel,
+      body,
+      launchMode: launchMode === "terminal" ? "terminal" : "headless",
+    };
+    const desc = description?.trim();
+    if (desc) script.description = desc;
+    this.settings.bashScripts.push(script);
+    await this.saveSettings();
+    this.refreshViews();
+    return null;
+  }
+
+  /** Update an existing bash script in place. Returns an error string, else null. */
+  async updateBashScript(
+    id: string,
+    label: string,
+    body: string,
+    launchMode: LaunchMode,
+    description?: string,
+  ): Promise<string | null> {
+    const script = this.settings.bashScripts.find((s) => s.id === id);
+    if (!script) return "Script not found.";
+    const trimmedLabel = label.trim();
+    if (!trimmedLabel) return "Script needs a name.";
+    if (!body.trim()) return "Script body is empty.";
+    script.label = trimmedLabel;
+    script.body = body;
+    script.launchMode = launchMode === "terminal" ? "terminal" : "headless";
+    const desc = description?.trim();
+    if (desc) script.description = desc;
+    else delete script.description;
+    await this.saveSettings();
+    this.refreshViews();
+    return null;
+  }
+
+  /** Remove a bash script by id. */
+  async removeBashScript(id: string): Promise<void> {
+    this.settings.bashScripts = this.settings.bashScripts.filter((s) => s.id !== id);
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  /**
+   * Run a bash script by id, per its own launch mode:
+   *   - terminal → open the user's default terminal running the body (visible).
+   *   - headless → spawn `bash -c <body>` (or `cmd /c` on Windows) detached via
+   *     the shared hardened spawn surface, Notices only.
+   * The body is user-authored and runs only on this explicit click (same trust
+   * model as custom harnesses). cwd = vault. Desktop-gated.
+   */
+  runBashScript(id: string): void {
+    if (!this.detector.canScanExternal()) {
+      new Notice("Skill and Harness Manager: running scripts requires the desktop app.");
+      return;
+    }
+    const cwd = this.detector.vaultBasePath();
+    if (!cwd) {
+      new Notice("Skill and Harness Manager: could not resolve the vault path; not running.");
+      return;
+    }
+    const script = this.settings.bashScripts.find((s) => s.id === id);
+    if (!script) return;
+
+    if (script.launchMode === "terminal") {
+      this.runRawInTerminal(script.body, cwd, `script-${script.id}`);
+      new Notice(`Running "${script.label}" in your terminal…`);
+      return;
+    }
+    // Headless: bash -c <body> (cmd /c on Windows). The body is a single inert
+    // argv element (shell:false), so it is never re-tokenized by a shell WE spawn
+    // — `bash -c` interprets it, which is the intended behavior for a script.
+    const argv =
+      process.platform === "win32"
+        ? ["cmd.exe", "/c", script.body]
+        : ["/bin/bash", "-c", script.body];
+    this.spawnOmnigent(
+      argv,
+      cwd,
+      `Running "${script.label}" in the background — check for output via Notices.`,
+      script.label,
+    );
   }
 
   // --- omnigent-configured harness discovery (M15.3) ---------------------
@@ -1434,6 +1823,43 @@ export default class SkillLayerPlugin extends Plugin {
     return true;
   }
 
+  /**
+   * Open a hidden (dot-folder) AGENT config by temporarily enabling the global
+   * hidden reveal, waiting for it to index, then routing to the YAML Viewer when
+   * enabled (else a normal leaf) and revealing its folder. Mirrors
+   * `openHiddenSkillTemporarily` but ends at the YAML-viewer/leaf open instead of
+   * the SKILL.md open. Returns false (undoing a reveal we just enabled) when the
+   * file never indexes, so the caller falls back to the OS app.
+   */
+  private async openHiddenAgentTemporarily(vaultPath: string): Promise<boolean> {
+    const wasActive = this.tempRevealActive;
+    await this.hiddenFiles.enable();
+    const tfile = await this.waitForTFile(vaultPath, 40, 50); // up to ~2s
+    if (!(tfile instanceof TFile)) {
+      if (!wasActive && !this.settings.showHiddenFolders) {
+        await this.hiddenFiles.disable();
+      }
+      return false;
+    }
+    this.tempRevealActive = true;
+    // Now that it's indexed, prefer the YAML Viewer; else open in a normal leaf.
+    if (!(await this.openInYamlViewer(tfile.path))) {
+      await this.app.workspace.getLeaf(false).openFile(tfile);
+    }
+    this.revealInFileExplorer(tfile.parent ?? tfile);
+    this.refreshViews();
+    return true;
+  }
+
+  /** Absolute path → vault-relative forward-slash path, or null when out-of-vault. */
+  private absToVaultRelative(absPath: string): string | null {
+    const base = this.detector.vaultBasePath();
+    if (!base) return null;
+    const rel = nodePath.relative(base, absPath);
+    if (rel === "" || rel.startsWith("..") || nodePath.isAbsolute(rel)) return null;
+    return rel.split(nodePath.sep).join("/");
+  }
+
   /** Poll for a vault-relative path to become an indexed TFile (post-reveal). */
   private async waitForTFile(
     vaultPath: string,
@@ -1653,38 +2079,92 @@ export default class SkillLayerPlugin extends Plugin {
       skill.kind ?? "skill",
     );
 
-    // Per-skill HARNESS (M15), resolved fail-closed. A CUSTOM harness spawns its
-    // own (validated, absolute) binary instead of omnigent and DEFINES the whole
+    // Build the skill's harness command (argv + session record + Notices) ONCE,
+    // then run it either headless (detached spawn) or in the user's preferred
+    // terminal — the SAME command in both modes. Per-item launch-mode override
+    // wins over the global default.
+    const plan = this.buildLaunchPlan(skill, prompt, cwd, contextPath);
+    if (!plan) return; // a Notice was already shown (invalid harness / binary).
+
+    if (this.effectiveLaunchMode(skill.id) === "terminal") {
+      this.runPlanInTerminal(plan, skill.name, cwd);
+    } else {
+      this.spawnOmnigent(plan.argv, cwd, plan.successNotice, plan.label);
+    }
+    plan.record();
+  }
+
+  /**
+   * Resolve a skill's harness into a runnable PLAN: the argv to execute, a label,
+   * a success Notice, and a session-recording closure. Fails closed exactly like
+   * the prior headless path (invalid custom harness / missing binary → a Notice
+   * and null). Shared by headless AND terminal launch, so both run the identical
+   * command; only how it is spawned differs.
+   */
+  private buildLaunchPlan(
+    skill: Skill,
+    prompt: string,
+    cwd: string,
+    contextPath?: string,
+  ): {
+    argv: string[];
+    label: string;
+    successNotice: string;
+    record: () => void;
+  } | null {
+    // Per-skill HARNESS (M15), resolved fail-closed. A CUSTOM harness runs its own
+    // (validated, absolute) binary instead of omnigent and DEFINES the whole
     // invocation, so the omnigent agent does not apply in that branch.
     const resolvedH = resolveSkillHarness(
       this.settings.skillHarness[skill.id],
       this.settings.harnesses,
     );
     if (resolvedH.kind === "custom") {
-      // A claude subagent (M17) is passed via the command's `{agent}` token;
-      // resolved fail-closed to "" if the stored name no longer exists.
+      const harness = resolvedH.harness;
+      // A claude subagent (M17) is passed via the command's `{agent}` token.
       const claudeAgent = this.claudeAgentOptionValue(skill.id);
-      this.launchCustomHarness(resolvedH.harness, prompt, cwd, skill.name, claudeAgent);
-      return;
+      const argv = buildCustomHarnessArgv({
+        command: harness.command,
+        prompt,
+        agent: claudeAgent,
+      });
+      if (!argv) {
+        new Notice(
+          `Skill and Harness Manager: custom harness "${harness.label}" has an invalid command; not launching.`,
+        );
+        return null;
+      }
+      const binary = argv[0];
+      if (!nodePath.isAbsolute(binary) || !fs.existsSync(binary)) {
+        new Notice(
+          `Skill and Harness Manager: custom harness "${harness.label}" binary not found: ${binary}`,
+        );
+        return null;
+      }
+      return {
+        argv,
+        label: harness.label,
+        successNotice: `Launching "${skill.name}" via "${harness.label}" — it should start shortly.`,
+        record: () =>
+          this.recordSession(
+            sessionToolFromCommand(binary) ?? "custom",
+            skill.name,
+            cwd,
+            binary,
+            { harnessId: harness.id, harnessLabel: harness.label },
+          ),
+      };
     }
 
-    // Resolve the omnigent binary, failing closed (shared with launchCustomAgent).
+    // Default / omnigent-harness path. Resolve the omnigent binary fail-closed.
     const binaryPath = this.resolveBinaryOrNotice();
-    if (!binaryPath) return;
+    if (!binaryPath) return null;
 
-    // Per-skill AGENT, resolved fail-closed: a built-in name reaches argv as an
-    // omnigent SUBCOMMAND only if it is in the hardcoded allowlist; a custom
-    // path reaches argv as a single inert positional after `run` only if it is a
-    // real direct child of the scan dir AND is either a `.yaml`/`.yml` file or a
-    // bundle directory containing `config.yaml`. Anything else (absent / unknown
-    // kind / bad name / bad path) → the Default agent (`omnigent run …`). No
-    // display label/description ever flows to argv.
+    // Per-skill AGENT, resolved fail-closed (see resolveAgentLaunch).
     const agent = resolveAgentLaunch(this.settings.skillAgent[skill.id], {
       scanDir: this.agentConfigDir() ?? "",
       exists: (p) => fs.existsSync(p),
     });
-    // Built-in omnigent harness (`--harness <h>`) — only a hardcoded-allowlist
-    // member; orthogonal to the agent, routes through the same omnigent binary.
     const argv = buildOmnigentArgv({
       binaryPath,
       prompt,
@@ -1692,75 +2172,19 @@ export default class SkillLayerPlugin extends Plugin {
       harness: resolvedH.kind === "omnigent" ? resolvedH.name : null,
       server: this.settings.omnigentServerUrl,
     });
-
-    // Spawn via the single shared hardened surface. The success Notice is built
-    // here (skill name + optional context file); the run's real success/failure
-    // is async (an 'error' or non-zero 'exit' Notices from spawnOmnigent).
-    this.spawnOmnigent(
+    return {
       argv,
-      cwd,
-      `Running "${skill.name}"${
+      label: "omnigent",
+      successNotice: `Running "${skill.name}"${
         contextPath ? ` on ${nodePath.basename(contextPath)}` : ""
       } in omnigent — it should appear in the omnigent UI shortly.`,
-    );
-    // Record the session for the Sessions tab (M20) — immediately, so it shows
-    // up the moment the user launches (no server round-trip to observe).
-    this.recordSession("omnigent", skill.name, cwd, binaryPath, {
-      agentArg: agent.mode === "custom" ? agent.path : undefined,
-      harness: resolvedH.kind === "omnigent" ? resolvedH.name : undefined,
-      server: this.settings.omnigentServerUrl,
-    });
-  }
-
-  /**
-   * Launch a skill through a user-defined CUSTOM harness (M15.3) — the plugin's
-   * only non-omnigent spawn. Re-validates fail-closed: the command must pass
-   * `isValidCustomHarnessCommand` (absolute binary + a `{prompt}` token) AND the
-   * binary must EXIST; otherwise a Notice and NO spawn. The prompt is
-   * control-char-stripped and substituted into the argv template
-   * (`buildCustomHarnessArgv`), then spawned via the SAME hardened surface as
-   * omnigent (argv array, shell:false, stdio ignore, cwd=vault).
-   */
-  private launchCustomHarness(
-    harness: CustomHarness,
-    prompt: string,
-    cwd: string,
-    skillName: string,
-    agent?: string,
-  ): void {
-    const argv = buildCustomHarnessArgv({ command: harness.command, prompt, agent });
-    if (!argv) {
-      new Notice(
-        `Skill and Harness Manager: custom harness "${harness.label}" has an invalid command; not launching.`,
-      );
-      return;
-    }
-    // Fail closed if the binary doesn't exist / isn't absolute (defense in depth
-    // on top of isValidCustomHarnessCommand's lexical absolute-path check).
-    const binary = argv[0];
-    if (!nodePath.isAbsolute(binary) || !fs.existsSync(binary)) {
-      new Notice(
-        `Skill and Harness Manager: custom harness "${harness.label}" binary not found: ${binary}`,
-      );
-      return;
-    }
-    this.spawnOmnigent(
-      argv,
-      cwd,
-      `Launching "${skillName}" via "${harness.label}" — it should start shortly.`,
-      harness.label,
-    );
-    // Universal tracking (M20): record EVERY custom-harness launch. Recognized
-    // binaries (claude/codex/isaac) get their built-in resume; anything else is
-    // tracked as "custom" and Connect does a best-effort resume with a hint to
-    // set a Resume command for the harness.
-    this.recordSession(
-      sessionToolFromCommand(binary) ?? "custom",
-      skillName,
-      cwd,
-      binary,
-      { harnessId: harness.id, harnessLabel: harness.label },
-    );
+      record: () =>
+        this.recordSession("omnigent", skill.name, cwd, binaryPath, {
+          agentArg: agent.mode === "custom" ? agent.path : undefined,
+          harness: resolvedH.kind === "omnigent" ? resolvedH.name : undefined,
+          server: this.settings.omnigentServerUrl,
+        }),
+    };
   }
 
   /**
@@ -1966,37 +2390,117 @@ export default class SkillLayerPlugin extends Plugin {
         hint = `Skill and Harness Manager: could not resume — the session may have ended or is no longer resumable.`;
       }
 
-      const plat = process.platform;
-      const { ext, content } = buildTerminalScript(argv, s.cwd, hint, plat);
-      const file = `${os.tmpdir()}/skill-harness-resume-${s.tool}-${Date.now()}${ext}`;
-      fs.writeFileSync(file, content, plat === "win32" ? {} : { mode: 0o755 });
-
-      // Open the script in the user's terminal, per platform.
-      let opener: string;
-      let openerArgs: string[];
-      if (plat === "win32") {
-        // `start "" file.bat` opens it in a new console window.
-        opener = "cmd.exe";
-        openerArgs = ["/c", "start", "", file];
-      } else if (plat === "darwin") {
-        opener = "/usr/bin/open";
-        openerArgs = [file];
-      } else {
-        // Linux: best-effort — the user's terminal, else x-terminal-emulator.
-        opener = process.env.TERMINAL || "x-terminal-emulator";
-        openerArgs = ["-e", "bash", file];
-      }
-      const child = spawn(opener, openerArgs, {
-        stdio: "ignore",
-        detached: true,
-        windowsHide: false,
-      });
-      child.unref?.();
+      const { ext, content } = buildTerminalScript(argv, s.cwd, hint, process.platform);
+      this.openTerminalScript(content, ext, `resume-${s.tool}`);
       new Notice(`Connecting to "${s.skillName}" (${label}) in your terminal…`);
     } catch (e) {
       console.error("[skill-layer] openSessionTerminal failed:", e);
       new Notice(`Skill and Harness Manager: could not open a terminal for this session.`);
     }
+  }
+
+  /**
+   * Run a launch PLAN (skill's harness argv) VISIBLY in the user's PREFERRED
+   * terminal. Writes a `cd <cwd> && <argv>` script (POSIX-quoted by
+   * `buildTerminalScript`) and opens it in the chosen emulator. Shows a tmux
+   * attach hint when the preferred terminal is tmux (detached). Never throws.
+   */
+  private runPlanInTerminal(
+    plan: { argv: string[]; label: string },
+    skillName: string,
+    cwd: string,
+  ): void {
+    const term = this.resolvePreferredTerminal();
+    const hint = `Skill and Harness Manager: "${plan.label}" exited non-zero — check it is installed and configured.`;
+    // Terminal mode is for an INTERACTIVE session: strip the harness's headless
+    // print flag (`-p`) so the CLI opens a session seeded with the prompt rather
+    // than answering-and-exiting, and keep the window open afterward so the user
+    // can continue. (tmux is detached, so keep-open doesn't apply there.)
+    const argv = toInteractiveArgv(plan.argv);
+    const keepOpen = !term.def.detached;
+    try {
+      const { ext, content } = buildTerminalScript(argv, cwd, hint, process.platform, keepOpen);
+      this.openTerminalScript(content, ext, `run-${plan.label}`, term);
+      if (term.def.detached) {
+        new Notice(
+          `Started "${skillName}" in ${term.def.label} — attach with: tmux attach -t ${TMUX_SESSION}`,
+        );
+      } else {
+        new Notice(`Opening "${skillName}" in ${term.def.label}…`);
+      }
+    } catch (e) {
+      console.error("[skill-layer] runPlanInTerminal failed:", e);
+      new Notice("Skill and Harness Manager: could not open a terminal.");
+    }
+  }
+
+  /**
+   * Run a RAW user-authored script `body` in the PREFERRED terminal (Bash Scripts
+   * tab, terminal mode): write `cd <cwd>` + body to a temp executable and open it
+   * in the chosen emulator. Never throws (Notices on failure).
+   */
+  private runRawInTerminal(body: string, cwd: string, tag = "script"): void {
+    const term = this.resolvePreferredTerminal();
+    try {
+      const { ext, content } = buildRawTerminalScript(body, cwd, process.platform);
+      this.openTerminalScript(content, ext, tag, term);
+      if (term.def.detached) {
+        new Notice(`Started script in ${term.def.label} — attach with: tmux attach -t ${TMUX_SESSION}`);
+      }
+    } catch (e) {
+      console.error("[skill-layer] runRawInTerminal failed:", e);
+      new Notice("Skill and Harness Manager: could not open a terminal.");
+    }
+  }
+
+  /**
+   * The shared temp-script + terminal-opener surface: write `content` to a temp
+   * file with extension `ext`, mark it executable (non-Windows), and open it in a
+   * terminal. `terminal` selects the emulator (defaults to the OS default when
+   * omitted — used by Sessions Connect); `tag` labels the temp filename.
+   */
+  private openTerminalScript(
+    content: string,
+    ext: string,
+    tag: string,
+    terminal?: DetectedTerminal,
+  ): void {
+    const plat = process.platform;
+    // Sanitize the tag so the temp FILENAME never contains spaces or other shell-
+    // unsafe characters (a label like "vibe agent" would otherwise break the
+    // `cd`/exec in some terminals, e.g. Ghostty's `-e` command handling).
+    const safeTag =
+      tag.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) ||
+      "run";
+    const file = `${os.tmpdir()}/skill-harness-${safeTag}-${Date.now()}${ext}`;
+    fs.writeFileSync(file, content, plat === "win32" ? {} : { mode: 0o755 });
+
+    // A specific preferred terminal, else the OS default (auto). buildOpenerCommand
+    // handles tmux + macOS GUI emulators + the per-platform default.
+    const opener = buildOpenerCommand({
+      terminal: terminal ?? { def: { id: "auto", label: "Auto" } },
+      scriptPath: file,
+      platform: plat,
+      linuxTerminalEnv: process.env.TERMINAL,
+    });
+    const child = spawn(opener.bin, opener.args, {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: false,
+    });
+    child.unref?.();
+
+    // Belt-and-suspenders cleanup: delete the temp launcher a few seconds later,
+    // once the terminal has read+started it. The script also self-deletes at run
+    // time (`rm -f "$0"`); this covers the case where the terminal never launched
+    // so a stale script can't be re-run by session-restore. Never throws.
+    window.setTimeout(() => {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* already gone (self-deleted) or never created — fine */
+      }
+    }, 10000);
   }
 
   // --- Custom agents (Agents tab, M10) -----------------------------------
@@ -2044,6 +2548,20 @@ export default class SkillLayerPlugin extends Plugin {
       const tf = this.pathToVaultTFile(fileToOpen);
       if (tf) this.revealInFileExplorer(tf.parent ?? tf);
       return;
+    }
+    // The config lives in `.omnigent/agent-configs/…`, a hidden dot-folder. When
+    // "Show hidden folders" is off it isn't indexed, so the YAML-viewer check
+    // above failed — mirror openSkill's hidden branch: temporarily reveal hidden
+    // folders, wait for the file to index, THEN open it in Obsidian (YAML viewer
+    // if enabled, else a normal leaf). onLayoutChange re-hides once it's closed.
+    const vaultRel = this.absToVaultRelative(fileToOpen);
+    if (
+      vaultRel &&
+      this.canRevealHiddenFolders() &&
+      !this.settings.showHiddenFolders
+    ) {
+      if (await this.openHiddenAgentTemporarily(vaultRel)) return;
+      // Fell through: never indexed — fall back to the OS app below.
     }
     try {
       const result: string = await shell.openPath(fileToOpen);

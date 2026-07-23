@@ -54,6 +54,34 @@ function dedupe(xs: string[]): string[] {
   return Array.from(new Set(xs));
 }
 
+/** Every known tool-folder segment (skills + commands + agents), deduped. */
+export function allToolFolderSegments(): string[] {
+  const all: string[] = [];
+  for (const t of TOOL_FOLDERS) {
+    if (t.skills) all.push(t.skills);
+    if (t.commands) all.push(t.commands);
+    if (t.agents) all.push(t.agents);
+  }
+  return dedupe(all);
+}
+
+/**
+ * The actual tool folder an absolute path lives under (e.g. `.claude/skills`,
+ * `.codex/prompts`, `.claude/agents`), or null when it matches no known tool
+ * folder. Matches the LONGEST segment first so a nested segment like
+ * `.codeium/windsurf/memories` wins over any shorter accidental match. The match
+ * is on the path containing `/<segment>/` (works for both in-vault and home-dir
+ * paths). Case-insensitive. Pure / unit-testable.
+ */
+export function toolFolderForPath(absPath: string): string | null {
+  const p = absPath.replace(/\\/g, "/").toLowerCase();
+  const segments = allToolFolderSegments().sort((a, b) => b.length - a.length);
+  for (const seg of segments) {
+    if (p.includes(`/${seg.toLowerCase()}/`)) return seg;
+  }
+  return null;
+}
+
 /**
  * The default SKILL scan roots pre-seeded from the tool map: each tool's skills
  * folder as a vault-relative `adapter` root AND (when a home dir is given) an

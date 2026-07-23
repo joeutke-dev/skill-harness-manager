@@ -12,6 +12,7 @@ import type { CustomAgent } from "./launch";
 export type SkillLayerTab =
   | "skills"
   | "commands"
+  | "scripts"
   | "sessions"
   | "agents"
   | "harnesses";
@@ -23,6 +24,7 @@ export const DEFAULT_TAB: SkillLayerTab = "skills";
 export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "commands", label: "Commands" },
+  { id: "scripts", label: "Scripts" },
   { id: "sessions", label: "Sessions" },
   { id: "agents", label: "Agents" },
   { id: "harnesses", label: "Harnesses" },
