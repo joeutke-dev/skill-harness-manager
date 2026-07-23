@@ -641,7 +641,8 @@ export default class SkillLayerPlugin extends Plugin {
     if (!el) return;
     window.requestAnimationFrame(() => {
       try {
-        el.style.width = `${width}px`;
+        // setCssStyles (not a direct .style assignment) per Obsidian guidelines.
+        el.setCssStyles({ width: `${width}px` });
         // Nudge Obsidian to reconcile the split sizes to the new width.
         this.app.workspace.requestSaveLayout?.();
       } catch (err) {

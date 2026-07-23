@@ -1,7 +1,7 @@
 {
 	"id": "skill-harness-manager",
 	"name": "Skill and Harness Manager",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"minAppVersion": "1.5.0",
 	"description": "Keep your AI skills, commands, and agents in one place and run them from your vault — from the ribbon, the command palette, or by right-clicking a file.",
 	"author": "Joe Utke",

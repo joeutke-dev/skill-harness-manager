@@ -45,9 +45,9 @@ export class SkillLayerSettingTab extends PluginSettingTab {
    */
   private pickFolder(onPick: (absPath: string) => void): void {
     const input = createEl("input", {
+      cls: "skill-layer-hidden-input",
       attr: { type: "file", webkitdirectory: "", multiple: "" },
     });
-    input.style.display = "none";
     input.addEventListener("change", () => {
       const files = input.files;
       // Electron exposes an absolute `path` on the File; the folder is its dir.
@@ -74,8 +74,9 @@ export class SkillLayerSettingTab extends PluginSettingTab {
 
     const settings = this.plugin.settings;
 
-    // ============================ GENERAL ============================
-    new Setting(containerEl).setName("General").setHeading();
+    // General settings lead the page with NO "General" heading (Obsidian
+    // guideline: the first/default section is unlabeled). Sectioned headings
+    // (Scan roots / Omnigent / Custom harnesses) come after.
 
     // --- Show hidden folders (M15, placed first) --------------------------
     // Reveals dot-folders (e.g. .claude/) in Obsidian's file explorer via a
