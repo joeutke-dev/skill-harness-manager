@@ -52,6 +52,7 @@ const {
   buildOmnigentArgv,
   isValidOmnigentServer,
   buildRightClickMenuItems,
+  buildEditorMenuItems,
   isAllowedOmnigentPath,
   omnigentCandidatePaths,
   resolveOmnigentBinary,
@@ -159,6 +160,10 @@ const {
   defaultSkillScanRoots,
   homeSkillRootPaths,
   joinHome,
+  EXTERNAL_BRIDGE_DIR,
+  bridgeLinkName,
+  fnv1aHex,
+  buildExternalOpenPlan,
 } = await import(pathToFileURL(foldersOut).href);
 
 // M20: pure session helpers (resume argv, terminal script, cwd encoding, prune).
@@ -479,6 +484,124 @@ console.log("\n[d] Right-click menu items gated by enablement");
   eq("all-disabled → zero items", none.length, 0);
   const all = buildRightClickMenuItems(skills, () => true, ctxPath);
   eq("all-enabled → all items", all.length, 3);
+}
+
+// =====================================================================
+// (e) M-EDIT: editor-selection prompt builder — appends the Selected-text
+//     clause + edit-this-file default, forces the vault anchor, and stays
+//     inert; the menu builder is gated by editorMenuEnabled.
+// =====================================================================
+console.log("\n[e] M-EDIT selection prompt + menu items");
+{
+  const ctx = `${VAULT}/Notes/idea.md`;
+  const sel = "the quick brown fox";
+  // selectionText is the 7th positional arg (after kind).
+  const p = buildLaunchPrompt("humanize", VAULT, true, ctx, undefined, "skill", sel);
+  check("starts with `Use the <name> skill.`", p.startsWith("Use the humanize skill."));
+  check("includes `Context file: <path>`", p.includes(`Context file: ${ctx}.`));
+  check("includes the Selected-text clause", p.includes(`Selected text (from the current file): "${sel}".`));
+  check("includes the edit-this-file default", p.includes("Edit this file in place unless the skill says otherwise."));
+  check("no leading slash", !p.startsWith("/"));
+
+  // A selection with NO context path still forces the vault anchor even when
+  // appendAnchor=false, so selection-driven writes stay vault-scoped.
+  const pNoAnchor = buildLaunchPrompt("humanize", VAULT, false, undefined, undefined, "skill", sel);
+  check(
+    "selection forces vault-anchor regardless of appendAnchor",
+    pNoAnchor.includes(`Operate in this vault: ${VAULT}.`) &&
+      pNoAnchor.includes(`Selected text (from the current file): "${sel}".`),
+  );
+
+  // Whitespace-only selection is a no-op: identical to the bare M1 prompt.
+  const emptySel = buildLaunchPrompt("humanize", VAULT, false, undefined, undefined, "skill", "   ");
+  eq("whitespace-only selection is omitted (== bare M1)", emptySel, "Use the humanize skill.");
+
+  // Absent selection leaves the M3 context prompt byte-for-byte unchanged.
+  const noSel = buildLaunchPrompt("transcribe-meeting", VAULT, true, ctx);
+  check("absent selection → no Selected-text clause", !noSel.includes("Selected text"));
+
+  // A hostile selection stays a SINGLE inert fragment inside the one -p element.
+  const hostileSel = `"; rm -rf ~" $(whoami) --harness pwn --server http://evil`;
+  const argv = buildOmnigentArgv({
+    binaryPath: BIN,
+    prompt: buildLaunchPrompt("humanize", VAULT, true, ctx, undefined, "skill", hostileSel),
+  });
+  eq("selection argv length == 4", argv.length, 4);
+  check("hostile selection fully contained in argv[3]", argv[3].includes(hostileSel));
+  check("no standalone `--harness` token from selection", argv.indexOf("--harness") === -1);
+  check("no standalone `--server` token from selection", argv.indexOf("--server") === -1);
+
+  // Menu builder is gated by editorMenuEnabled, mirrors buildRightClickMenuItems.
+  const skills = [
+    { id: "/v/a/SKILL.md", name: "humanize" },
+    { id: "/v/b/SKILL.md", name: "summarize-transcript" },
+    { id: "/v/c/SKILL.md", name: "daily-note" },
+  ];
+  const enabled = new Set(["/v/a/SKILL.md", "/v/c/SKILL.md"]);
+  const items = buildEditorMenuItems(skills, (id) => enabled.has(id), ctx, sel);
+  eq("only enabled skills produce items", items.length, 2);
+  check(
+    "items are exactly the enabled skills in order",
+    deepEq(items.map((i) => i.skillId), ["/v/a/SKILL.md", "/v/c/SKILL.md"]),
+  );
+  eq("item title format", items[0].title, 'Run "humanize" on selection');
+  check("every item carries the current file path", items.every((i) => i.contextPath === ctx));
+  check("every item carries the selection text", items.every((i) => i.selection === sel));
+
+  const none = buildEditorMenuItems(skills, () => false, ctx, sel);
+  eq("all-disabled → zero items", none.length, 0);
+  const all = buildEditorMenuItems(skills, () => true, ctx, sel);
+  eq("all-enabled → all items", all.length, 3);
+}
+
+// =====================================================================
+// (f) M-EXT: external-skill open bridge — the pure plan builder that maps
+//     an out-of-vault skill file to an in-vault symlink path.
+// =====================================================================
+console.log("\n[f] M-EXT external-skill open bridge plan");
+{
+  // FNV-1a hash: deterministic, 8 hex chars, differs for different inputs.
+  check("fnv1aHex is 8 lowercase hex chars", /^[0-9a-f]{8}$/.test(fnv1aHex("/a/b/c")));
+  check("fnv1aHex deterministic", fnv1aHex("/a/b/c") === fnv1aHex("/a/b/c"));
+  check("fnv1aHex differs for different input", fnv1aHex("/a/b/c") !== fnv1aHex("/a/b/d"));
+
+  // bridgeLinkName: <hash>-<sanitized basename>.
+  const ln = bridgeLinkName("/Users/j/claude/skills/humanize");
+  check("bridgeLinkName ends with sanitized basename", ln.endsWith("-humanize"));
+  check("bridgeLinkName starts with an 8-hex hash + dash", /^[0-9a-f]{8}-/.test(ln));
+  check(
+    "bridgeLinkName sanitizes unsafe chars",
+    /^[0-9a-f]{8}-[A-Za-z0-9._-]+$/.test(bridgeLinkName("/x/we ird!name")),
+  );
+  check(
+    "different source folders → different link names",
+    bridgeLinkName("/a/skills/x") !== bridgeLinkName("/b/skills/x"),
+  );
+
+  // buildExternalOpenPlan: file → symlink-through-folder plan.
+  const vault = "/Users/j/Documents/Vault";
+  const fileAbs = "/Users/j/claude/skills/humanize/SKILL.md";
+  const plan = buildExternalOpenPlan(fileAbs, vault, "/");
+  check("source folder is the file's parent", plan.sourceFolderAbs === "/Users/j/claude/skills/humanize");
+  check("link lives under the managed bridge dir", plan.linkVaultRel.startsWith(EXTERNAL_BRIDGE_DIR + "/"));
+  check("link abs is under the vault base", plan.linkAbs.startsWith(vault + "/" + EXTERNAL_BRIDGE_DIR + "/"));
+  check(
+    "file vault-rel = link dir + original basename",
+    plan.fileVaultRel === `${plan.linkVaultRel}/SKILL.md`,
+  );
+  check("bridge dir is dot-prefixed (hidden by default)", EXTERNAL_BRIDGE_DIR.startsWith("."));
+
+  // Fail-closed on bad inputs.
+  check("null vault base → null plan", buildExternalOpenPlan(fileAbs, "", "/") === null);
+  check("empty file → null plan", buildExternalOpenPlan("", vault, "/") === null);
+  check("bare filename (no parent) → null plan", buildExternalOpenPlan("SKILL.md", vault, "/") === null);
+
+  // Two skills from the SAME external folder share one link dir (dedup),
+  // but resolve to distinct files through it.
+  const p1 = buildExternalOpenPlan("/x/skills/pack/a.md", vault, "/");
+  const p2 = buildExternalOpenPlan("/x/skills/pack/b.md", vault, "/");
+  check("same folder → same link dir", p1.linkVaultRel === p2.linkVaultRel);
+  check("same folder → distinct files", p1.fileVaultRel !== p2.fileVaultRel);
 }
 
 // =====================================================================

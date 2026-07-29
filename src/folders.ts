@@ -113,3 +113,94 @@ export function homeSkillRootPaths(homedir: string): string[] {
 export function joinHome(homedir: string, seg: string): string {
   return homedir.replace(/\/+$/, "") + "/" + seg.replace(/^\/+/, "");
 }
+
+// --- External-file open bridge (M-EXT) ------------------------------------
+// "View file" on a skill whose file lives OUTSIDE the vault (an absolute
+// `external` scan root) can't open in Obsidian, because Obsidian only indexes
+// files under the vault root — so today it falls back to the OS default app
+// (VS Code, …). To open it IN OBSIDIAN we bridge: symlink the external skill's
+// containing FOLDER into a hidden, plugin-managed directory inside the vault,
+// which makes the file a real (indexable) vault path. The existing
+// temporary-reveal open path then opens it in a tab. These helpers are pure /
+// unit-testable; the actual symlink + open (impure) live in main.ts.
+
+/**
+ * The hidden, plugin-managed vault directory that holds the external-skill
+ * bridge symlinks. Dot-prefixed so it stays out of the file explorer by default
+ * (the temporary-reveal path surfaces it only while a bridged file is open),
+ * and EXCLUDED from skill discovery so bridged skills never double-count.
+ */
+export const EXTERNAL_BRIDGE_DIR = ".shm-external";
+
+/**
+ * Stable, filesystem-safe directory name for one external skill folder's bridge
+ * symlink. Combines a short FNV-1a hash of the absolute source folder (so two
+ * different sources never collide) with a sanitized basename (so the name is
+ * still human-recognizable in the explorer). Pure / deterministic.
+ */
+export function bridgeLinkName(absFolderPath: string): string {
+  const norm = absFolderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const base = norm.split("/").pop() || "skill";
+  const safeBase = base.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "").slice(0, 40) || "skill";
+  return `${fnv1aHex(norm)}-${safeBase}`;
+}
+
+/** 32-bit FNV-1a hash of a string, as 8 lowercase hex chars. Pure. */
+export function fnv1aHex(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    // FNV prime 16777619, kept in 32-bit range via Math.imul.
+    h = Math.imul(h, 0x01000193);
+  }
+  // >>> 0 → unsigned; pad to a fixed 8-char width.
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** A resolved plan for bridging one external skill file into the vault. */
+export interface ExternalOpenPlan {
+  /** Absolute path of the source FOLDER to symlink (the skill file's parent). */
+  sourceFolderAbs: string;
+  /** Absolute path of the symlink to create, `<vault>/<bridgeDir>/<linkName>`. */
+  linkAbs: string;
+  /** Vault-relative path of the symlink DIRECTORY (forward-slash). */
+  linkVaultRel: string;
+  /** Vault-relative path of the skill FILE THROUGH the symlink (forward-slash). */
+  fileVaultRel: string;
+}
+
+/**
+ * Compute the bridge plan for opening an external skill file in Obsidian, or
+ * null when the inputs can't produce a valid in-vault path. `fileAbs` is the
+ * skill file's absolute path; `vaultBase` the vault root. The symlink points at
+ * the file's PARENT folder (so sibling scripts/references come along), and the
+ * file is addressed through the link by its basename. Pure — no filesystem
+ * access; the caller creates the link and opens `fileVaultRel`.
+ *
+ * `sep` is the platform path separator (injected for testability; defaults to
+ * the POSIX "/").
+ */
+export function buildExternalOpenPlan(
+  fileAbs: string,
+  vaultBase: string,
+  sep = "/",
+): ExternalOpenPlan | null {
+  if (!fileAbs || !vaultBase) return null;
+  const normFile = fileAbs.replace(/\\/g, "/").replace(/\/+$/, "");
+  const slash = normFile.lastIndexOf("/");
+  if (slash <= 0) return null;
+  const fileBase = normFile.slice(slash + 1);
+  const sourceFolderAbs = normFile.slice(0, slash);
+  if (!fileBase || !sourceFolderAbs) return null;
+
+  const linkName = bridgeLinkName(sourceFolderAbs);
+  const linkVaultRel = `${EXTERNAL_BRIDGE_DIR}/${linkName}`;
+  const normBase = vaultBase.replace(/\\/g, "/").replace(/\/+$/, "");
+  const linkAbs = `${normBase}${sep}${EXTERNAL_BRIDGE_DIR}${sep}${linkName}`.split("/").join(sep);
+  return {
+    sourceFolderAbs,
+    linkAbs,
+    linkVaultRel,
+    fileVaultRel: `${linkVaultRel}/${fileBase}`,
+  };
+}

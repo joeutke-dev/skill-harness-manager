@@ -39,6 +39,7 @@ export function buildLaunchPrompt(
   contextPath?: string,
   userPrompt?: string,
   kind: "skill" | "command" = "skill",
+  selectionText?: string,
 ): string {
   // A command (M18) is a `/name` slash command; a skill is invoked by name. The
   // command form starts with "Run" (NOT a leading slash) so omnigent's REPL
@@ -60,9 +61,22 @@ export function buildLaunchPrompt(
   const hasContext = typeof contextPath === "string" && contextPath.length > 0;
   // The path is concatenated as inert prose — never split out as a separate
   // token — so any spaces/quotes/dashes/metacharacters in it stay contained.
-  const head = hasContext ? `${withUser} Context file: ${contextPath}.` : withUser;
-  // No context + anchor off + no user text → exactly the M1 prompt.
-  if (!appendAnchor && !hasContext) return head;
+  const withContext = hasContext ? `${withUser} Context file: ${contextPath}.` : withUser;
+  // M-EDIT: the editor-selection path. The highlighted text (and an
+  // edit-this-file default) is appended as inert prose inside this single
+  // returned string — never its own argv element. Like `contextPath`, a
+  // selection launch operates on a specific file, so the vault anchor is ALWAYS
+  // included below regardless of `appendAnchor`. On the custom-harness path the
+  // selection is control-char-stripped by the caller (newlines flattened), same
+  // as `userPrompt`.
+  const trimmedSel = typeof selectionText === "string" ? selectionText.trim() : "";
+  const hasSelection = trimmedSel.length > 0;
+  const head = hasSelection
+    ? `${withContext} Selected text (from the current file): "${trimmedSel}".` +
+      " Edit this file in place unless the skill says otherwise."
+    : withContext;
+  // No context + no selection + anchor off + no user text → exactly the M1 prompt.
+  if (!appendAnchor && !hasContext && !hasSelection) return head;
   return (
     `${head} Operate in this vault: ${vaultPath}.` +
     " Write any files into this vault directory only." +
@@ -1164,6 +1178,46 @@ export function buildRightClickMenuItems(
       title: `Run "${s.name}" here`,
       skillId: s.id,
       contextPath: contextAbsPath,
+    });
+  }
+  return items;
+}
+
+/** A single resolved editor-selection (editor-menu) entry (M-EDIT). */
+export interface EditorMenuItem {
+  /** Menu label, e.g. `Run "humanize" on selection`. */
+  title: string;
+  /** The skill id (= absolute path) to launch. */
+  skillId: string;
+  /** The current file's absolute path, passed as the launch context. */
+  contextPath: string;
+  /** The highlighted text, passed as inert selection context. */
+  selection: string;
+}
+
+/**
+ * Pure construction of the editor right-click items for the M-EDIT surface —
+ * the selection analogue of `buildRightClickMenuItems`. GATED by `isEnabled(id)`
+ * (reads `editorMenuSkillIds`), so only selection-enabled skills produce an item.
+ * The current file's absolute path AND the highlighted text are carried through
+ * unchanged; the launcher embeds both as inert text inside the single `-p`
+ * prompt (never their own argv elements). Kept side-effect-free so it is unit
+ * testable independent of Obsidian's `Menu`/`Editor`.
+ */
+export function buildEditorMenuItems(
+  skills: { id: string; name: string }[],
+  isEnabled: (id: string) => boolean,
+  contextAbsPath: string,
+  selection: string,
+): EditorMenuItem[] {
+  const items: EditorMenuItem[] = [];
+  for (const s of skills) {
+    if (!isEnabled(s.id)) continue;
+    items.push({
+      title: `Run "${s.name}" on selection`,
+      skillId: s.id,
+      contextPath: contextAbsPath,
+      selection,
     });
   }
   return items;

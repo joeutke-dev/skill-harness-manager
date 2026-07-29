@@ -4,7 +4,10 @@ import * as fs from "fs";
 import * as os from "os";
 import * as nodePath from "path";
 import {
+  Editor,
   FileSystemAdapter,
+  MarkdownFileInfo,
+  MarkdownView,
   Menu,
   Notice,
   Plugin,
@@ -37,6 +40,7 @@ import {
   buildAgentInvocation,
   buildLaunchPrompt,
   buildOmnigentArgv,
+  buildEditorMenuItems,
   buildRightClickMenuItems,
   buildSkillCliInvocation,
   BUNDLE_CONFIG_NAME,
@@ -69,8 +73,10 @@ import {
 } from "./launch";
 import {
   agentFolderSegments,
+  buildExternalOpenPlan,
   commandFolderSegments,
   defaultSkillScanRoots,
+  EXTERNAL_BRIDGE_DIR,
   homeSkillRootPaths,
   joinHome,
   skillFolderSegments,
@@ -80,6 +86,7 @@ import {
   coerceFrontmatterTags,
   firstHeading,
   inferSourceLabel,
+  normalizeExternalRoot,
   parseFrontmatter,
   resolveSkillTags,
   sanitizeTag,
@@ -211,6 +218,18 @@ export default class SkillLayerPlugin extends Plugin {
       ),
     );
 
+    // M-EDIT: editor-selection right-click. When text is highlighted in a note,
+    // each selection-enabled skill adds a `Run "<name>" on selection` item that
+    // launches it one-shot with the current file as context AND the highlighted
+    // text as inert prompt context. No item is added when the selection is empty.
+    this.registerEvent(
+      this.app.workspace.on(
+        "editor-menu",
+        (menu: Menu, editor: Editor, view: MarkdownView | MarkdownFileInfo) =>
+          this.addEditorMenuItems(menu, editor, view),
+      ),
+    );
+
     // Initial scan + restore pinned ribbon icons once the layout is ready.
     this.app.workspace.onLayoutReady(async () => {
       await this.rescan();
@@ -249,6 +268,28 @@ export default class SkillLayerPlugin extends Plugin {
     // unregistered by Obsidian on unload; this just drops our in-memory state.)
     this.pinnedCommandIds.clear();
     this.usedCommandLocalIds.clear();
+    // Best-effort remove the external-skill bridge symlinks (M-EXT). These are
+    // just links (the real files live elsewhere), so removal is safe; fire and
+    // forget since onunload is synchronous.
+    void this.cleanupExternalBridge();
+  }
+
+  /**
+   * Remove the managed external-skill bridge directory and its symlinks (M-EXT).
+   * The entries are symlinks to external folders, so deleting them never touches
+   * the real skill files. Best-effort and silent — a missing dir is a no-op.
+   * Called on unload so bridge links don't accumulate across sessions.
+   */
+  private async cleanupExternalBridge(): Promise<void> {
+    if (!this.detector.canScanExternal()) return;
+    const base = this.detector.vaultBasePath();
+    if (!base) return;
+    const bridgeDirAbs = nodePath.join(base, EXTERNAL_BRIDGE_DIR);
+    try {
+      await fs.promises.rm(bridgeDirAbs, { recursive: true, force: true });
+    } catch (err) {
+      console.error("[skill-layer] external bridge cleanup failed:", err);
+    }
   }
 
   // --- Settings ----------------------------------------------------------
@@ -288,12 +329,14 @@ export default class SkillLayerPlugin extends Plugin {
     }
 
     // M18: remove the home-directory (global) skill roots an earlier build
-    // auto-added (external kind, disabled) — they cluttered settings and mixed
-    // machine-global skills with the user's in-vault skills. Only the exact
-    // auto-added paths are dropped, so a user's own custom external roots stay.
+    // auto-added (external kind, DISABLED) — they cluttered settings and mixed
+    // machine-global skills with the user's in-vault skills. Scope the strip to
+    // `!enabled` so we only drop those legacy auto-added roots: a user who later
+    // ADDS one of these same well-known paths themselves does so ENABLED (see
+    // settingsTab `addRoot`), so their choice is preserved across reloads.
     const homeRoots = new Set(homeSkillRootPaths(os.homedir()));
     this.settings.scanRoots = this.settings.scanRoots.filter(
-      (r) => !(r.kind === "external" && homeRoots.has(r.path)),
+      (r) => !(r.kind === "external" && !r.enabled && homeRoots.has(r.path)),
     );
     // Union the per-tool VAULT skill scan roots (from the Agentfiles tool map)
     // into whatever's stored, so in-vault skills across Claude/Cursor/Codex/etc.
@@ -389,6 +432,59 @@ export default class SkillLayerPlugin extends Plugin {
       console.error("[skill-layer] createToolFolder failed:", err);
       return "Could not create the folder.";
     }
+  }
+
+  /**
+   * Add an ABSOLUTE folder path (chosen from the OS folder picker) as an enabled
+   * `external` scan root, then rescan. Mirrors the Settings-tab add-root routine
+   * (`normalizeExternalRoot` + dedupe by path+kind) so a root added from the
+   * Skills/Commands tab "+" behaves identically. Returns an error string, or null
+   * on success (incl. an already-present root — a no-op, not an error). Desktop /
+   * FileSystemAdapter only. Enabled so it survives reloads (the load-time M18
+   * strip only drops DISABLED legacy home roots).
+   */
+  async addExternalScanRoot(absPath: string): Promise<string | null> {
+    if (!this.detector.canScanExternal()) return "Requires the desktop app with filesystem access.";
+    const trimmed = (absPath ?? "").trim();
+    if (!trimmed || !nodePath.isAbsolute(trimmed)) return "Please choose an absolute folder path.";
+    const path = normalizeExternalRoot(trimmed);
+    const exists = this.settings.scanRoots.some(
+      (r) => r.path === path && r.kind === "external",
+    );
+    if (!exists) {
+      this.settings.scanRoots.push({ path, kind: "external", enabled: true });
+      await this.saveSettings();
+      await this.rescan();
+    }
+    return null;
+  }
+
+  /**
+   * Open a native folder picker and pass the chosen folder's ABSOLUTE path to
+   * `onPick` (mirrors the Settings-tab picker): a hidden
+   * `<input type="file" webkitdirectory>` whose selected files expose an absolute
+   * `.path` in Electron. No Electron dialog/remote dependency; a Notice on
+   * failure.
+   */
+  pickExternalFolder(onPick: (absPath: string) => void): void {
+    const input = createEl("input", {
+      cls: "skill-layer-hidden-input",
+      attr: { type: "file", webkitdirectory: "", multiple: "" },
+    });
+    input.addEventListener("change", () => {
+      const files = input.files;
+      const first =
+        files && files.length > 0 ? (files[0] as File & { path?: string }).path : undefined;
+      if (first) {
+        const dir = first.replace(/[/\\][^/\\]*$/, "");
+        onPick(dir || first);
+      } else {
+        new Notice("Skill and Harness Manager: could not read the chosen folder path.");
+      }
+      input.remove();
+    });
+    activeDocument.body.appendChild(input);
+    input.click();
   }
 
   /**
@@ -703,6 +799,31 @@ export default class SkillLayerPlugin extends Plugin {
       `Skill and Harness Manager: ${on ? "removed" : "added"} "${skill.name}" ${
         on ? "from" : "to"
       } the right-click menu.`,
+    );
+  }
+
+  // --- Editor-selection (editor-menu) per-skill toggle (M-EDIT) ----------
+  /** True if this skill is exposed in the editor selection right-click menu. */
+  isEditorMenuEnabled(id: string): boolean {
+    return this.settings.editorMenuSkillIds.includes(id);
+  }
+
+  /** Flip a skill's `editorMenuEnabled` membership and persist to data.json. */
+  async toggleEditorMenu(skill: Skill): Promise<void> {
+    const on = this.isEditorMenuEnabled(skill.id);
+    if (on) {
+      this.settings.editorMenuSkillIds = this.settings.editorMenuSkillIds.filter(
+        (x) => x !== skill.id,
+      );
+    } else {
+      this.settings.editorMenuSkillIds.push(skill.id);
+    }
+    await this.saveSettings();
+    this.refreshViews();
+    new Notice(
+      `Skill and Harness Manager: ${on ? "removed" : "added"} "${skill.name}" ${
+        on ? "from" : "to"
+      } the selection menu.`,
     );
   }
 
@@ -1454,6 +1575,49 @@ export default class SkillLayerPlugin extends Plugin {
     }
   }
 
+  /**
+   * Populate the editor right-click menu (editor-menu event) for the M-EDIT
+   * selection surface. Desktop-only (same spawn gate as launchSkill). Adds an
+   * item ONLY when there is a non-empty text selection AND the editor is backed
+   * by a real vault file — so the menu never appears for an empty selection or an
+   * unsaved buffer. The current file's absolute path (context) and the
+   * highlighted text are passed to `launchSkill`; both reach argv only as inert
+   * text inside the single `-p` prompt (see buildLaunchPrompt + launchSkill).
+   */
+  private addEditorMenuItems(
+    menu: Menu,
+    editor: Editor,
+    view: MarkdownView | MarkdownFileInfo,
+  ): void {
+    if (!this.detector.canScanExternal()) return;
+    const base = this.detector.vaultBasePath();
+    if (!base) return;
+    const selection = editor.getSelection();
+    if (!selection || selection.trim().length === 0) return;
+    // The editor must be backed by a real vault file to give the skill a target.
+    const file = view.file;
+    if (!(file instanceof TFile)) return;
+    const contextAbsPath = nodePath.join(base, file.path);
+
+    const items = buildEditorMenuItems(
+      this.skills,
+      (id) => this.isEditorMenuEnabled(id),
+      contextAbsPath,
+      selection,
+    );
+    for (const it of items) {
+      menu.addItem((item) => {
+        item
+          .setTitle(it.title)
+          .setIcon("brain-circuit")
+          .onClick(() => {
+            const skill = this.getSkillById(it.skillId);
+            if (skill) void this.launchSkill(skill, it.contextPath, undefined, it.selection);
+          });
+      });
+    }
+  }
+
   /** True if `id` renders to an <svg> glyph via `setIcon` (naming-scheme agnostic). */
   private iconResolves(id: string): boolean {
     if (!id) return false;
@@ -1778,6 +1942,10 @@ export default class SkillLayerPlugin extends Plugin {
       if (await this.openHiddenSkillTemporarily(skill.vaultPath)) return;
       // Fell through: the file never indexed — fall back to the OS app below.
     }
+    // External (out-of-vault) skill: bridge it INTO the vault via a managed
+    // symlink so it can open in an Obsidian tab (M-EXT). Falls through to the
+    // OS-app fallback below if the bridge can't be created / indexed.
+    if (!skill.vaultPath && (await this.openExternalSkillViaBridge(skill))) return;
     // External / fallback — open with the OS default app, then reveal its
     // containing folder in the OS file manager.
     try {
@@ -1788,6 +1956,59 @@ export default class SkillLayerPlugin extends Plugin {
       console.error("[skill-layer] openPath failed:", err);
       new Notice("Could not open skill file.");
     }
+  }
+
+  /**
+   * Open an EXTERNAL (out-of-vault) skill file in Obsidian by bridging it into
+   * the vault (M-EXT). Symlinks the skill file's containing FOLDER into the
+   * hidden managed dir `<vault>/.shm-external/<hash>-<name>`, which turns the
+   * file into an indexable vault path, then reuses the temporary-reveal open
+   * path (`openHiddenSkillTemporarily`) to open it in a tab. Returns false (so
+   * the caller falls back to the OS app) on any failure: no vault base, no
+   * filesystem capability, symlink error, or the file never indexes. Desktop /
+   * FileSystemAdapter only. Creating the link is idempotent — an existing,
+   * correct symlink is reused; a stale one (wrong target) is replaced.
+   */
+  private async openExternalSkillViaBridge(skill: Skill): Promise<boolean> {
+    if (!this.detector.canScanExternal()) return false;
+    const base = this.detector.vaultBasePath();
+    if (!base) return false;
+    const plan = buildExternalOpenPlan(skill.path, base, nodePath.sep);
+    if (!plan) return false;
+    try {
+      // Ensure the managed bridge dir exists, then (re)create the folder symlink.
+      const bridgeDirAbs = nodePath.join(base, EXTERNAL_BRIDGE_DIR);
+      await fs.promises.mkdir(bridgeDirAbs, { recursive: true });
+      // Confirm the source folder still exists and is a directory.
+      const srcStat = await fs.promises.stat(plan.sourceFolderAbs).catch(() => null);
+      if (!srcStat || !srcStat.isDirectory()) return false;
+      // Reuse an existing correct link; replace a stale/broken one.
+      let needLink = true;
+      try {
+        const cur = await fs.promises.readlink(plan.linkAbs);
+        const curAbs = nodePath.isAbsolute(cur)
+          ? cur
+          : nodePath.resolve(nodePath.dirname(plan.linkAbs), cur);
+        if (nodePath.resolve(curAbs) === nodePath.resolve(plan.sourceFolderAbs)) {
+          needLink = false;
+        } else {
+          await fs.promises.rm(plan.linkAbs, { force: true });
+        }
+      } catch {
+        // No existing link (ENOENT) — create it below.
+      }
+      if (needLink) {
+        // `dir` junction type is required on Windows for a directory symlink;
+        // harmless on POSIX.
+        await fs.promises.symlink(plan.sourceFolderAbs, plan.linkAbs, "dir");
+      }
+    } catch (err) {
+      console.error("[skill-layer] external bridge symlink failed:", err);
+      return false;
+    }
+    // Now the file has an in-vault path through the link: open it via the same
+    // temporary-reveal machinery used for hidden dot-folder skills.
+    return this.openHiddenSkillTemporarily(plan.fileVaultRel);
   }
 
   /** Open an in-vault TFile in a leaf and highlight its FOLDER in the explorer. */
@@ -2050,11 +2271,18 @@ export default class SkillLayerPlugin extends Plugin {
    * the skill directive (`Use the <name> skill. <userPrompt>`) so the session
    * gets extra context to act on. It flows through the same single inert `-p`
    * element (or control-char-stripped custom-harness token) — never tokenized.
+   *
+   * `selectionText` (M-EDIT) is optional highlighted text from the editor
+   * right-click path; when present, `buildLaunchPrompt` appends it (with an
+   * edit-this-file default) as inert prose inside the SAME single `-p` element,
+   * so it is never tokenized. On the custom-harness path it is control-char-
+   * stripped like `userPrompt` (newlines flattened).
    */
   async launchSkill(
     skill: Skill,
     contextPath?: string,
     userPrompt?: string,
+    selectionText?: string,
   ): Promise<void> {
     // Desktop + filesystem capability gate.
     if (!this.detector.canScanExternal()) {
@@ -2078,6 +2306,7 @@ export default class SkillLayerPlugin extends Plugin {
       contextPath,
       userPrompt,
       skill.kind ?? "skill",
+      selectionText,
     );
 
     // Build the skill's harness command (argv + session record + Notices) ONCE,

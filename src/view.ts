@@ -316,6 +316,7 @@ export class SkillBrowserView extends ItemView {
       "surfaces",
       [
         { value: "rightclick", text: "Right-click" },
+        { value: "selection", text: "Selection" },
         { value: "ribbon", text: "Ribbon" },
       ],
       this.filterAccess,
@@ -954,7 +955,11 @@ export class SkillBrowserView extends ItemView {
   private renderAddFolderRow(container: HTMLElement, kind: "skill" | "command"): void {
     const existing = new Set(this.plugin.existingToolFolders(kind));
     const addable = this.plugin.addableFolderSegments(kind).filter((s) => !existing.has(s));
-    if (addable.length === 0) return;
+    // Show the row when there's a prescanned tool folder to create OR (desktop)
+    // when the user can add an external folder via the OS picker — so the "+"
+    // stays reachable even after every standard tool folder already exists.
+    const canAddExternal = this.plugin.canScanExternal();
+    if (addable.length === 0 && !canAddExternal) return;
     const row = container.createDiv({ cls: "skill-layer-addfolder" });
     const btn = row.createEl("div", {
       cls: "skill-layer-tree-add",
@@ -967,7 +972,7 @@ export class SkillBrowserView extends ItemView {
     });
     setIcon(btn.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
     btn.createSpan({ text: `Add a ${kind} folder` });
-    const onAdd = () => this.promptAddFolder(addable);
+    const onAdd = () => this.promptAddFolder(addable, canAddExternal);
     btn.addEventListener("click", onAdd);
     btn.addEventListener("keydown", (e: KeyboardEvent) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -977,8 +982,14 @@ export class SkillBrowserView extends ItemView {
     });
   }
 
-  /** Show a chooser of prescanned tool folders; creating one adds an empty section. */
-  private promptAddFolder(segments: string[]): void {
+  /**
+   * Show a chooser of prescanned tool folders (creating one adds an empty
+   * section), followed — on desktop — by an "Open file explorer…" option that
+   * opens the OS folder picker and adds the chosen folder as an external scan
+   * root. This is the easy path for pointing the plugin at a skills folder that
+   * lives OUTSIDE the vault (e.g. ~/.claude/skills).
+   */
+  private promptAddFolder(segments: string[], canAddExternal: boolean): void {
     const menu = new Menu();
     for (const seg of segments) {
       menu.addItem((item) =>
@@ -988,6 +999,23 @@ export class SkillBrowserView extends ItemView {
           .onClick(async () => {
             const err = await this.plugin.createToolFolder(seg);
             if (err) new Notice(`Skill and Harness Manager: ${err}`);
+          }),
+      );
+    }
+    if (canAddExternal) {
+      if (segments.length > 0) menu.addSeparator();
+      menu.addItem((item) =>
+        item
+          .setTitle("Open file explorer…")
+          .setIcon("folder-open")
+          .onClick(() => {
+            this.plugin.pickExternalFolder((abs) => {
+              void (async () => {
+                const err = await this.plugin.addExternalScanRoot(abs);
+                if (err) new Notice(`Skill and Harness Manager: ${err}`);
+                else new Notice(`Skill and Harness Manager: added scan root ${abs}`);
+              })();
+            });
           }),
       );
     }
@@ -1051,8 +1079,9 @@ export class SkillBrowserView extends ItemView {
     }
     if (this.filterAccess.size) {
       const rc = this.filterAccess.has("rightclick") && this.plugin.isRightClickEnabled(s.id);
+      const sel = this.filterAccess.has("selection") && this.plugin.isEditorMenuEnabled(s.id);
       const pin = this.filterAccess.has("ribbon") && this.plugin.isPinned(s.id);
-      if (!rc && !pin) return false;
+      if (!rc && !sel && !pin) return false;
     }
     return true;
   }

@@ -102,6 +102,16 @@ export interface SkillLayerSettings {
    */
   rightClickSkillIds: string[];
   /**
+   * Absolute paths (= skill ids) whose skill is exposed in the EDITOR selection
+   * right-click menu (editor-menu) as `Run "<name>" on selection`. Membership
+   * models the per-skill `editorMenuEnabled` toggle (default off = absent). At
+   * launch the selected text and the current file's path are embedded as inert
+   * prompt text (see `buildLaunchPrompt`), never as their own argv elements.
+   * ORTHOGONAL to `rightClickSkillIds` — a skill can be in either, both, or
+   * neither. Plugin-local state only — never written into any SKILL.md.
+   */
+  editorMenuSkillIds: string[];
+  /**
    * Per-skill Lucide icon for the pinned ribbon icon, keyed by skill id (the
    * same stable path used in `pinnedSkillIds`). Plugin-local state only — never
    * written into any SKILL.md.
@@ -237,6 +247,7 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   ],
   pinnedSkillIds: [],
   rightClickSkillIds: [],
+  editorMenuSkillIds: [],
   skillIcons: {},
   skillAgent: {},
   skillHarness: {},

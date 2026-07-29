@@ -19,6 +19,7 @@ import {
   parseFrontmatter,
   resolveSkillTags,
 } from "./parse";
+import { EXTERNAL_BRIDGE_DIR } from "./folders";
 import { DetectionMethod, ScanRoot, Skill, SkillLayerSettings } from "./types";
 
 // Defensive caps so a misconfigured root (e.g. `/`) can't hang the walk.
@@ -28,6 +29,10 @@ const IGNORED_DIRS = new Set([
   ".git",
   ".trash",
   ".DS_Store",
+  // The plugin-managed external-skill bridge (M-EXT): symlinks here point BACK
+  // at external skill folders that are already surfaced via their own external
+  // scan root, so scanning through them would double-count every bridged skill.
+  EXTERNAL_BRIDGE_DIR,
 ]);
 
 interface SkillFields {
@@ -124,6 +129,10 @@ export class Detector {
       if (prefix && !(file.path === prefix || file.path.startsWith(prefix + "/"))) {
         continue;
       }
+      // Skip the plugin-managed bridge dir: its symlinks point back at external
+      // skill folders already surfaced by their own external scan root, so the
+      // vault-API walk (which follows symlinks) would otherwise double-count them.
+      if (file.path.startsWith(EXTERNAL_BRIDGE_DIR + "/")) continue;
       // Candidate gate FIRST — only SKILL.md files or markdown directly under a
       // `skills/` folder can ever be skills. Skip everything else with NO read,
       // so ordinary vault notes never trigger a cachedRead/parse.

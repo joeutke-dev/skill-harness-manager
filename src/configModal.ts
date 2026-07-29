@@ -169,6 +169,22 @@ export class SkillConfigModal extends Modal {
         }),
       );
 
+    // 4b) Editor-selection (editor-menu) toggle (M-EDIT).
+    const selOn = this.plugin.isEditorMenuEnabled(skill.id);
+    new Setting(c)
+      .setName("Add to selection menu")
+      .setDesc(
+        `Show “Run "${skill.name}" on selection” in the editor right-click menu ` +
+          "when text is selected. The skill receives the current file and the " +
+          "highlighted text, and edits that file by default.",
+      )
+      .addToggle((t) =>
+        t.setValue(selOn).onChange(async () => {
+          await this.plugin.toggleEditorMenu(skill);
+          this.renderBody();
+        }),
+      );
+
     // 5) Copy invocation — clipboard only (the natural-language run prompt).
     new Setting(c)
       .setName("Copy invocation")
