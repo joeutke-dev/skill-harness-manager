@@ -103,7 +103,7 @@ export interface SkillLayerSettings {
   rightClickSkillIds: string[];
   /**
    * Absolute paths (= skill ids) whose skill is exposed in the EDITOR selection
-   * right-click menu (editor-menu) as `Run "<name>" on selection`. Membership
+   * right-click menu (editor-menu) as `Run "<name>"`. Membership
    * models the per-skill `editorMenuEnabled` toggle (default off = absent). At
    * launch the selected text and the current file's path are embedded as inert
    * prompt text (see `buildLaunchPrompt`), never as their own argv elements.

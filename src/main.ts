@@ -219,7 +219,7 @@ export default class SkillLayerPlugin extends Plugin {
     );
 
     // M-EDIT: editor-selection right-click. When text is highlighted in a note,
-    // each selection-enabled skill adds a `Run "<name>" on selection` item that
+    // each selection-enabled skill adds a `Run "<name>"` item that
     // launches it one-shot with the current file as context AND the highlighted
     // text as inert prompt context. No item is added when the selection is empty.
     this.registerEvent(

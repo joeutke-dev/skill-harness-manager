@@ -476,7 +476,7 @@ console.log("\n[d] Right-click menu items gated by enablement");
     "items are exactly the enabled skills in order",
     deepEq(items.map((i) => i.skillId), ["/v/a/SKILL.md", "/v/c/SKILL.md"]),
   );
-  eq("item title format", items[0].title, 'Run "transcribe-meeting" here');
+  eq("item title format", items[0].title, 'Run "transcribe-meeting"');
   check("disabled skill (summarize-transcript) is absent", !items.some((i) => i.title.includes("summarize-transcript")));
   check("every item carries the clicked context path", items.every((i) => i.contextPath === ctxPath));
 
@@ -544,7 +544,7 @@ console.log("\n[e] M-EDIT selection prompt + menu items");
     "items are exactly the enabled skills in order",
     deepEq(items.map((i) => i.skillId), ["/v/a/SKILL.md", "/v/c/SKILL.md"]),
   );
-  eq("item title format", items[0].title, 'Run "humanize" on selection');
+  eq("item title format", items[0].title, 'Run "humanize"');
   check("every item carries the current file path", items.every((i) => i.contextPath === ctx));
   check("every item carries the selection text", items.every((i) => i.selection === sel));
 

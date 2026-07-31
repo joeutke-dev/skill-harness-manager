@@ -174,7 +174,7 @@ export class SkillConfigModal extends Modal {
     new Setting(c)
       .setName("Add to selection menu")
       .setDesc(
-        `Show “Run "${skill.name}" on selection” in the editor right-click menu ` +
+        `Show “Run "${skill.name}"” in the editor right-click menu ` +
           "when text is selected. The skill receives the current file and the " +
           "highlighted text, and edits that file by default.",
       )

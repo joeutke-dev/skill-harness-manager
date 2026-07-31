@@ -1150,7 +1150,7 @@ export function augmentPath(
 
 /** A single resolved right-click (file-menu) entry: title + what to launch. */
 export interface RightClickMenuItem {
-  /** Menu label, e.g. `Run "transcribe-meeting" here`. */
+  /** Menu label, e.g. `Run "transcribe-meeting"`. */
   title: string;
   /** The skill id (= absolute path) to launch. */
   skillId: string;
@@ -1175,7 +1175,7 @@ export function buildRightClickMenuItems(
   for (const s of skills) {
     if (!isEnabled(s.id)) continue;
     items.push({
-      title: `Run "${s.name}" here`,
+      title: `Run "${s.name}"`,
       skillId: s.id,
       contextPath: contextAbsPath,
     });
@@ -1185,7 +1185,7 @@ export function buildRightClickMenuItems(
 
 /** A single resolved editor-selection (editor-menu) entry (M-EDIT). */
 export interface EditorMenuItem {
-  /** Menu label, e.g. `Run "humanize" on selection`. */
+  /** Menu label, e.g. `Run "humanize"`. */
   title: string;
   /** The skill id (= absolute path) to launch. */
   skillId: string;
@@ -1214,7 +1214,7 @@ export function buildEditorMenuItems(
   for (const s of skills) {
     if (!isEnabled(s.id)) continue;
     items.push({
-      title: `Run "${s.name}" on selection`,
+      title: `Run "${s.name}"`,
       skillId: s.id,
       contextPath: contextAbsPath,
       selection,
