@@ -1,144 +1,83 @@
 # Skill and Harness Manager
 
-**Consolidate, organize, and manage your AI skills — right inside your vault.**
+**An Obsidian plugin that consolidates your AI skills, commands, and agents into one place inside your vault — and makes your skills available in Obsidians ribbon and right click menus.**
 
-If you've collected AI *skills* (`SKILL.md` files), commands, and agents across
-different tools — `.claude/`, `.codex/`, `.cursor/`, `.agents/`, marketplace
-folders, loose notes — they end up scattered and hard to actually use. This
-plugin gathers them into one place, lets you organize, filter, and tag them, and
-makes each one runnable with a click.
+If you collect *skills* (`SKILL.md` files), slash-commands, and agents across `.claude/`, `.codex/`, `.cursor/`, `.agents/`, marketplace bundles, and loose notes, they end up spread over folders you can't easily see or use. This plugin helps you organize and tags them, and lets you read and edit them as normal notes. The plugin also supports launching skills against the harness of your choice — from the ribbon, the command palette when right clicking a file or folder, or a right-click when highlighting text so that you can better integrate LLM's into your notetaking, and expand obsidian from a notetaking app into a control plane to run AI driven workflows like creating emails, reading your calendar or processing data or whatever else you create a skill for.
 
-> No bundled model, no inference, no network calls of its own. It finds,
-> organizes, and launches; the actual work runs in whatever AI CLI you point it
-> at (Claude Code, Codex, omnigent, or your own).
 
-## What you can do with it
+---
 
-Run AI where you already work:
+## 1. One place for every skill
 
-- **Reformat a markdown note with one click** — pin a "clean up markdown" skill
-  to the sidebar and run it on the current file.
-- **Process an audio file** — right-click a recording and run a
-  transcribe/summarize skill against it.
-- **Trigger daily automations** — kick off a daily-note or digest skill from a
-  ribbon button.
-- …and anything else you can capture as a skill.
+**The plugin scans a set of configurable roots and lists everything it finds in an Obsidian side pane** A skill is a `SKILL.md` with `name` + `description` frontmatter, or any Markdown file directly inside a `skills/` folder — so the same rule surfaces skills from every tool that follows this convention. Results are grouped into a collapsible source-folder tree enabling you to search and filter by agent, harness, and tag. 
 
-## How you launch skills
+Out of the box it scans your vault and the common in-vault tool folders (`.claude/skills`, `.codex/skills`, `.cursor/skills`, `.agents/skills`, and others). The browser opens from the `brain-circuit` ribbon icon and has tabs for Skills, Commands, Scripts, Sessions, Agents, and Harnesses.
 
-Skills can be run from wherever is most convenient:
 
-- **Right-click a file** in the file explorer → run a skill *targeting that file*
-  (great for "reformat this note", "transcribe this audio", "summarize this").
-- **Sidebar buttons** — pin any skill to its own ribbon icon (with a custom
-  Lucide icon) to create one-click launchers for the skills you use most.
-- **Command palette** — every pinned skill also registers a command.
-- **The browser view** — open it and launch anything from there.
+### Adding an external skills folder
 
-## The browser
+Skill folders that live outside the vault — like `yourname/.claude/skills` — can be added as scan roots in the plugin settings menu or sidepane At the bottom of the Skills or Commands tab, the + Add a folder button opens a menu; the Open file explorer… option launches the OS folder picker, and the folder you choose is added as an external scan root surfacing skills in the UI immediately.
 
-A single view (`brain-circuit` ribbon icon) with tabs:
 
-- **Skills** / **Commands** — everything discovered across your scan roots,
-  grouped into a collapsible source-folder tree, each with its description and
-  tags. Multi-select filters by agent, harness, tag, and access, plus search.
-- **Scripts** — your own bash scripts (add a name, description, and body right in
-  the tab). Each script runs on click, in a terminal or headless, per its own
-  setting — handy for maintenance commands like updating or launching a harness.
-- **Sessions** — the launches you've started, with a **Connect** button that
-  reopens the session in your terminal. Auto-pruned after 12h.
-- **Agents** / **Harnesses** — the agents you can run skills as, and the
-  launchers that actually run them.
 
-The plugin also seeds one **example skill** into `.agents/skills/` on first run
-(tagged `#example`) so a fresh install has something to explore. Editing or
-deleting it is safe — it is never recreated.
+---
 
-## Launch modes: headless or terminal
+## 2. View and edit skills in Obsidian
 
-Every skill/command can run one of two ways:
+Since Skills are built on Markdown they open as a normal Obsidian note — including skills that live outside the vault. Clicking **View file** on a row opens the `SKILL.md` and reveals its folder in the file explorer, so you also see the scripts and references a multi-file skill ships with. Editing and saving writes straight back to the source file enabling you to quickly test and adjust skills. The goal is more ownership and pruning of skills over time instead of collecting or building skills that aren't used regularly and aren't maintained.
 
-- **Headless** — spawned in the background (omnigent or a custom harness);
-  progress surfaces via notices and the Sessions tab.
-- **Terminal** — runs the *same* harness command, but visibly in a terminal
-  window in the vault so you can watch it and interact.
 
-Set the **default launch mode** and your **preferred terminal** in Settings →
-*General*. The preferred-terminal list is autodetected from the emulators you
-have installed (Terminal, iTerm, Ghostty, kitty, WezTerm, Warp, tmux); *Auto*
-uses your OS default terminal. Override the mode per skill in its ⚙ Configure
-panel.
+---
 
-## Harnesses (how skills get run)
+## 3. Run a skill where you work
 
-A **harness** is the command that actually executes a skill — usually an AI CLI.
-omnigent is supported out of the box; you can add your own for Claude Code,
-Codex, or anything else.
+**Every skill can be launched from wherever is convenient — a right-click, the sidebar, or the command palette.** The plugin builds a natural-language invocation, runs it through your chosen harness, and (for a targeted run) tells the model to operate inside the vault. If you call a skill on text that you've highlighted or by right clicking a file, the prompt sent to the model includes the file name or text in the prompt.
 
-**Add one manually:** Settings → *Skill and Harness Manager* → **Custom
-harnesses** → give it a name and a one-line command whose first token is the
-absolute path to the binary and which contains the `{prompt}` placeholder, e.g.:
+Right-click a file in the file explorer to run a skill *against that file* — useful for "reformat this note", "transcribe this recording", or "summarize this". The clicked file's path is passed to the skill as context.
+
+
+Right-click a text selection inside a note to run a skill *on the highlighted text*. The skill receives the current file and the selection, and edits that file in place by default unless the skill says otherwise — handy for "rewrite this passage", "translate this", or "clean up this section".
+
+
+Pin a skill to the ribbon to create a one-click launcher with its own Lucide icon; pinning also registers a **command-palette** command, so the same skill is reachable by keyboard. This is helpful for automation skills like setting up your daily note with meetings from your calendar.
+
+### Headless or terminal
+
+Each skill runs one of two ways, set globally or per skill. *Headless* spawns the run in the background and surfaces progress through notices and the Sessions tab. *Terminal* runs the identical command visibly in your preferred terminal so you can watch and interact. There is an option to add 3rd party terminals but this feature is still being developed.
+
+---
+
+## 4. Harnesses
+
+A harness is the command that executes a skill — usually via CLI. The plugin substitutes the skill's prompt into a command template and runs it with no shell, so the invocation is inert and safe. Omnigent, ucode, claude, opencode and codex are common options, but as this is triggering a command in your CLI this should work with nearly every harness.
+
+A custom harness is a name plus a one-line command whose first token is the absolute path to a binary and which contains a `{prompt}` placeholder — for example:
 
 ```
 /opt/homebrew/bin/claude -p {prompt}
 ```
 
-The plugin substitutes the skill's prompt into `{prompt}` and runs it (no shell,
-array arguments). Optionally set a **Resume command** so the Sessions tab's
-*Connect* can reopen a session.
-
-**Let the model add itself:** run this prompt inside your CLI (Claude Code,
-Codex, omnigent, …) and it will register itself as a harness. The same prompt is
-available with a copy button in the plugin's settings.
+The same shape covers wrappers and gateways. A ucode harness, for instance, forwards to the underlying tool's own non-interactive form:
 
 ```
-Register yourself as a launch harness in my Obsidian "Skill and Harness Manager" plugin.
-
-1. Open the plugin config JSON at:
-   <vault>/.obsidian/plugins/skill-harness-manager/data.json
-2. Parse it as JSON and ensure it has a top-level "harnesses" array (create it if missing).
-3. Append ONE entry describing how to run YOU non-interactively with a single prompt:
-     {
-       "id": "<short-kebab-id>",
-       "label": "<your product name>",
-       "command": ["<absolute path to your CLI>", "<non-interactive flags>", "{prompt}"]
-     }
-   Rules: command[0] must be an absolute path; exactly one element must contain the
-   literal token {prompt}; leave every other key in the file unchanged; write back valid JSON.
-   Optional: add "resumeCommand": ["<absolute CLI>", "<resume flags>"] (no {prompt}) to enable
-   the Sessions tab's "Connect" button.
-4. Tell me to reload the plugin (Settings → Community plugins → toggle it off and on),
-   after which the new harness appears in the plugin.
+/Users/me/.local/bin/ucode claude -p {prompt}
+/Users/me/.local/bin/ucode codex exec {prompt}
 ```
+
+
+---
+
+## 5. Agents
+
+On top of the harness, a skill can pin an agent so it runs as a specific persona or is scoped to discover and use only a specific set of skills. currently this plugin supports Claude and Omnigent Agent configurations.
+
+**Claude sub-agents** — when a skill's harness is a Claude-based custom harness, a `.claude/agents/*.md` sub-agent can be selected and is substituted into the harness command's `{agent}` token.
+
+Discovered agents appear in the **Agents** tab, and the per-skill agent selector lives in each skill's configuration panel.
+
+
+---
 
 ## Requirements
 
-Desktop only — it scans folders and launches local CLIs. Launching a skill needs
-whatever CLI you configure; browsing, organizing, tagging, and filtering work
-without one.
-
-## Install
-
-**From Obsidian:** Settings → Community plugins → Browse → search
-**"Skill and Harness Manager"** → Install → Enable. No Node, no building.
-
-**Manual / pre-release:** download `main.js`, `manifest.json`, and `styles.css`
-from the [latest release](https://github.com/joeutke-dev/skill-harness-manager/releases)
-into `<vault>/.obsidian/plugins/skill-harness-manager/`, then enable it.
-
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm run lint
-npm run smoke
-npm run build
-```
-
-Releases are automated: push a tag (`git tag 0.1.2 && git push --tags`) and
-`.github/workflows/release.yml` builds and publishes the assets.
-
-## License
-
-MIT
+Desktop only and MacOS Only for now — the plugin scans folders and launches local CLIs. Launching a skill needs whatever harness you use to be configured on your machine and added to the skill and harness manager.
