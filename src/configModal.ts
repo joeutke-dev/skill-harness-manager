@@ -1,10 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
-import {
-  AGENT_DEFAULT_VALUE,
-  BUILTIN_AGENTS,
-  encodeCustomHarnessChoice,
-  HARNESS_DEFAULT_VALUE,
-} from "./launch";
+import { encodeCustomHarnessChoice, HARNESS_DEFAULT_VALUE } from "./launch";
 import type SkillLayerPlugin from "./main";
 import { Skill } from "./types";
 
@@ -65,16 +60,15 @@ export class SkillConfigModal extends Modal {
         });
       });
 
-    // 1) Per-skill HARNESS (M15). Omnigent harnesses are labelled "omnigent - X"
-    // to distinguish them from user-defined custom harnesses.
+    // 1) Per-skill HARNESS (M15). The options are Default (the default harness
+    // set in Settings → Harnesses) plus each user-defined custom harness.
     new Setting(c)
       .setName("Harness")
-      .setDesc("Pin a specific harness. Default uses omnigent's own configured harness.")
+      .setDesc(
+        "Pin a specific harness for this skill. Default uses the default harness set in Settings → Harnesses.",
+      )
       .addDropdown((d) => {
         d.addOption(HARNESS_DEFAULT_VALUE, "Default");
-        for (const name of this.plugin.getOmnigentHarnessOptions()) {
-          d.addOption(name, `omnigent - ${name}`);
-        }
         for (const h of this.plugin.getCustomHarnesses()) {
           d.addOption(encodeCustomHarnessChoice(h.id), h.label);
         }
@@ -86,13 +80,10 @@ export class SkillConfigModal extends Modal {
         });
       });
 
-    // 2) Per-skill AGENT — the source depends on the harness (M17):
-    //   • custom (claude) harness → Claude subagents from `.claude/agents`,
-    //     passed via the command's `{agent}` token.
-    //   • Default / omnigent harness → omnigent YAML agents (polly/debby/bundles),
-    //     passed as the `omnigent run` positional.
-    const customHarness = this.plugin.skillUsesCustomHarness(skill.id);
-    if (customHarness) {
+    // 2) Per-skill AGENT (M17): the Claude subagent (.claude/agents) to run as,
+    // passed via the harness command's `{agent}` token. Only shown when the skill
+    // will run through a custom harness (an explicit pick or the Default harness).
+    if (this.plugin.skillUsesCustomHarness(skill.id)) {
       const claudeAgents = this.plugin.getClaudeAgents();
       const note = claudeAgents.length
         ? "Claude subagent (.claude/agents) to run as. Needs an {agent} token in the harness command."
@@ -106,21 +97,6 @@ export class SkillConfigModal extends Modal {
           d.setValue(this.plugin.claudeAgentOptionValue(skill.id));
           d.onChange(async (v) => {
             await this.plugin.setSkillClaudeAgent(skill.id, v);
-          });
-        });
-    } else {
-      new Setting(c)
-        .setName("Agent")
-        .setDesc("Which omnigent agent runs this skill.")
-        .addDropdown((d) => {
-          d.addOption(AGENT_DEFAULT_VALUE, "Default");
-          for (const name of BUILTIN_AGENTS) d.addOption(`builtin:${name}`, name);
-          for (const agent of this.plugin.getCustomAgents()) {
-            d.addOption(`custom:${agent.path}`, agent.name);
-          }
-          d.setValue(this.plugin.agentOptionValue(skill.id));
-          d.onChange(async (v) => {
-            await this.plugin.setSkillAgent(skill.id, v);
           });
         });
     }

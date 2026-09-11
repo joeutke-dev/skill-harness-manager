@@ -3,7 +3,8 @@ import { AgentConfigModal, LaunchModal, PromptModal, SkillConfigModal } from "./
 import { inferSourceLabel } from "./parse";
 import type SkillLayerPlugin from "./main";
 import { DEFAULT_TAB, SkillLayerTab, TABS } from "./tabs";
-import { BashScript, LaunchMode, Skill } from "./types";
+import { Skill } from "./types";
+import type { CustomHarness } from "./launch";
 import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
@@ -36,9 +37,6 @@ export class SkillBrowserView extends ItemView {
   private expandedGroups = new Set<string>();
   /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
   private activeTab: SkillLayerTab = DEFAULT_TAB;
-  /** Scripts tab: id of the script currently loaded into the add/edit form ("" =
-   *  the form is in "add new" mode). */
-  private editingScriptId = "";
   /** Container the active tab's content renders into (below the tab bar). */
   private tabContentEl: HTMLElement | null = null;
 
@@ -158,7 +156,6 @@ export class SkillBrowserView extends ItemView {
     if (this.activeTab === "agents") this.renderAgentsTab(c);
     else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
     else if (this.activeTab === "sessions") this.renderSessionsTab(c);
-    else if (this.activeTab === "scripts") this.renderScriptsTab(c);
     else this.renderBrowserTab(c); // skills OR commands (same browser UI)
     // Every tab ends with a muted purpose blurb (icon + 1–2 sentences).
     this.renderTabFooter(c, this.tabFooterText(this.activeTab));
@@ -182,7 +179,7 @@ export class SkillBrowserView extends ItemView {
    * A per-tab purpose footer: the same muted brain-circuit glyph + one-to-two
    * sentence description of what the tab is for, pinned at the bottom of the tab.
    * Shown on every tab (even when it has content) so the tab's purpose is always
-   * visible — mirrors the Scripts empty-state the user liked.
+   * visible.
    */
   private renderTabFooter(parent: HTMLElement, text: string): void {
     const footer = parent.createDiv({ cls: "skill-layer-empty skill-layer-tab-footer" });
@@ -195,14 +192,12 @@ export class SkillBrowserView extends ItemView {
     switch (tab) {
       case "commands":
         return "Commands are Markdown prompt files invoked as /name (e.g. in .claude/commands/) — the simpler, single-file form of a skill. Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
-      case "scripts":
-        return "Create scripts to quickly trigger automations and operations — like a command to update or launch a harness — in your preferred terminal or in the background.";
       case "sessions":
-        return "Sessions are the skills and scripts you've launched. Use the Connect button to connect to the session in your terminal; sessions are removed after 12 hours.";
+        return "Sessions are the skills you've launched. Use the Connect button to connect to the session in your terminal; sessions are removed after 12 hours.";
       case "agents":
         return "Agents are AI assistants that direct their own tools and steps to complete a task, defined in config (e.g. YAML) or code (a Python SDK). Launch a session with one, or open its config to edit it.";
       case "harnesses":
-        return "A harness is the runtime that actually runs an agent — it feeds the prompt to the model, executes its tool calls, and loops until the task is done. Harnesses you've configured (e.g. in omnigent) are detected automatically; add your own in Settings.";
+        return "A harness is the runtime that actually runs a skill — it feeds the prompt to your CLI and loops until the task is done. Add your harnesses above; with more than one, use “Set as default” to pick which one a skill's Default harness uses.";
       default:
         return "Skills are reusable instructions in a SKILL.md file (frontmatter + steps) that an assistant loads when relevant or you invoke as /name. They live in a tool's skills folder (e.g. .claude/skills/). Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
     }
@@ -243,8 +238,8 @@ export class SkillBrowserView extends ItemView {
     this.renderList();
   }
 
-  /** The effective Agent label for a skill (accounts for custom-harness Claude
-   *  subagents vs omnigent agents), mirroring the row-meta pill logic. */
+  /** The effective Agent label for a skill: the Claude subagent when it runs
+   *  through a custom harness, else its stored agent label. Mirrors the row pill. */
   private agentLabelOf(s: Skill): string {
     return this.plugin.skillUsesCustomHarness(s.id)
       ? this.plugin.claudeAgentLabelFor(s.id)
@@ -417,148 +412,6 @@ export class SkillBrowserView extends ItemView {
     btn.addEventListener("keydown", (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     });
-  }
-
-  /**
-   * The Scripts tab: an add/edit form (name, description, body, launch mode) at
-   * the top, then a row per saved bash script with Run / Edit / Copy / Delete.
-   * Scripts are stored in settings; each carries its own launch mode. The form
-   * doubles as the editor — clicking Edit on a row loads it here.
-   */
-  private renderScriptsTab(c: HTMLElement): void {
-    this.renderScriptForm(c);
-    // No dedicated empty-state — the always-on tab footer describes the purpose.
-    const list = c.createDiv({ cls: "skill-layer-list" });
-    for (const s of this.plugin.getBashScripts()) this.renderScriptRow(list, s);
-  }
-
-  /** The add/edit form for a bash script (top of the Scripts tab). */
-  private renderScriptForm(c: HTMLElement): void {
-    const editing = this.editingScriptId
-      ? this.plugin.getBashScripts().find((s) => s.id === this.editingScriptId)
-      : undefined;
-
-    const form = c.createDiv({ cls: "skill-layer-script-form" });
-    form.createEl("div", {
-      cls: "skill-layer-script-form-title",
-      text: editing ? `Edit “${editing.label}”` : "Add a script",
-    });
-
-    const nameInput = form.createEl("input", {
-      cls: "skill-layer-script-name",
-      attr: { type: "text", placeholder: "Name (e.g. vibe update)", "aria-label": "Script name" },
-    });
-    nameInput.value = editing?.label ?? "";
-
-    const descInput = form.createEl("input", {
-      cls: "skill-layer-script-desc",
-      attr: { type: "text", placeholder: "Description (optional)", "aria-label": "Script description" },
-    });
-    descInput.value = editing?.description ?? "";
-
-    const bodyInput = form.createEl("textarea", {
-      cls: "skill-layer-script-body",
-      attr: {
-        rows: "5",
-        placeholder: "#!/bin/bash\nvibe update",
-        "aria-label": "Script body",
-      },
-    });
-    bodyInput.value = editing?.body ?? "";
-
-    const controls = form.createDiv({ cls: "skill-layer-script-controls" });
-    const modeSelect = controls.createEl("select", {
-      cls: "skill-layer-script-mode",
-      attr: { "aria-label": "Launch mode" },
-    });
-    modeSelect.createEl("option", { value: "terminal", text: "Terminal" });
-    modeSelect.createEl("option", { value: "headless", text: "Headless" });
-    modeSelect.value = editing?.launchMode ?? "terminal";
-
-    const save = controls.createEl("button", {
-      cls: "skill-layer-action skill-layer-action-launch",
-      text: editing ? "Save" : "Add script",
-    });
-    save.addEventListener("click", () => {
-      void this.submitScriptForm(
-        nameInput.value,
-        descInput.value,
-        bodyInput.value,
-        modeSelect.value as LaunchMode,
-      );
-    });
-
-    if (editing) {
-      const cancel = controls.createEl("button", { cls: "skill-layer-action", text: "Cancel" });
-      cancel.addEventListener("click", () => {
-        this.editingScriptId = "";
-        this.renderActiveTab();
-      });
-    }
-  }
-
-  /** Persist the script form (add or update), then reset + re-render. */
-  private async submitScriptForm(
-    label: string,
-    description: string,
-    body: string,
-    mode: LaunchMode,
-  ): Promise<void> {
-    const err = this.editingScriptId
-      ? await this.plugin.updateBashScript(this.editingScriptId, label, body, mode, description)
-      : await this.plugin.addBashScript(label, body, mode, description);
-    if (err) {
-      new Notice(`Skill and Harness Manager: ${err}`);
-      return;
-    }
-    this.editingScriptId = "";
-    this.renderActiveTab();
-  }
-
-  /** One Scripts-tab row: name + mode badge + description, Run / Edit / Copy / Delete. */
-  private renderScriptRow(parent: HTMLElement, s: BashScript): void {
-    const el = parent.createDiv({ cls: "skill-layer-row" });
-    const main = el.createDiv({ cls: "skill-layer-row-main" });
-    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
-    nameLine.createSpan({ text: s.label, cls: "skill-layer-row-name" });
-    nameLine.createSpan({ text: s.launchMode, cls: "skill-layer-row-badge" });
-    if (s.description) {
-      main.createDiv({ cls: "skill-layer-row-desc", text: s.description });
-    }
-    main
-      .createDiv({ cls: "skill-layer-row-path", text: s.body.split("\n")[0] })
-      .setAttr("title", s.body);
-
-    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
-    const run = actions.createEl("button", {
-      cls: "skill-layer-action skill-layer-action-launch",
-      attr: { "aria-label": `Run ${s.label}` },
-    });
-    setIcon(run.createSpan({ cls: "skill-layer-action-icon" }), "play");
-    run.createSpan({ text: " Run" });
-    run.addEventListener("click", () => this.plugin.runBashScript(s.id));
-
-    const edit = actions.createEl("button", { cls: "skill-layer-action", text: "Edit" });
-    edit.addEventListener("click", () => {
-      this.editingScriptId = s.id;
-      this.renderActiveTab();
-    });
-
-    const copy = actions.createEl("button", { cls: "skill-layer-action", text: "Copy" });
-    copy.addEventListener("click", () => {
-      void navigator.clipboard
-        .writeText(s.body)
-        .then(() => new Notice("Copied script to clipboard."))
-        .catch(() => new Notice("Copy failed."));
-    });
-
-    const del = actions.createEl("button", {
-      cls: "skill-layer-action",
-      attr: { "aria-label": `Delete ${s.label}` },
-    });
-    setIcon(del.createSpan({ cls: "skill-layer-action-icon" }), "trash");
-    del.createSpan({ text: " Delete" });
-    del.addEventListener("click", () => void this.plugin.removeBashScript(s.id));
   }
 
   /** The Sessions tab (M20): resumable conversations the plugin launched, newest
@@ -763,72 +616,177 @@ export class SkillBrowserView extends ItemView {
   }
 
   /**
-   * The Harnesses tab (M15.3), DISPLAY-ONLY. Shows (1) the harnesses omnigent has
-   * configured — discovered by running `omnigent config list` — and (2) the
-   * user's custom harnesses. Add/remove is done in Settings → Skill and Harness Manager (this
-   * tab links there). A Refresh button re-runs discovery. Selecting a harness
-   * per skill happens on the skill row's "Harness" dropdown, which this feeds.
+   * The Harnesses tab: the place to MANAGE harnesses. An add form (name +
+   * command + optional resume command) at the top, then a row per harness with an
+   * editable resume command, a Set-as-default control, and Remove. Only harnesses
+   * the user adds appear — nothing is auto-discovered. The default (what a skill's
+   * "Default" harness resolves to) is a lone harness automatically, or whichever
+   * the user marks when there are several.
    */
   private renderHarnessesTab(c: HTMLElement): void {
-    // --- Toolbar: refresh discovery ---
-    const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
-    const refreshBtn = toolbar.createEl("button", {
-      cls: "skill-layer-rescan",
-      attr: { "aria-label": "Refresh harnesses configured in omnigent" },
-    });
-    setIcon(refreshBtn, "refresh-cw");
-    refreshBtn.createSpan({ text: "Refresh" });
-    refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
+    this.renderAddHarnessForm(c);
 
-    // ONE unified list: omnigent-configured harnesses (discovered via the CLI)
-    // and custom harnesses render as the SAME row shape. Omnigent harnesses show
-    // their `omnigent run --harness <name>` form; custom ones show their command.
-    // Only harnesses actually CONFIGURED in omnigent are shown (an unconfigured
-    // provider like Gemini that omnigent lists with "(none configured)" is
-    // omitted). Custom harnesses are added/removed in Settings.
-    const configured = this.plugin
-      .getConfiguredHarnesses()
-      .filter((h) => h.configured);
-    const custom = this.plugin.getCustomHarnesses();
-
-    if (!this.plugin.hasDiscoveredHarnesses() && custom.length === 0) {
-      this.renderEmptyState(c, "Discovering harnesses… (omnigent config list)");
-      return;
-    }
-
-    const hint = c.createDiv({ cls: "skill-layer-count" });
-    hint.setText("Add custom harnesses in Settings → Skill and Harness Manager.");
-
+    const harnesses = this.plugin.getCustomHarnesses();
+    const defaultId = this.plugin.resolveDefaultHarness()?.id ?? "";
     const list = c.createDiv({ cls: "skill-layer-list" });
-    // Omnigent-discovered (configured) harnesses.
-    for (const h of configured) {
-      this.renderHarnessRow(list, {
-        name: h.name,
-        badge: "omnigent",
-        detail: `omnigent run --harness ${h.name.toLowerCase()}`,
-      });
-    }
-    // Custom harnesses (same row shape).
-    for (const h of custom) {
-      this.renderHarnessRow(list, {
-        name: h.label,
-        badge: "custom",
-        detail: h.command.join(" "),
-      });
+    for (const h of harnesses) {
+      this.renderHarnessRow(list, h, defaultId, harnesses.length);
     }
   }
 
-  /** One harness row (shared by omnigent-discovered and custom harnesses). */
+  /** The add-a-harness form: name + command (must contain {prompt}) + optional
+   *  resume command. Reuses the shared form styling. */
+  private renderAddHarnessForm(c: HTMLElement): void {
+    const form = c.createDiv({ cls: "skill-layer-script-form" });
+    form.createEl("div", { cls: "skill-layer-script-form-title", text: "Add a harness" });
+
+    const nameInput = form.createEl("input", {
+      cls: "skill-layer-script-name",
+      attr: { type: "text", placeholder: "Name (e.g. ucode claude)", "aria-label": "Harness name" },
+    });
+    const cmdInput = form.createEl("input", {
+      cls: "skill-layer-script-name",
+      attr: {
+        type: "text",
+        placeholder: "/usr/local/bin/claude -p {prompt}",
+        "aria-label": "Harness command (absolute binary, must contain {prompt})",
+      },
+    });
+    const resumeInput = form.createEl("input", {
+      cls: "skill-layer-script-name",
+      attr: {
+        type: "text",
+        placeholder: "Resume command (optional) — e.g. /usr/local/bin/claude --resume",
+        "aria-label": "Resume command",
+      },
+    });
+
+    const controls = form.createDiv({ cls: "skill-layer-script-controls" });
+    const add = controls.createEl("button", {
+      cls: "skill-layer-action skill-layer-action-launch",
+      text: "Add harness",
+    });
+    add.addEventListener("click", () => {
+      void this.submitAddHarness(nameInput, cmdInput, resumeInput);
+    });
+
+    // Register-by-prompt, below the Add button: a sentence with an inline Copy
+    // button (copies a prompt the user runs in their coding agent so it adds
+    // itself as a harness) and an inline Refresh button (reloads data.json to pick
+    // up what the agent just wrote).
+    const register = form.createDiv({ cls: "skill-layer-harness-register" });
+    register.createSpan({ text: "Or copy" });
+    const copyBtn = register.createEl("button", {
+      cls: "skill-layer-action",
+      attr: { "aria-label": "Copy the self-registration prompt", title: "Copy prompt" },
+    });
+    setIcon(copyBtn.createSpan({ cls: "skill-layer-action-icon" }), "copy");
+    copyBtn.addEventListener("click", () => {
+      void (async () => {
+        try {
+          await navigator.clipboard.writeText(this.plugin.harnessRegistrationPrompt());
+          new Notice("Copied the self-registration prompt.");
+        } catch {
+          new Notice("Skill and Harness Manager: copy failed.");
+        }
+      })();
+    });
+    register.createSpan({
+      text: "the prompt to your agent to have it register itself",
+    });
+    const refreshBtn = register.createEl("button", {
+      cls: "skill-layer-action",
+      attr: { "aria-label": "Refresh harnesses from disk", title: "Refresh" },
+    });
+    setIcon(refreshBtn.createSpan({ cls: "skill-layer-action-icon" }), "refresh-cw");
+    refreshBtn.addEventListener("click", () => {
+      void (async () => {
+        await this.plugin.reloadSettingsFromDisk();
+        this.renderActiveTab();
+      })();
+    });
+  }
+
+  /** Add the harness, then apply its resume command (if given) and re-render. */
+  private async submitAddHarness(
+    nameInput: HTMLInputElement,
+    cmdInput: HTMLInputElement,
+    resumeInput: HTMLInputElement,
+  ): Promise<void> {
+    const err = await this.plugin.addCustomHarness(nameInput.value, cmdInput.value);
+    if (err) {
+      new Notice(`Skill and Harness Manager: ${err}`);
+      return;
+    }
+    // addCustomHarness appended the new harness last; set its resume if provided.
+    const added = this.plugin.getCustomHarnesses().slice(-1)[0];
+    const resume = resumeInput.value.trim();
+    if (added && resume) {
+      const rErr = await this.plugin.setCustomHarnessResume(added.id, resume);
+      if (rErr) new Notice(`Skill and Harness Manager: ${rErr}`);
+    }
+    this.renderActiveTab();
+  }
+
+  /** One harness row: name (+ default badge), command, an editable resume command,
+   *  Set-as-default (only with 2+ harnesses and not already the default), Remove. */
   private renderHarnessRow(
     parent: HTMLElement,
-    row: { name: string; badge: string; detail: string },
+    h: CustomHarness,
+    defaultId: string,
+    count: number,
   ): void {
     const el = parent.createDiv({ cls: "skill-layer-row" });
     const main = el.createDiv({ cls: "skill-layer-row-main" });
     const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
-    nameLine.createSpan({ text: row.name, cls: "skill-layer-row-name" });
-    nameLine.createSpan({ text: row.badge, cls: "skill-layer-row-badge" });
-    main.createDiv({ cls: "skill-layer-row-path", text: row.detail });
+    nameLine.createSpan({ text: h.label, cls: "skill-layer-row-name" });
+    if (h.id === defaultId) {
+      nameLine.createSpan({ text: "default", cls: "skill-layer-row-badge" });
+    }
+    main.createDiv({ cls: "skill-layer-row-path", text: h.command.join(" ") });
+
+    // Editable resume command — what the Sessions tab's Connect runs to reconnect.
+    const resumeInput = main.createEl("input", {
+      cls: "skill-layer-script-name",
+      attr: {
+        type: "text",
+        placeholder: "Resume command (optional) — e.g. /usr/local/bin/claude --resume",
+        "aria-label": `Resume command for ${h.label}`,
+      },
+    });
+    resumeInput.value = (h.resumeCommand ?? []).join(" ");
+    resumeInput.addEventListener("change", () => {
+      void (async () => {
+        const err = await this.plugin.setCustomHarnessResume(h.id, resumeInput.value);
+        if (err) new Notice(`Skill and Harness Manager: ${err}`);
+      })();
+    });
+
+    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+    if (count > 1 && h.id !== defaultId) {
+      const setDef = actions.createEl("button", {
+        cls: "skill-layer-action",
+        text: "Set as default",
+      });
+      setDef.addEventListener("click", () => {
+        void (async () => {
+          await this.plugin.setDefaultHarness(h.id);
+          this.renderActiveTab();
+        })();
+      });
+    }
+    const del = actions.createEl("button", {
+      cls: "skill-layer-action",
+      attr: { "aria-label": `Remove ${h.label}` },
+    });
+    setIcon(del.createSpan({ cls: "skill-layer-action-icon" }), "trash");
+    del.createSpan({ text: " Remove" });
+    del.addEventListener("click", () => {
+      void (async () => {
+        await this.plugin.removeCustomHarness(h.id);
+        this.renderActiveTab();
+      })();
+    });
   }
 
   private renderList(): void {
@@ -863,10 +821,10 @@ export class SkillBrowserView extends ItemView {
       this.renderEmptyState(
         container,
         all.length === 0
-          ? `No ${noun}s found yet. Use “+ Add folder” below to create one, or add scan roots in Settings.`
+          ? `No ${noun}s found yet. Use “+ Add folder” below to create one.`
           : `No ${noun}s match the current filters.`,
       );
-      // Still show the add-folder control below the empty state.
+      // Still show the add/remove folder controls below the empty state.
       if (unfiltered) this.renderAddFolderRow(container, kind);
       return;
     }
@@ -933,7 +891,7 @@ export class SkillBrowserView extends ItemView {
       }
     }
 
-    // Bottom "+ Add folder" — create a new tool folder from the prescanned list.
+    // Bottom folder controls: "Add a … folder" + "Remove a … folder".
     if (unfiltered) this.renderAddFolderRow(container, kind);
   }
 
@@ -948,38 +906,93 @@ export class SkillBrowserView extends ItemView {
   }
 
   /**
-   * The "Add folder" affordance: a centered round "+" (styled like the per-section
-   * add button) that sits just above the tab-footer divider. Picks a prescanned
-   * tool folder to create. Hidden entirely when every standard folder exists.
+   * The folder controls above the tab-footer divider: "Add a <kind> folder" and,
+   * when there's something removable, "Remove a <kind> folder" — both pill buttons
+   * that open a chooser menu. Add offers the prescanned tool folders (+ external
+   * picker); Remove offers the existing tool folders (deleted if empty) and any
+   * user-added external scan roots.
    */
   private renderAddFolderRow(container: HTMLElement, kind: "skill" | "command"): void {
-    const existing = new Set(this.plugin.existingToolFolders(kind));
-    const addable = this.plugin.addableFolderSegments(kind).filter((s) => !existing.has(s));
-    // Show the row when there's a prescanned tool folder to create OR (desktop)
-    // when the user can add an external folder via the OS picker — so the "+"
-    // stays reachable even after every standard tool folder already exists.
+    const existing = this.plugin.existingToolFolders(kind);
+    const existingSet = new Set(existing);
+    const addable = this.plugin.addableFolderSegments(kind).filter((s) => !existingSet.has(s));
     const canAddExternal = this.plugin.canScanExternal();
-    if (addable.length === 0 && !canAddExternal) return;
+    const canAdd = addable.length > 0 || canAddExternal;
+    const removableRoots = this.plugin.getRemovableScanRoots();
+    const canRemove = existing.length > 0 || removableRoots.length > 0;
+    if (!canAdd && !canRemove) return;
+
     const row = container.createDiv({ cls: "skill-layer-addfolder" });
+    if (canAdd) {
+      const onAdd = () => this.promptAddFolder(addable, canAddExternal);
+      this.makeFolderButton(row, `Add a ${kind} folder`, "plus", onAdd);
+    }
+    if (canRemove) {
+      const onRemove = () => this.promptRemoveFolder(existing, removableRoots);
+      this.makeFolderButton(row, `Remove a ${kind} folder`, "minus", onRemove);
+    }
+  }
+
+  /** A pill button (click + keyboard) for the folder-controls row. */
+  private makeFolderButton(
+    row: HTMLElement,
+    label: string,
+    icon: string,
+    onClick: () => void,
+  ): void {
     const btn = row.createEl("div", {
       cls: "skill-layer-tree-add",
-      attr: {
-        "aria-label": `Add a ${kind} folder`,
-        title: `Add a ${kind} folder`,
-        role: "button",
-        tabindex: "0",
-      },
+      attr: { "aria-label": label, title: label, role: "button", tabindex: "0" },
     });
-    setIcon(btn.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
-    btn.createSpan({ text: `Add a ${kind} folder` });
-    const onAdd = () => this.promptAddFolder(addable, canAddExternal);
-    btn.addEventListener("click", onAdd);
+    setIcon(btn.createSpan({ cls: "skill-layer-tree-add-icon" }), icon);
+    btn.createSpan({ text: label });
+    btn.addEventListener("click", onClick);
     btn.addEventListener("keydown", (e: KeyboardEvent) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        onAdd();
+        onClick();
       }
     });
+  }
+
+  /**
+   * Chooser for removing a folder: the existing tool folders for this kind (each
+   * deleted from disk only when empty — a non-empty folder is refused with a
+   * Notice so skills/commands are never lost) followed by any user-added external
+   * scan roots (removed from the scan list, files untouched).
+   */
+  private promptRemoveFolder(
+    toolFolders: string[],
+    roots: ReturnType<SkillLayerPlugin["getRemovableScanRoots"]>,
+  ): void {
+    const menu = new Menu();
+    for (const seg of toolFolders) {
+      menu.addItem((item) =>
+        item
+          .setTitle(seg)
+          .setIcon("folder")
+          .onClick(async () => {
+            const err = await this.plugin.removeToolFolder(seg);
+            if (err) new Notice(`Skill and Harness Manager: ${err}`);
+          }),
+      );
+    }
+    if (toolFolders.length > 0 && roots.length > 0) menu.addSeparator();
+    for (const r of roots) {
+      const label = r.path === "" ? "(vault root)" : r.path;
+      menu.addItem((item) =>
+        item
+          .setTitle(label)
+          .setIcon("folder-x")
+          .onClick(async () => {
+            await this.plugin.removeScanRoot(r);
+            new Notice(`Skill and Harness Manager: removed scan root ${label}`);
+          }),
+      );
+    }
+    menu.showAtMouseEvent(
+      (activeWindow.event as MouseEvent) ?? new MouseEvent("click"),
+    );
   }
 
   /**
@@ -1182,8 +1195,8 @@ export class SkillBrowserView extends ItemView {
       );
     };
     pill("Harness", this.plugin.harnessLabelFor(skill.id));
-    // Agent source depends on the harness (M17): a custom (claude) harness uses
-    // Claude subagents (.claude/agents); Default/omnigent use omnigent agents.
+    // Agent source depends on the harness (M17): a skill running through a custom
+    // harness uses Claude subagents (.claude/agents); otherwise its stored agent.
     const agentLabel = this.plugin.skillUsesCustomHarness(skill.id)
       ? this.plugin.claudeAgentLabelFor(skill.id)
       : this.plugin.agentLabelFor(skill.id);

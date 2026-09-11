@@ -12,24 +12,6 @@ import type { LaunchedSession } from "./sessions";
  */
 export type LaunchMode = "headless" | "terminal";
 
-/**
- * A user-defined bash script (Bash Scripts tab). Stored plugin-local in data.json;
- * `body` is a full shell script authored by the user and run ONLY on an explicit
- * click (same trust model as custom harnesses). `launchMode` is per-script.
- */
-export interface BashScript {
-  /** Stable id (generated from the label). */
-  id: string;
-  /** Display name. */
-  label: string;
-  /** Optional one-line description shown on the row. */
-  description?: string;
-  /** The shell script body (multi-line allowed). */
-  body: string;
-  /** headless (detached, Notices only) or terminal (visible, live output). */
-  launchMode: LaunchMode;
-}
-
 /** How a scan root is walked. Determines which of the two+1 code paths runs. */
 export type RootKind = "vault" | "adapter" | "external";
 
@@ -159,6 +141,13 @@ export interface SkillLayerSettings {
    * from the Harnesses tab. Plugin-local state — never written into any SKILL.md.
    */
   harnesses: CustomHarness[];
+  /**
+   * Id (into `harnesses`) of the custom harness used when a skill's harness is
+   * "Default". Blank/unset or a stale id means no default is configured, in
+   * which case launching a skill with no explicit harness shows a Notice instead
+   * of running. Set from Settings → Harnesses.
+   */
+  defaultHarnessId?: string;
   /** Absolute path to the omnigent binary; blank = auto-detect by probing. */
   omnigentBinaryPath: string;
   /**
@@ -213,12 +202,6 @@ export interface SkillLayerSettings {
    */
   skillLaunchMode: Record<string, LaunchMode>;
   /**
-   * User-defined bash scripts (Bash Scripts tab). Each is `{id,label,description?,
-   * body,launchMode}`; the body runs only on explicit click. Managed from the
-   * tab's add/edit form. Plugin-local state — never written into any SKILL.md.
-   */
-  bashScripts: BashScript[];
-  /**
    * Preferred width (px) the browser side panel opens at, so the ribbon/command
    * open always uses a consistent "proper" width rather than whatever the user
    * last dragged the sidebar to. Applied best-effort to the right sidebar's
@@ -261,6 +244,5 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   preferredTerminal: "",
   defaultLaunchMode: "headless",
   skillLaunchMode: {},
-  bashScripts: [],
   panelWidth: 520,
 };

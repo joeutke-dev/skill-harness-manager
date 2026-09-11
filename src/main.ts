@@ -10,6 +10,7 @@ import {
   MarkdownView,
   Menu,
   Notice,
+  Platform,
   Plugin,
   TAbstractFile,
   TFile,
@@ -93,7 +94,6 @@ import {
 } from "./parse";
 import { SkillLayerSettingTab } from "./settingsTab";
 import {
-  buildRawTerminalScript,
   buildResumeArgv,
   buildTerminalScript,
   LaunchedSession,
@@ -103,9 +103,9 @@ import {
 } from "./sessions";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import {
-  BashScript,
   DEFAULT_SETTINGS,
   LaunchMode,
+  ScanRoot,
   Skill,
   SkillLayerSettings,
 } from "./types";
@@ -121,6 +121,16 @@ import {
 /** Internal (non-public) command registry surface used to unregister commands. */
 interface CommandsApi {
   removeCommand?(id: string): void;
+}
+
+/**
+ * Obsidian's internal per-vault config accessors (not in the public API). Used
+ * to read/write the `nativeMenus` app setting so the plugin can offer a toggle
+ * for it — native OS menus can't render the plugin's Lucide menu icons.
+ */
+interface VaultConfigAccess {
+  getConfig(key: string): unknown;
+  setConfig(key: string, value: unknown): void;
 }
 
 const RESCAN_DEBOUNCE_MS = 600;
@@ -239,9 +249,6 @@ export default class SkillLayerPlugin extends Plugin {
       if (this.settings.showHiddenFolders) {
         void this.hiddenFiles.enable();
       }
-      // Discover omnigent-configured harnesses (best-effort, non-blocking) so the
-      // per-skill Harness dropdown + Harnesses tab reflect the user's omnigent.
-      void this.discoverConfiguredHarnesses();
       // Detect installed terminal emulators for the preferred-terminal setting.
       this.detectTerminals();
       // Seed the bundled example skill on first run (no-op after the first seed
@@ -413,6 +420,27 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /**
+   * Scan roots the user added (removable) — every root that is NOT a built-in
+   * default. Surfaced in the Skills tab so folder management stays in the browser.
+   */
+  getRemovableScanRoots(): ScanRoot[] {
+    const defaultPaths = new Set(defaultSkillScanRoots().map((r) => r.path));
+    return this.settings.scanRoots.filter(
+      (r) => !(r.kind !== "external" && defaultPaths.has(r.path)),
+    );
+  }
+
+  /** Remove a user-added scan root (matched by path + kind), then rescan + refresh. */
+  async removeScanRoot(target: ScanRoot): Promise<void> {
+    this.settings.scanRoots = this.settings.scanRoots.filter(
+      (r) => !(r.path === target.path && r.kind === target.kind),
+    );
+    await this.saveSettings();
+    await this.rescan();
+    this.refreshViews();
+  }
+
+  /**
    * Create a tool folder (e.g. `.claude/skills`) in the vault if absent, then
    * rescan so its (empty) section appears. Returns a user-facing error string, or
    * null on success. Desktop-gated; `seg` must be one of the known segments.
@@ -431,6 +459,39 @@ export default class SkillLayerPlugin extends Plugin {
     } catch (err) {
       console.error("[skill-layer] createToolFolder failed:", err);
       return "Could not create the folder.";
+    }
+  }
+
+  /**
+   * Remove a tool folder (e.g. `.claude/skills`) from the vault — but ONLY when it
+   * is empty, so skills/commands are never deleted out from under the user (a
+   * non-empty folder is refused with a user-facing message). Then rescan so its
+   * section disappears. Returns an error string, or null on success (incl. an
+   * already-absent folder — a no-op). Desktop-gated; `seg` must be a known segment.
+   */
+  async removeToolFolder(seg: string): Promise<string | null> {
+    const base = this.detector.vaultBasePath();
+    if (!base || !this.detector.canScanExternal()) return "Requires the desktop app.";
+    if (!this.addableFolderSegments("skill").includes(seg) &&
+        !this.addableFolderSegments("command").includes(seg)) {
+      return "Unknown folder.";
+    }
+    try {
+      // rmdir fails on a non-empty directory, which is exactly the guard we want.
+      await fs.promises.rmdir(nodePath.join(base, seg));
+      await this.rescan();
+      return null;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        await this.rescan(); // already gone — reconcile the view
+        return null;
+      }
+      if (code === "ENOTEMPTY" || code === "EEXIST") {
+        return `"${seg}" isn't empty — delete the files inside it first.`;
+      }
+      console.error("[skill-layer] removeToolFolder failed:", err);
+      return "Could not remove the folder.";
     }
   }
 
@@ -881,15 +942,12 @@ export default class SkillLayerPlugin extends Plugin {
 
   /**
    * Unified refresh (M18): re-scan everything the browser shows — skills,
-   * commands, custom agents, Claude subagents (all via `rescan`) — and kick a
-   * best-effort re-discovery of omnigent harnesses. This is the single "Refresh"
-   * action wired to every tab's refresh control (it subsumes the old Rescan
-   * button). Harness discovery is fire-and-forget so a slow/unavailable omnigent
-   * never blocks the filesystem rescan.
+   * commands, custom agents, Claude subagents (all via `rescan`). This is the
+   * single "Refresh" action wired to every tab's refresh control (it subsumes the
+   * old Rescan button).
    */
   async refreshAll(): Promise<void> {
     await this.rescan();
-    void this.refreshConfiguredHarnesses();
   }
 
   // --- Claude subagents (M17) --------------------------------------------
@@ -1117,14 +1175,14 @@ export default class SkillLayerPlugin extends Plugin {
 
   /**
    * The <select> option value reflecting a skill's stored HARNESS choice (M15),
-   * for preselecting the dropdown. Resolves to a built-in omnigent harness name,
-   * a `custom:<id>` value (only if that custom harness still exists), or the
-   * Default sentinel — so the UI never shows an orphaned selection. Launch
-   * re-validates via `resolveSkillHarness`.
+   * for preselecting the dropdown. Resolves to a `custom:<id>` value (only if
+   * that custom harness still exists) or the Default sentinel — so the UI never
+   * shows an orphaned selection. A legacy stored omnigent-harness value degrades
+   * to Default (omnigent is no longer a selectable option). Launch re-validates
+   * via `resolveSkillHarness`.
    */
   harnessOptionValue(id: string): string {
     const choice = parseHarnessValue(this.settings.skillHarness[id]);
-    if (choice.kind === "omnigent") return choice.name;
     if (
       choice.kind === "custom" &&
       this.settings.harnesses.some((h) => h.id === choice.id)
@@ -1153,8 +1211,8 @@ export default class SkillLayerPlugin extends Plugin {
 
   /**
    * Human-readable label for a skill's effective HARNESS (M16) — shown on the
-   * row. "Default", an omnigent harness name, or a custom harness's label. Uses
-   * `harnessOptionValue` so a dropped custom harness degrades to "Default".
+   * row. "Default" or a custom harness's label. Uses `harnessOptionValue` so a
+   * dropped custom harness (or a legacy omnigent value) degrades to "Default".
    */
   harnessLabelFor(id: string): string {
     const v = this.harnessOptionValue(id);
@@ -1164,34 +1222,73 @@ export default class SkillLayerPlugin extends Plugin {
       const h = this.settings.harnesses.find((x) => x.id === choice.id);
       return h ? h.label : "Default";
     }
-    // An omnigent harness — label it as such to distinguish from custom ones.
-    return `omnigent - ${v}`;
+    return "Default";
   }
 
   /**
-   * True iff the skill's effective harness is a user-defined CUSTOM harness
-   * (non-omnigent). When so, omnigent AGENTS (polly/debby/the YAML bundle
-   * format) do NOT apply — a custom harness spawns its own binary and never
-   * routes through omnigent — so the Agent selector is filtered to Default and
-   * the row's Agent pill is hidden. (Default + omnigent `--harness` both still
-   * run via omnigent, so agents remain available for those.)
+   * The custom harness a skill will ACTUALLY run through: its explicit `custom:`
+   * pick, else the designated default harness ("Default" → the harness chosen in
+   * Settings → Harnesses). Null when neither is set — launching then shows a
+   * Notice rather than running (omnigent is never used as an implicit default).
+   */
+  effectiveCustomHarness(id: string): CustomHarness | null {
+    const resolved = resolveSkillHarness(
+      this.settings.skillHarness[id],
+      this.settings.harnesses,
+    );
+    if (resolved.kind === "custom") return resolved.harness;
+    return this.resolveDefaultHarness();
+  }
+
+  /**
+   * The default custom harness "Default" resolves to: the explicitly-designated
+   * one when set and valid, else — with no explicit choice — a LONE harness (so a
+   * single configured harness is the default automatically). Null when there are
+   * zero, or 2+ with none marked (the user must then pick one in the Harnesses tab).
+   */
+  resolveDefaultHarness(): CustomHarness | null {
+    const harnesses = this.settings.harnesses;
+    const id = this.settings.defaultHarnessId;
+    if (id) {
+      const h = harnesses.find((x) => x.id === id);
+      if (h && isValidCustomHarnessCommand(h.command)) return h;
+    }
+    if (harnesses.length === 1 && isValidCustomHarnessCommand(harnesses[0].command)) {
+      return harnesses[0];
+    }
+    return null;
+  }
+
+  /** Persist the designated default harness ("" clears it). */
+  async setDefaultHarness(id: string): Promise<void> {
+    if (id && this.settings.harnesses.some((h) => h.id === id)) {
+      this.settings.defaultHarnessId = id;
+    } else {
+      delete this.settings.defaultHarnessId;
+    }
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  /**
+   * True iff the skill will run through a CUSTOM harness — an explicit `custom:`
+   * pick OR "Default" resolving to a configured default harness. When so, the
+   * Agent selector offers Claude subagents (passed via the command's `{agent}`
+   * token); otherwise the skill has no runnable harness yet.
    */
   skillUsesCustomHarness(id: string): boolean {
-    return parseHarnessValue(this.harnessOptionValue(id)).kind === "custom";
+    return this.effectiveCustomHarness(id) !== null;
   }
 
   /**
    * Persist a skill's HARNESS choice from the dropdown's option value (M15). A
-   * built-in omnigent harness name or a `custom:<id>` that still exists is
-   * stored; Default / anything unrecognized deletes the key so data.json stays
-   * clean. Launch re-validates independently (`resolveSkillHarness`), so storage
-   * is defense-in-depth.
+   * `custom:<id>` that still exists is stored; Default / anything unrecognized
+   * deletes the key so data.json stays clean. Launch re-validates independently
+   * (`resolveSkillHarness`), so storage is defense-in-depth.
    */
   async setSkillHarness(id: string, value: string): Promise<void> {
     const choice = parseHarnessValue(value);
-    if (choice.kind === "omnigent") {
-      this.settings.skillHarness[id] = choice.name;
-    } else if (
+    if (
       choice.kind === "custom" &&
       this.settings.harnesses.some((h) => h.id === choice.id)
     ) {
@@ -1211,7 +1308,7 @@ export default class SkillLayerPlugin extends Plugin {
   /**
    * Add a custom harness from the Settings form. `label` names it; `commandLine`
    * is the full single-line command (binary + args), e.g.
-   * `/usr/local/bin/isaac -p {prompt}`. The line is whitespace-split into an argv
+   * `/usr/local/bin/claude -p {prompt}`. The line is whitespace-split into an argv
    * array (`parseHarnessCommandLine` — NOT a shell tokenizer) and validated
    * fail-closed (`isValidCustomHarnessCommand`: absolute binary + a `{prompt}`
    * token). Returns an error string on rejection (shown as a Notice by the
@@ -1228,7 +1325,7 @@ export default class SkillLayerPlugin extends Plugin {
       return (
         "Invalid command: the first token (binary) must be an ABSOLUTE path and " +
         "the command must include the {prompt} placeholder. " +
-        "Example: /usr/local/bin/isaac -p {prompt}"
+        "Example: /usr/local/bin/claude -p {prompt}"
       );
     }
     const id = this.generateHarnessId(trimmedLabel);
@@ -1264,7 +1361,7 @@ export default class SkillLayerPlugin extends Plugin {
       !argv.every((t) => typeof t === "string" && t.length > 0) ||
       !nodePath.isAbsolute(argv[0])
     ) {
-      return "Invalid resume command: the first token (binary) must be an ABSOLUTE path. Example: /usr/local/bin/isaac resume";
+      return "Invalid resume command: the first token (binary) must be an ABSOLUTE path. Example: /usr/local/bin/claude --resume";
     }
     h.resumeCommand = argv;
     await this.saveSettings();
@@ -1295,127 +1392,6 @@ export default class SkillLayerPlugin extends Plugin {
     const taken = new Set(this.settings.harnesses.map((h) => h.id));
     while (taken.has(id)) id = `${base}-${n++}`;
     return id;
-  }
-
-  // --- Bash scripts (Scripts tab) ----------------------------------------
-  /** The user-defined bash scripts (for the Scripts tab). */
-  getBashScripts(): BashScript[] {
-    return this.settings.bashScripts;
-  }
-
-  /** A stable, collision-free bash-script id derived from the label. */
-  private generateBashScriptId(label: string): string {
-    const base =
-      label
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 32) || "script";
-    let id = base;
-    let n = 2;
-    const taken = new Set(this.settings.bashScripts.map((s) => s.id));
-    while (taken.has(id)) id = `${base}-${n++}`;
-    return id;
-  }
-
-  /**
-   * Add a bash script from the Scripts-tab form. `label` names it; `body` is the
-   * script source (multi-line ok). Returns an error string on rejection, else
-   * null. A stable id is generated.
-   */
-  async addBashScript(
-    label: string,
-    body: string,
-    launchMode: LaunchMode,
-    description?: string,
-  ): Promise<string | null> {
-    const trimmedLabel = label.trim();
-    if (!trimmedLabel) return "Script needs a name.";
-    if (!body.trim()) return "Script body is empty.";
-    const script: BashScript = {
-      id: this.generateBashScriptId(trimmedLabel),
-      label: trimmedLabel,
-      body,
-      launchMode: launchMode === "terminal" ? "terminal" : "headless",
-    };
-    const desc = description?.trim();
-    if (desc) script.description = desc;
-    this.settings.bashScripts.push(script);
-    await this.saveSettings();
-    this.refreshViews();
-    return null;
-  }
-
-  /** Update an existing bash script in place. Returns an error string, else null. */
-  async updateBashScript(
-    id: string,
-    label: string,
-    body: string,
-    launchMode: LaunchMode,
-    description?: string,
-  ): Promise<string | null> {
-    const script = this.settings.bashScripts.find((s) => s.id === id);
-    if (!script) return "Script not found.";
-    const trimmedLabel = label.trim();
-    if (!trimmedLabel) return "Script needs a name.";
-    if (!body.trim()) return "Script body is empty.";
-    script.label = trimmedLabel;
-    script.body = body;
-    script.launchMode = launchMode === "terminal" ? "terminal" : "headless";
-    const desc = description?.trim();
-    if (desc) script.description = desc;
-    else delete script.description;
-    await this.saveSettings();
-    this.refreshViews();
-    return null;
-  }
-
-  /** Remove a bash script by id. */
-  async removeBashScript(id: string): Promise<void> {
-    this.settings.bashScripts = this.settings.bashScripts.filter((s) => s.id !== id);
-    await this.saveSettings();
-    this.refreshViews();
-  }
-
-  /**
-   * Run a bash script by id, per its own launch mode:
-   *   - terminal → open the user's default terminal running the body (visible).
-   *   - headless → spawn `bash -c <body>` (or `cmd /c` on Windows) detached via
-   *     the shared hardened spawn surface, Notices only.
-   * The body is user-authored and runs only on this explicit click (same trust
-   * model as custom harnesses). cwd = vault. Desktop-gated.
-   */
-  runBashScript(id: string): void {
-    if (!this.detector.canScanExternal()) {
-      new Notice("Skill and Harness Manager: running scripts requires the desktop app.");
-      return;
-    }
-    const cwd = this.detector.vaultBasePath();
-    if (!cwd) {
-      new Notice("Skill and Harness Manager: could not resolve the vault path; not running.");
-      return;
-    }
-    const script = this.settings.bashScripts.find((s) => s.id === id);
-    if (!script) return;
-
-    if (script.launchMode === "terminal") {
-      this.runRawInTerminal(script.body, cwd, `script-${script.id}`);
-      new Notice(`Running "${script.label}" in your terminal…`);
-      return;
-    }
-    // Headless: bash -c <body> (cmd /c on Windows). The body is a single inert
-    // argv element (shell:false), so it is never re-tokenized by a shell WE spawn
-    // — `bash -c` interprets it, which is the intended behavior for a script.
-    const argv =
-      process.platform === "win32"
-        ? ["cmd.exe", "/c", script.body]
-        : ["/bin/bash", "-c", script.body];
-    this.spawnOmnigent(
-      argv,
-      cwd,
-      `Running "${script.label}" in the background — check for output via Notices.`,
-      script.label,
-    );
   }
 
   // --- omnigent-configured harness discovery (M15.3) ---------------------
@@ -1538,6 +1514,43 @@ export default class SkillLayerPlugin extends Plugin {
   /** True on desktop with a real FileSystemAdapter (hidden-file reveal works). */
   canRevealHiddenFolders(): boolean {
     return this.hiddenFiles.canPatch();
+  }
+
+  /** Obsidian's internal vault config surface, or null if unavailable. */
+  private vaultConfig(): VaultConfigAccess | null {
+    const v = this.app.vault as unknown as Partial<VaultConfigAccess>;
+    return typeof v.getConfig === "function" && typeof v.setConfig === "function"
+      ? (v as VaultConfigAccess)
+      : null;
+  }
+
+  /**
+   * True when Obsidian's `nativeMenus` setting is togglable here — desktop only
+   * (native menus are a desktop concept) and the internal config API is present.
+   */
+  canControlNativeMenus(): boolean {
+    return Platform.isDesktopApp && this.vaultConfig() !== null;
+  }
+
+  /**
+   * The EFFECTIVE native-menu state. Obsidian stores `nativeMenus` as
+   * true/false/null; an unset (null) value means ON on macOS and OFF elsewhere —
+   * mirroring Obsidian's own `updateUseNativeMenu`.
+   */
+  nativeMenusEnabled(): boolean {
+    const raw = this.vaultConfig()?.getConfig("nativeMenus") ?? null;
+    if (raw === null || raw === undefined) return Platform.isMacOS;
+    return raw === true;
+  }
+
+  /**
+   * Set Obsidian's `nativeMenus` config (the same call its Appearance toggle
+   * makes). Obsidian applies it live, so right-click menus switch immediately —
+   * turning it OFF lets the plugin's Lucide icons render in menus, which native
+   * OS menus can't do.
+   */
+  setNativeMenus(value: boolean): void {
+    this.vaultConfig()?.setConfig("nativeMenus", value);
   }
 
   /**
@@ -2215,12 +2228,17 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.skillHarness[skill.id],
       this.settings.harnesses,
     );
+    // Default resolves to the designated default harness (option B); an explicit
+    // custom pick wins. Only when neither is set do we fall back to the omnigent
+    // CLI form.
+    const customHarness =
+      resolvedH.kind === "custom" ? resolvedH.harness : this.resolveDefaultHarness();
     let invocation: string;
-    if (resolvedH.kind === "custom") {
+    if (customHarness) {
       // A custom harness spawns its own binary; the copyable form is its argv
       // template with {prompt} filled in, each token shell-quoted.
       invocation = buildCustomHarnessCliInvocation({
-        command: resolvedH.harness.command,
+        command: customHarness.command,
         prompt: buildLaunchPrompt(
           skill.name,
           this.detector.vaultBasePath() ?? "",
@@ -2313,7 +2331,7 @@ export default class SkillLayerPlugin extends Plugin {
     // then run it either headless (detached spawn) or in the user's preferred
     // terminal — the SAME command in both modes. Per-item launch-mode override
     // wins over the global default.
-    const plan = this.buildLaunchPlan(skill, prompt, cwd, contextPath);
+    const plan = this.buildLaunchPlan(skill, prompt, cwd);
     if (!plan) return; // a Notice was already shown (invalid harness / binary).
 
     if (this.effectiveLaunchMode(skill.id) === "terminal") {
@@ -2335,85 +2353,55 @@ export default class SkillLayerPlugin extends Plugin {
     skill: Skill,
     prompt: string,
     cwd: string,
-    contextPath?: string,
   ): {
     argv: string[];
     label: string;
     successNotice: string;
     record: () => void;
   } | null {
-    // Per-skill HARNESS (M15), resolved fail-closed. A CUSTOM harness runs its own
-    // (validated, absolute) binary instead of omnigent and DEFINES the whole
-    // invocation, so the omnigent agent does not apply in that branch.
-    const resolvedH = resolveSkillHarness(
-      this.settings.skillHarness[skill.id],
-      this.settings.harnesses,
-    );
-    if (resolvedH.kind === "custom") {
-      const harness = resolvedH.harness;
-      // A claude subagent (M17) is passed via the command's `{agent}` token.
-      const claudeAgent = this.claudeAgentOptionValue(skill.id);
-      const argv = buildCustomHarnessArgv({
-        command: harness.command,
-        prompt,
-        agent: claudeAgent,
-      });
-      if (!argv) {
-        new Notice(
-          `Skill and Harness Manager: custom harness "${harness.label}" has an invalid command; not launching.`,
-        );
-        return null;
-      }
-      const binary = argv[0];
-      if (!nodePath.isAbsolute(binary) || !fs.existsSync(binary)) {
-        new Notice(
-          `Skill and Harness Manager: custom harness "${harness.label}" binary not found: ${binary}`,
-        );
-        return null;
-      }
-      return {
-        argv,
-        label: harness.label,
-        successNotice: `Launching "${skill.name}" via "${harness.label}" — it should start shortly.`,
-        record: () =>
-          this.recordSession(
-            sessionToolFromCommand(binary) ?? "custom",
-            skill.name,
-            cwd,
-            binary,
-            { harnessId: harness.id, harnessLabel: harness.label },
-          ),
-      };
+    // The skill runs through a CUSTOM harness: its explicit `custom:` pick, else
+    // the designated default harness ("Default"). With neither set there is no
+    // runtime to launch — show a Notice rather than fall back to omnigent.
+    const harness = this.effectiveCustomHarness(skill.id);
+    if (!harness) {
+      new Notice(
+        "Skill and Harness Manager: no harness set. Choose a Default harness in " +
+          "Settings → Harnesses, or pick one in the skill's ⚙ Configure panel.",
+      );
+      return null;
     }
-
-    // Default / omnigent-harness path. Resolve the omnigent binary fail-closed.
-    const binaryPath = this.resolveBinaryOrNotice();
-    if (!binaryPath) return null;
-
-    // Per-skill AGENT, resolved fail-closed (see resolveAgentLaunch).
-    const agent = resolveAgentLaunch(this.settings.skillAgent[skill.id], {
-      scanDir: this.agentConfigDir() ?? "",
-      exists: (p) => fs.existsSync(p),
-    });
-    const argv = buildOmnigentArgv({
-      binaryPath,
+    // A claude subagent (M17) is passed via the command's `{agent}` token.
+    const claudeAgent = this.claudeAgentOptionValue(skill.id);
+    const argv = buildCustomHarnessArgv({
+      command: harness.command,
       prompt,
-      agent,
-      harness: resolvedH.kind === "omnigent" ? resolvedH.name : null,
-      server: this.settings.omnigentServerUrl,
+      agent: claudeAgent,
     });
+    if (!argv) {
+      new Notice(
+        `Skill and Harness Manager: harness "${harness.label}" has an invalid command; not launching.`,
+      );
+      return null;
+    }
+    const binary = argv[0];
+    if (!nodePath.isAbsolute(binary) || !fs.existsSync(binary)) {
+      new Notice(
+        `Skill and Harness Manager: harness "${harness.label}" binary not found: ${binary}`,
+      );
+      return null;
+    }
     return {
       argv,
-      label: "omnigent",
-      successNotice: `Running "${skill.name}"${
-        contextPath ? ` on ${nodePath.basename(contextPath)}` : ""
-      } in omnigent — it should appear in the omnigent UI shortly.`,
+      label: harness.label,
+      successNotice: `Launching "${skill.name}" via "${harness.label}" — it should start shortly.`,
       record: () =>
-        this.recordSession("omnigent", skill.name, cwd, binaryPath, {
-          agentArg: agent.mode === "custom" ? agent.path : undefined,
-          harness: resolvedH.kind === "omnigent" ? resolvedH.name : undefined,
-          server: this.settings.omnigentServerUrl,
-        }),
+        this.recordSession(
+          sessionToolFromCommand(binary) ?? "custom",
+          skill.name,
+          cwd,
+          binary,
+          { harnessId: harness.id, harnessLabel: harness.label },
+        ),
     };
   }
 
@@ -2660,25 +2648,6 @@ export default class SkillLayerPlugin extends Plugin {
       }
     } catch (e) {
       console.error("[skill-layer] runPlanInTerminal failed:", e);
-      new Notice("Skill and Harness Manager: could not open a terminal.");
-    }
-  }
-
-  /**
-   * Run a RAW user-authored script `body` in the PREFERRED terminal (Bash Scripts
-   * tab, terminal mode): write `cd <cwd>` + body to a temp executable and open it
-   * in the chosen emulator. Never throws (Notices on failure).
-   */
-  private runRawInTerminal(body: string, cwd: string, tag = "script"): void {
-    const term = this.resolvePreferredTerminal();
-    try {
-      const { ext, content } = buildRawTerminalScript(body, cwd, process.platform);
-      this.openTerminalScript(content, ext, tag, term);
-      if (term.def.detached) {
-        new Notice(`Started script in ${term.def.label} — attach with: tmux attach -t ${TMUX_SESSION}`);
-      }
-    } catch (e) {
-      console.error("[skill-layer] runRawInTerminal failed:", e);
       new Notice("Skill and Harness Manager: could not open a terminal.");
     }
   }
