@@ -846,19 +846,6 @@ body .tree-item-self.is-flashing {
   flex-wrap: wrap;
 }
 
-/* Settings page: make section headings read clearly as sections (larger, bold),
-   and shrink the Add/Browse buttons on the add-skill-folder row so the one-line
-   description has room and doesn't wrap. Scoped to this plugin's settings tab. */
-.skill-layer-settings .setting-item-heading .setting-item-name {
-  font-size: var(--font-ui-large);
-  font-weight: var(--font-bold);
-}
-.skill-layer-btn-compact {
-  font-size: var(--font-ui-smaller);
-  padding-left: var(--size-4-2);
-  padding-right: var(--size-4-2);
-}
-
 /* Register-by-prompt line under the Add button: a muted sentence with the Copy
    and Refresh icon buttons inline between the words; wraps as needed. */
 .skill-layer-harness-register {

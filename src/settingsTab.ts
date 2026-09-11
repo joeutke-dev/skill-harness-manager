@@ -18,15 +18,13 @@ export class SkillLayerSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.addClass("skill-layer-settings");
 
     const settings = this.plugin.settings;
 
-    // Grouped into titled sections: General Preferences and Add Skill Folders.
-    // (Harness management lives in the browser's Harnesses tab, not here.)
-
-    // ===================== GENERAL PREFERENCES =====================
-    new Setting(containerEl).setName("General Preferences").setHeading();
+    // Per Obsidian's settings guidelines the first/default section is UNLABELED
+    // (no heading — and never a "General" heading). Skill folders are managed in
+    // the Skills tab and harnesses in the Harnesses tab, so this page is a single
+    // unlabeled section of general preferences.
 
     // --- Show hidden folders (M15, placed first) --------------------------
     // Reveals dot-folders (e.g. .claude/) in Obsidian's file explorer via a
