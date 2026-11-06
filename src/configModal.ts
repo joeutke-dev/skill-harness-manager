@@ -183,11 +183,15 @@ export class SkillConfigModal extends Modal {
 export class LaunchModal extends Modal {
   private plugin: SkillLayerPlugin;
   private skill: Skill;
+  private stallMinutes: number;
+  private longRunMinutes: number;
 
   constructor(app: App, plugin: SkillLayerPlugin, skill: Skill) {
     super(app);
     this.plugin = plugin;
     this.skill = skill;
+    this.stallMinutes = plugin.settings.stallMinutes;
+    this.longRunMinutes = plugin.settings.longRunMinutes;
   }
 
   onOpen(): void {
@@ -219,6 +223,46 @@ export class LaunchModal extends Modal {
       }
     });
 
+    // Where it runs, and (headless only) when to flag it. The thresholds start
+    // at the Settings defaults and apply to this run only.
+    const plugin = this.plugin;
+    const harness = plugin.effectiveCustomHarness(skill.id);
+    const terminal = plugin.effectiveLaunchMode(skill.id) === "terminal";
+    c.createEl("p", {
+      cls: "skill-layer-launch-hint skill-layer-launch-where",
+      text: !harness
+        ? "No harness is set for this skill: choose a Default harness in Settings → Harnesses."
+        : terminal
+          ? `Opens in ${plugin.resolvePreferredTerminal().def.label} via “${harness.label}”, so you can interact with it directly.`
+          : `Runs headless via “${harness.label}”. You'll get a notice if it needs your input, fails, stalls, or runs long, and can follow it in the Sessions tab.`,
+    });
+    if (harness && !terminal) {
+      new Setting(c)
+        .setName("Flag as stalled after")
+        .setDesc("Minutes with no output before it's flagged.")
+        .addText((t) => {
+          t.inputEl.type = "number";
+          t.inputEl.min = "1";
+          t.inputEl.addClass("skill-layer-minutes-input");
+          t.setValue(String(this.stallMinutes)).onChange((v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n >= 1) this.stallMinutes = n;
+          });
+        });
+      new Setting(c)
+        .setName("Flag as long-running after")
+        .setDesc("Minutes before it's flagged as running long.")
+        .addText((t) => {
+          t.inputEl.type = "number";
+          t.inputEl.min = "1";
+          t.inputEl.addClass("skill-layer-minutes-input");
+          t.setValue(String(this.longRunMinutes)).onChange((v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n >= 1) this.longRunMinutes = n;
+          });
+        });
+    }
+
     const buttons = new Setting(c);
     buttons.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()));
     buttons.addButton((b) =>
@@ -232,7 +276,10 @@ export class LaunchModal extends Modal {
 
   private submit(text: string): void {
     this.close();
-    void this.plugin.launchSkill(this.skill, undefined, text);
+    void this.plugin.launchSkill(this.skill, undefined, text, undefined, {
+      stallMinutes: this.stallMinutes,
+      longRunMinutes: this.longRunMinutes,
+    });
   }
 
   onClose(): void {

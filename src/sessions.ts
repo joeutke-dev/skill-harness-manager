@@ -47,6 +47,77 @@ export interface LaunchedSession {
   server?: string;
   /** Launch time, epoch ms. */
   startedAt: number;
+
+  // --- Session tracking (headless launches) -------------------------------
+  /** How it was launched. Absent on records from before tracking existed. */
+  mode?: "headless" | "terminal";
+  /** Process id of the headless run (liveness checks survive an Obsidian reload). */
+  pid?: number;
+  /** Captured stdout (stream-json for Claude-family harnesses). */
+  logPath?: string;
+  /** Captured stderr. */
+  errPath?: string;
+  /** "claude" when stdout is Claude Code stream-json (progress + exact session id). */
+  stream?: "claude";
+  /** The harness's own session id, read from the stream; enables exact-session Connect. */
+  sessionId?: string;
+  /** Exit code when the plugin saw the process exit (null = killed by a signal). */
+  exitCode?: number | null;
+  /** When the run ended, epoch ms. */
+  endedAt?: number;
+  /** Per-launch thresholds (minutes); fall back to the Settings defaults. */
+  stallMinutes?: number;
+  longRunMinutes?: number;
+  /** Alert kinds already shown, so each fires once. */
+  alerted?: string[];
+  /** The user dealt with it (Connect), so it leaves "Needs attention". */
+  acknowledged?: boolean;
+  /** When the user last Connected to the finished session (continued interactively). */
+  resumedAt?: number;
+  /** The user stopped it from the Sessions tab. */
+  stopped?: boolean;
+  /** Final status snapshot, cached once the run has finished. */
+  outcome?: SessionOutcome;
+}
+
+/** What a finished run ended as (cached so finished logs aren't re-parsed). */
+export interface SessionOutcome {
+  status: string;
+  detail: string;
+  question?: string;
+  resultText?: string;
+  costUsd?: number;
+  numTurns?: number;
+  durationMs?: number;
+}
+
+/**
+ * Environment variables that tie a process to ONE running Claude Code session.
+ * If Obsidian itself was started from inside a Claude Code session (e.g. a
+ * session relaunched it), Obsidian inherits these, and so does everything the
+ * plugin starts. A `claude` that sees `CLAUDE_CODE_CHILD_SESSION=1` runs as a
+ * nested child and doesn't save its conversation, so a resumed session's new
+ * turns were silently lost (every Connect landed back at the old point). These
+ * are stripped from every launch; config variables (gateway, telemetry, …) stay.
+ */
+export const CLAUDE_SESSION_ENV_VARS = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_PID",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_EFFORT",
+] as const;
+
+/** A copy of `env` without the per-session Claude Code variables. */
+export function scrubClaudeSessionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of CLAUDE_SESSION_ENV_VARS) delete out[k];
+  return out;
 }
 
 /** Sessions older than this are dropped from the UI (and storage). */
@@ -80,8 +151,10 @@ export function buildResumeArgv(s: LaunchedSession): string[] {
     argv.push("-c");
     return argv;
   }
-  if (s.tool === "claude") return [s.binaryPath, "--continue"];
-  if (s.tool === "isaac") return [s.binaryPath, "resume"];
+  // With a captured session id, Claude-family tools reopen that exact session.
+  const id = s.sessionId && /^[A-Za-z0-9._:-]{1,128}$/.test(s.sessionId) ? s.sessionId : "";
+  if (s.tool === "claude") return id ? [s.binaryPath, "--resume", id] : [s.binaryPath, "--continue"];
+  if (s.tool === "isaac") return id ? [s.binaryPath, "resume", id] : [s.binaryPath, "resume"];
   if (s.tool === "codex") return [s.binaryPath, "resume", "--last"];
   // "custom": best-effort guess (the most common continue flag). If it's wrong,
   // the terminal script surfaces a hint to set a Resume command for the harness.
@@ -102,17 +175,37 @@ export function buildTerminalScript(
   failHint: string,
   platform: NodeJS.Platform = process.platform,
   keepOpen = false,
+  opts: TerminalScriptOptions = {},
 ): { ext: string; content: string } {
   if (platform === "win32") {
-    return { ext: ".bat", content: buildBatchScript(argv, cwd, failHint, keepOpen) };
+    return { ext: ".bat", content: buildBatchScript(argv, cwd, failHint, keepOpen, opts) };
   }
   // macOS uses `.command` (double-clickable / `open`-able in Terminal); other
   // Unix uses `.sh`. Both share the same bash body.
   return {
     ext: platform === "darwin" ? ".command" : ".sh",
-    content: buildBashScript(argv, cwd, failHint, keepOpen),
+    content: buildBashScript(argv, cwd, failHint, keepOpen, opts),
   };
 }
+
+/** Extras for a terminal script (used by session Connect). */
+export interface TerminalScriptOptions {
+  /** Cleared-screen header line shown first (e.g. which session this is). */
+  header?: string;
+  /**
+   * A second command to try when the first exits non-zero QUICKLY (it failed
+   * to start rather than the user ending a long session), e.g. `claude --resume
+   * <id>` when a wrapper's own resume breaks.
+   */
+  fallback?: string[];
+  /** Shown before the fallback runs. */
+  fallbackNote?: string;
+  /** Check the folder is readable first and explain the macOS privacy fix if not. */
+  cwdGuard?: boolean;
+}
+
+/** Seconds within which a non-zero exit counts as "failed to start". */
+export const FALLBACK_WINDOW_SECONDS = 20;
 
 /**
  * A terminal script that `cd`s into `cwd` and runs a RAW user-authored script
@@ -152,6 +245,7 @@ function buildBashScript(
   cwd: string,
   failHint: string,
   keepOpen = false,
+  opts: TerminalScriptOptions = {},
 ): string {
   const cmd = argv.map(shellSingleQuote).join(" ");
   const hint = failHint.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -160,14 +254,44 @@ function buildBashScript(
     // Self-delete so terminal session-restore (e.g. Ghostty/macOS reopen) can't
     // re-run this script and spawn a duplicate. The open fd keeps running fine.
     'rm -f "$0"',
+    // Never run as a nested child of some other Claude Code session (see
+    // CLAUDE_SESSION_ENV_VARS): a child doesn't save its conversation.
+    `unset ${CLAUDE_SESSION_ENV_VARS.join(" ")}`,
     `cd ${shellSingleQuote(cwd)} || exit 1`,
-    cmd,
-    "code=$?",
+  ];
+  if (opts.header) lines.push("clear", `echo ${shellSingleQuote(opts.header)}`, 'echo ""');
+  if (opts.cwdGuard) {
+    // macOS privacy (TCC) can let `cd` succeed but block reading the folder
+    // (EPERM), so every CLI started here fails. Say so plainly instead.
+    lines.push(
+      "if ! ls . >/dev/null 2>&1; then",
+      `  echo ${shellSingleQuote(`This terminal app isn't allowed to read ${cwd}.`)}`,
+      `  echo ${shellSingleQuote("Fix: System Settings → Privacy & Security → Files and Folders → this terminal app → turn on Documents Folder (or add it under Full Disk Access), then Connect again.")}`,
+      // On macOS, jump straight to the pane where access is granted.
+      '  [ "$(uname)" = Darwin ] && open "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders" >/dev/null 2>&1',
+      "  exit 1",
+      "fi",
+    );
+  }
+  lines.push("start=$SECONDS", cmd, "code=$?");
+  if (opts.fallback && opts.fallback.length > 0) {
+    const fb = opts.fallback.map(shellSingleQuote).join(" ");
+    const note = opts.fallbackNote ?? `Trying: ${opts.fallback.join(" ")}`;
+    lines.push(
+      `if [ "$code" -ne 0 ] && [ $((SECONDS - start)) -lt ${FALLBACK_WINDOW_SECONDS} ]; then`,
+      '  echo ""',
+      `  echo ${shellSingleQuote(note)}`,
+      `  ${fb}`,
+      "  code=$?",
+      "fi",
+    );
+  }
+  lines.push(
     'if [ "$code" -ne 0 ]; then',
     '  echo ""',
     `  echo "${hint}"`,
     "fi",
-  ];
+  );
   // Keep the window usable after the command exits: drop into an interactive
   // shell in the same cwd so the user can continue (e.g. resume the session).
   if (keepOpen) lines.push('exec "${SHELL:-/bin/bash}" -i');
@@ -180,20 +304,30 @@ function buildBatchScript(
   cwd: string,
   failHint: string,
   keepOpen = false,
+  opts: TerminalScriptOptions = {},
 ): string {
   const q = (s: string): string => `"${s.replace(/"/g, '""')}"`;
   const cmd = argv.map(q).join(" ");
-  // Strip cmd.exe-special characters from the hint so `echo` prints it literally.
-  const safeHint = failHint.replace(/[%&|<>^()"]/g, " ");
-  const lines = [
-    "@echo off",
-    `cd /d ${q(cwd)}`,
-    cmd,
+  // Strip cmd.exe-special characters from echoed text so it prints literally.
+  const safe = (t: string): string => t.replace(/[%&|<>^()"]/g, " ");
+  const safeHint = safe(failHint);
+  const lines = ["@echo off", `cd /d ${q(cwd)}`];
+  if (opts.header) lines.push("cls", `echo ${safe(opts.header)}`, "echo.");
+  lines.push(cmd);
+  if (opts.fallback && opts.fallback.length > 0) {
+    lines.push(
+      "if not errorlevel 1 goto :done",
+      "echo.",
+      `echo ${safe(opts.fallbackNote ?? "Trying the fallback resume command")}`,
+      opts.fallback.map(q).join(" "),
+    );
+  }
+  lines.push(
     "if not errorlevel 1 goto :done",
     "echo.",
     `echo ${safeHint}`,
     ":done",
-  ];
+  );
   // Keep the console open with a fresh prompt so the user can continue.
   if (keepOpen) lines.push("cmd /k");
   lines.push("");
@@ -202,6 +336,7 @@ function buildBatchScript(
 
 /** Short label describing the reconnect target (shown on the row). */
 export function resumeTargetLabel(s: LaunchedSession): string {
+  if (s.sessionId) return `${s.harnessLabel ?? s.tool} · session ${s.sessionId.slice(0, 8)}`;
   if (s.tool === "omnigent") {
     const agent = s.agentArg
       ? (s.agentArg.split("/").pop() ?? s.agentArg)

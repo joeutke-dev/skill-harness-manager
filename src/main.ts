@@ -97,10 +97,31 @@ import {
   buildResumeArgv,
   buildTerminalScript,
   LaunchedSession,
+  scrubClaudeSessionEnv,
   SESSION_MAX_AGE_MS,
   sessionToolFromCommand,
   SessionTool,
 } from "./sessions";
+import {
+  alertsToFire,
+  AlertKind,
+  applyStreamLine,
+  DerivedStatus,
+  deriveSessionStatus,
+  emptyStreamState,
+  formatDuration,
+  NEEDS_INPUT_INSTRUCTION,
+  resumeArgvForSession,
+  sessionGroup,
+  SessionStatus,
+  withResumed,
+  sessionLogBase,
+  splitChunk,
+  StreamState,
+  withStreamJson,
+} from "./sessionMonitor";
+import { SessionDetailsModal } from "./sessionDetails";
+import { StringDecoder } from "string_decoder";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import {
   DEFAULT_SETTINGS,
@@ -134,6 +155,9 @@ interface VaultConfigAccess {
 }
 
 const RESCAN_DEBOUNCE_MS = 600;
+
+/** Body class that switches the plugin UI to Obsidian's selected text font. */
+const INHERIT_FONT_CLASS = "skill-layer-inherit-font";
 
 export default class SkillLayerPlugin extends Plugin {
   settings!: SkillLayerSettings;
@@ -182,10 +206,22 @@ export default class SkillLayerPlugin extends Plugin {
 
   private rescanTimer: number | null = null;
 
+  /** Session monitoring: per-session read state, latest status, status-bar item. */
+  private sessionRuntime = new Map<string, SessionRuntime>();
+  private sessionDerived = new Map<string, DerivedStatus>();
+  private sessionStatusEl: HTMLElement | null = null;
+  private sessionSig = "";
+  private sessionPolling = false;
+  /** The live "is running" notice per session (until dismissed or finished). */
+  private liveNotices = new Map<string, LiveNotice>();
+  /** An open "may be stalled" notice per session (closed if it recovers/finishes). */
+  private stallNotices = new Map<string, Notice>();
+
   async onload(): Promise<void> {
     await this.loadSettings();
     this.detector = new Detector(this.app, () => this.settings);
     this.hiddenFiles = new HiddenFilesController(this.app);
+    this.applyFontMode();
 
     this.registerView(
       SKILL_LAYER_VIEW,
@@ -195,6 +231,16 @@ export default class SkillLayerPlugin extends Plugin {
     this.addRibbonIcon("brain-circuit", "Skill and Harness Manager: toggle skills browser", () => {
       void this.toggleView();
     });
+
+    // Session monitoring: a status-bar summary of running / needs-you sessions,
+    // and a 10s check of every tracked headless run (alerts fire from there).
+    this.sessionStatusEl = this.addStatusBarItem();
+    this.sessionStatusEl.addClass("skill-layer-statusbar", "mod-clickable");
+    this.registerDomEvent(this.sessionStatusEl, "click", () => void this.openSessionsTab());
+    this.registerInterval(window.setInterval(() => void this.pollSessions(), 5_000));
+    // 1s ticker: elapsed times in the live notices + Sessions tab, updated in place.
+    this.registerInterval(window.setInterval(() => this.tickSessions(), 1_000));
+    this.app.workspace.onLayoutReady(() => void this.pollSessions());
 
     this.addCommand({
       id: "open-browser",
@@ -264,6 +310,7 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   onunload(): void {
+    document.body.removeClass(INHERIT_FONT_CLASS);
     if (this.rescanTimer !== null) window.clearTimeout(this.rescanTimer);
     // Restore the hidden-file adapter patch (function swap is synchronous).
     this.hiddenFiles?.teardown();
@@ -1501,6 +1548,18 @@ export default class SkillLayerPlugin extends Plugin {
    * patches the vault adapter to reveal dot-folders; disabling reverts it. Both
    * paths are idempotent and no-op on non-desktop / non-FileSystemAdapter.
    */
+  /** Toggle "use Obsidian's text font" and apply it live. */
+  async setInheritTextFont(value: boolean): Promise<void> {
+    this.settings.inheritTextFont = value;
+    await this.saveSettings();
+    this.applyFontMode();
+  }
+
+  /** Sync the body class that scopes the text-font override (styles.css). */
+  private applyFontMode(): void {
+    document.body.toggleClass(INHERIT_FONT_CLASS, this.settings.inheritTextFont);
+  }
+
   async setShowHiddenFolders(value: boolean): Promise<void> {
     this.settings.showHiddenFolders = value;
     await this.saveSettings();
@@ -2301,6 +2360,7 @@ export default class SkillLayerPlugin extends Plugin {
     contextPath?: string,
     userPrompt?: string,
     selectionText?: string,
+    monitor?: { stallMinutes?: number; longRunMinutes?: number },
   ): Promise<void> {
     // Desktop + filesystem capability gate.
     if (!this.detector.canScanExternal()) {
@@ -2317,7 +2377,7 @@ export default class SkillLayerPlugin extends Plugin {
     // first token would hit omnigent's REPL slash dispatcher ("Unknown
     // command") instead of selecting the host skill. Reuse the spawn cwd as the
     // vault path in the anchor text. ("Copy invocation" keeps the slash form.)
-    const prompt = buildLaunchPrompt(
+    let prompt = buildLaunchPrompt(
       skill.name,
       cwd,
       this.settings.appendVaultAnchor,
@@ -2326,6 +2386,12 @@ export default class SkillLayerPlugin extends Plugin {
       skill.kind ?? "skill",
       selectionText,
     );
+    const mode = this.effectiveLaunchMode(skill.id);
+    // Headless runs can't stop and wait for an answer, so (Settings toggle) tell
+    // the model to end with a `NEEDS INPUT:` line when it truly needs the user.
+    if (mode !== "terminal" && this.settings.needsInputInstruction) {
+      prompt = `${prompt}\n\n${NEEDS_INPUT_INSTRUCTION}`;
+    }
 
     // Build the skill's harness command (argv + session record + Notices) ONCE,
     // then run it either headless (detached spawn) or in the user's preferred
@@ -2334,12 +2400,65 @@ export default class SkillLayerPlugin extends Plugin {
     const plan = this.buildLaunchPlan(skill, prompt, cwd);
     if (!plan) return; // a Notice was already shown (invalid harness / binary).
 
-    if (this.effectiveLaunchMode(skill.id) === "terminal") {
+    if (mode === "terminal") {
       this.runPlanInTerminal(plan, skill.name, cwd);
-    } else {
-      this.spawnOmnigent(plan.argv, cwd, plan.successNotice, plan.label);
+      plan.record({ mode: "terminal" });
+      return;
     }
-    plan.record();
+    this.launchTrackedHeadless(plan, cwd, monitor);
+  }
+
+  /**
+   * Run a launch plan headless WITH session tracking: stdout/stderr go to
+   * per-session log files (outside the vault, so vault backups never pick them
+   * up), Claude-family harnesses get `--output-format stream-json` for live
+   * progress + the exact session id, and the record carries the pid so status
+   * survives an Obsidian reload. The monitor (`pollSessions`) does the rest.
+   */
+  private launchTrackedHeadless(
+    plan: {
+      argv: string[];
+      label: string;
+      successNotice: string;
+      record: (extra: Partial<LaunchedSession>) => LaunchedSession | null;
+    },
+    cwd: string,
+    monitor?: { stallMinutes?: number; longRunMinutes?: number },
+  ): void {
+    const { argv, streaming } = withStreamJson(plan.argv);
+    const base = sessionLogBase(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const dir = this.sessionLogDir();
+    const logPath = nodePath.join(dir, `${base}.out.jsonl`);
+    const errPath = nodePath.join(dir, `${base}.err.log`);
+
+    let rec: LaunchedSession | null = null;
+    const pid = this.spawnOmnigent(argv, cwd, "", plan.label, {
+      logPath,
+      errPath,
+      onExit: (code) => {
+        if (!rec) return;
+        rec.exitCode = code;
+        rec.endedAt = Date.now();
+        const rt = this.sessionRuntime.get(rec.key);
+        if (rt) rt.exited = true;
+        void this.pollSessions();
+      },
+    });
+    if (pid === null) return; // spawn failed; a Notice was already shown.
+
+    const extra: Partial<LaunchedSession> = { mode: "headless", pid, logPath, errPath };
+    if (streaming) extra.stream = "claude";
+    const stall = validMinutes(monitor?.stallMinutes);
+    const longRun = validMinutes(monitor?.longRunMinutes);
+    if (stall !== undefined) extra.stallMinutes = stall;
+    if (longRun !== undefined) extra.longRunMinutes = longRun;
+    rec = plan.record(extra);
+    if (rec) {
+      this.sessionRuntime.set(rec.key, { offset: 0, partial: "", state: emptyStreamState(), exited: false });
+      this.showRunningNotice(rec);
+    } else {
+      new Notice(plan.successNotice);
+    }
   }
 
   /**
@@ -2357,7 +2476,7 @@ export default class SkillLayerPlugin extends Plugin {
     argv: string[];
     label: string;
     successNotice: string;
-    record: () => void;
+    record: (extra: Partial<LaunchedSession>) => LaunchedSession | null;
   } | null {
     // The skill runs through a CUSTOM harness: its explicit `custom:` pick, else
     // the designated default harness ("Default"). With neither set there is no
@@ -2394,13 +2513,13 @@ export default class SkillLayerPlugin extends Plugin {
       argv,
       label: harness.label,
       successNotice: `Launching "${skill.name}" via "${harness.label}" — it should start shortly.`,
-      record: () =>
+      record: (extra: Partial<LaunchedSession>) =>
         this.recordSession(
           sessionToolFromCommand(binary) ?? "custom",
           skill.name,
           cwd,
           binary,
-          { harnessId: harness.id, harnessLabel: harness.label },
+          { harnessId: harness.id, harnessLabel: harness.label, ...extra },
         ),
     };
   }
@@ -2455,7 +2574,10 @@ export default class SkillLayerPlugin extends Plugin {
       process.platform === "win32"
         ? [nodePath.join(home, ".local", "bin")]
         : ["/usr/local/bin", `${home}/.local/bin`, "/opt/homebrew/bin"];
-    return { ...process.env, PATH: augmentPath(process.env.PATH, extras) };
+    // Strip per-session Claude Code variables Obsidian may have inherited, so a
+    // launched / resumed `claude` is a normal top-level session that saves its
+    // conversation (see CLAUDE_SESSION_ENV_VARS).
+    return scrubClaudeSessionEnv({ ...process.env, PATH: augmentPath(process.env.PATH, extras) });
   }
 
   private spawnOmnigent(
@@ -2463,26 +2585,78 @@ export default class SkillLayerPlugin extends Plugin {
     cwd: string,
     successNotice: string,
     label = "omnigent",
-  ): void {
+    track?: {
+      logPath: string;
+      errPath: string;
+      onExit: (code: number | null) => void;
+    },
+  ): number | null {
     const env = this.launchEnv();
+
+    // Tracked launches write stdout/stderr straight to log files (fds, not
+    // pipes), so the run keeps going and stays observable even if Obsidian
+    // reloads or quits. Detached on POSIX so it's its own process group (Stop
+    // can signal the whole group).
+    let outFd: number | undefined;
+    let errFd: number | undefined;
+    if (track) {
+      try {
+        fs.mkdirSync(nodePath.dirname(track.logPath), { recursive: true });
+        outFd = fs.openSync(track.logPath, "a");
+        errFd = fs.openSync(track.errPath, "a");
+      } catch (err) {
+        console.error("[skill-layer] could not open session logs:", err);
+        new Notice(`Skill and Harness Manager: could not create session log files (${String(err)}).`);
+        return null;
+      }
+    }
+    const closeFds = () => {
+      for (const fd of [outFd, errFd]) {
+        if (fd !== undefined) {
+          try {
+            fs.closeSync(fd);
+          } catch {
+            /* already closed */
+          }
+        }
+      }
+    };
 
     let child;
     try {
       // argv[0] is the binary; the rest are inert array args. shell:false
       // (never true — the prompt is untrusted) so args are never shell-parsed.
-      // stdio: ignore stdin+stdout at the OS level (no unconsumed pipe); keep
-      // stderr piped for bounded error-surfacing.
+      // Untracked: ignore stdin+stdout at the OS level (no unconsumed pipe) and
+      // pipe stderr for bounded error-surfacing.
       child = spawn(argv[0], argv.slice(1), {
         cwd,
         env,
         shell: false,
         windowsHide: true,
-        stdio: ["ignore", "ignore", "pipe"],
+        detached: track ? process.platform !== "win32" : false,
+        stdio:
+          track && outFd !== undefined && errFd !== undefined
+            ? ["ignore", outFd, errFd]
+            : ["ignore", "ignore", "pipe"],
       });
     } catch (err) {
+      closeFds();
       console.error("[skill-layer] spawn threw:", err);
       new Notice(`Skill and Harness Manager: could not launch ${label} (${String(err)}).`);
-      return;
+      return null;
+    }
+    // The child holds its own copies of the log fds.
+    closeFds();
+
+    if (track) {
+      child.on("error", (err) => {
+        console.error("[skill-layer] spawn error:", err);
+        new Notice(`Skill and Harness Manager: failed to launch ${label} — ${err.message}`);
+      });
+      child.on("exit", (code) => track.onExit(code));
+      child.unref?.();
+      if (successNotice) new Notice(successNotice);
+      return child.pid ?? null;
     }
 
     // Capture a short stderr tail for error-surfacing; don't hang on the run.
@@ -2507,6 +2681,7 @@ export default class SkillLayerPlugin extends Plugin {
     // Spawn succeeded; the run's real success/failure is async (an 'error' or
     // non-zero 'exit' will Notice above), so don't assert success here.
     new Notice(successNotice);
+    return child.pid ?? null;
   }
 
   // --- Sessions (Sessions tab, M20) --------------------------------------
@@ -2523,14 +2698,8 @@ export default class SkillLayerPlugin extends Plugin {
     skillName: string,
     cwd: string,
     binaryPath: string,
-    extra: {
-      agentArg?: string;
-      harness?: string;
-      server?: string;
-      harnessId?: string;
-      harnessLabel?: string;
-    } = {},
-  ): void {
+    extra: Partial<LaunchedSession> = {},
+  ): LaunchedSession | null {
     try {
       const startedAt = Date.now();
       const rec: LaunchedSession = {
@@ -2546,11 +2715,26 @@ export default class SkillLayerPlugin extends Plugin {
       if (extra.server && extra.server.trim()) rec.server = extra.server.trim();
       if (extra.harnessId) rec.harnessId = extra.harnessId;
       if (extra.harnessLabel) rec.harnessLabel = extra.harnessLabel;
+      // Tracking fields (headless launches) carry over as-is.
+      for (const k of [
+        "mode",
+        "pid",
+        "logPath",
+        "errPath",
+        "stream",
+        "stallMinutes",
+        "longRunMinutes",
+      ] as const) {
+        if (extra[k] !== undefined) (rec as unknown as Record<string, unknown>)[k] = extra[k];
+      }
       this.settings.sessions.push(rec);
       void this.saveSettings();
       this.refreshViews();
+      this.updateSessionStatusBar();
+      return rec;
     } catch (e) {
       console.error("[skill-layer] recordSession failed:", e);
+      return null;
     }
   }
 
@@ -2565,6 +2749,9 @@ export default class SkillLayerPlugin extends Plugin {
     const kept = this.settings.sessions.filter(
       (s) => now - s.startedAt < SESSION_MAX_AGE_MS,
     );
+    for (const s of this.settings.sessions) {
+      if (!kept.includes(s)) this.deleteSessionLogs(s);
+    }
     if (kept.length !== this.settings.sessions.length) {
       this.settings.sessions = kept;
       void this.saveSettings();
@@ -2574,9 +2761,476 @@ export default class SkillLayerPlugin extends Plugin {
 
   /** Remove one tracked session (the Sessions-tab "Forget" action). */
   async forgetSession(key: string): Promise<void> {
+    const gone = this.settings.sessions.find((s) => s.key === key);
     this.settings.sessions = this.settings.sessions.filter((s) => s.key !== key);
+    if (gone) this.deleteSessionLogs(gone);
     await this.saveSettings();
     this.refreshViews();
+    this.updateSessionStatusBar();
+  }
+
+  // --- Session monitoring ------------------------------------------------
+
+  /**
+   * `claude --resume <id>` for a Claude-family session whose primary resume
+   * command isn't already plain claude; null when there's no id or no claude
+   * binary. The claude binary comes from a configured harness, else the
+   * standard install locations.
+   */
+  private claudeResumeFallback(s: LaunchedSession, primary: string[]): string[] | null {
+    if (s.stream !== "claude" || !s.sessionId || !/^[A-Za-z0-9._:-]{1,128}$/.test(s.sessionId)) {
+      return null;
+    }
+    const isClaude = (p: string) => nodePath.basename(p).toLowerCase().replace(/\.exe$/, "") === "claude";
+    if (primary.length > 0 && isClaude(primary[0])) return null;
+    const home = os.homedir();
+    const candidates = [
+      ...this.settings.harnesses.map((h) => h.command?.[0]).filter((p): p is string => !!p && isClaude(p)),
+      nodePath.join(home, ".local", "bin", "claude"),
+      "/opt/homebrew/bin/claude",
+      "/usr/local/bin/claude",
+    ];
+    const bin = candidates.find((p) => nodePath.isAbsolute(p) && fs.existsSync(p));
+    return bin ? [bin, "--resume", s.sessionId] : null;
+  }
+
+  /** True while a tracked headless session's process is still running. */
+  isSessionLive(s: LaunchedSession): boolean {
+    if (s.mode !== "headless" || !s.logPath || s.endedAt !== undefined) return false;
+    return typeof s.pid === "number" && isPidAlive(s.pid);
+  }
+
+  /** Where headless runs' stdout/stderr go: the OS temp dir, never the vault. */
+  sessionLogDir(): string {
+    return nodePath.join(os.tmpdir(), "skill-harness-manager", "sessions");
+  }
+
+  private deleteSessionLogs(s: LaunchedSession): void {
+    this.sessionRuntime.delete(s.key);
+    this.sessionDerived.delete(s.key);
+    for (const p of [s.logPath, s.errPath]) {
+      if (p && p.startsWith(this.sessionLogDir())) {
+        try {
+          fs.rmSync(p, { force: true });
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+  }
+
+  private runtimeFor(s: LaunchedSession): SessionRuntime {
+    let rt = this.sessionRuntime.get(s.key);
+    if (!rt) {
+      rt = { offset: 0, partial: "", state: emptyStreamState(), exited: false };
+      this.sessionRuntime.set(s.key, rt);
+    }
+    return rt;
+  }
+
+  /** Read whatever the run has written since the last poll into its stream state. */
+  private readSessionOutput(s: LaunchedSession, rt: SessionRuntime, flush: boolean): void {
+    if (!s.logPath || s.stream !== "claude") return;
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(s.logPath, "r");
+      const size = fs.fstatSync(fd).size;
+      if (size < rt.offset) {
+        // Log was truncated/replaced: start over.
+        Object.assign(rt, { offset: 0, partial: "", state: emptyStreamState() });
+        rt.decoder = undefined;
+      }
+      rt.decoder ??= new StringDecoder("utf8");
+      const toRead = Math.min(size - rt.offset, 8 * 1024 * 1024);
+      if (toRead > 0) {
+        const buf = Buffer.alloc(toRead);
+        fs.readSync(fd, buf, 0, toRead, rt.offset);
+        rt.offset += toRead;
+        const { lines, partial } = splitChunk(rt.partial, rt.decoder.write(buf));
+        rt.partial = partial;
+        for (const line of lines) applyStreamLine(rt.state, line);
+      }
+      if (flush && rt.partial) {
+        applyStreamLine(rt.state, rt.partial);
+        rt.partial = "";
+      }
+    } catch {
+      /* log not created yet / unreadable: try again next poll */
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+
+  /** Last time the run wrote anything (stdout or stderr), else its start time. */
+  private lastSessionActivity(s: LaunchedSession): number {
+    let last = s.startedAt;
+    for (const p of [s.logPath, s.errPath]) {
+      if (!p) continue;
+      try {
+        last = Math.max(last, fs.statSync(p).mtimeMs);
+      } catch {
+        /* missing */
+      }
+    }
+    return last;
+  }
+
+  /** The last few meaningful stderr lines (for error details). */
+  sessionStderrTail(s: LaunchedSession, lines = 3): string {
+    if (!s.errPath) return "";
+    try {
+      const size = fs.statSync(s.errPath).size;
+      const start = Math.max(0, size - 4096);
+      const fd = fs.openSync(s.errPath, "r");
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+      return buf
+        .toString("utf8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l && !/^Warning: no stdin data received/.test(l))
+        .slice(-lines)
+        .join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Check every tracked headless session: read new output, work out its status,
+   * raise each alert once, cache the outcome when it finishes, and refresh the
+   * Sessions tab + status bar when anything visible changed. Runs every 10s and
+   * immediately when a run exits. Never throws.
+   */
+  async pollSessions(): Promise<void> {
+    if (this.sessionPolling) return;
+    this.sessionPolling = true;
+    try {
+      const now = Date.now();
+      let dirty = false;
+      for (const s of this.settings.sessions) {
+        if (s.mode !== "headless" || !s.logPath) continue;
+        if (s.outcome && s.endedAt === undefined) {
+          delete s.outcome;
+          dirty = true;
+        }
+        if (s.outcome) {
+          if (!this.sessionDerived.has(s.key)) this.sessionDerived.set(s.key, derivedFromOutcome(s.outcome));
+          continue;
+        }
+        const rt = this.runtimeFor(s);
+        // Liveness BEFORE reading: if it's already dead, the log is complete.
+        const alive =
+          !rt.exited &&
+          s.endedAt === undefined &&
+          typeof s.pid === "number" &&
+          isPidAlive(s.pid);
+        this.readSessionOutput(s, rt, !alive);
+        if (rt.state.sessionId && s.sessionId !== rt.state.sessionId) {
+          s.sessionId = rt.state.sessionId;
+          dirty = true;
+        }
+        if (!alive && s.endedAt === undefined) {
+          s.endedAt = now;
+          dirty = true;
+        }
+        const d = deriveSessionStatus({
+          session: s,
+          stream: s.stream === "claude" ? rt.state : undefined,
+          alive,
+          lastActivityAt: this.lastSessionActivity(s),
+          now,
+          stallMinutes: s.stallMinutes ?? this.settings.stallMinutes,
+          longRunMinutes: s.longRunMinutes ?? this.settings.longRunMinutes,
+          stderrTail: alive ? undefined : this.sessionStderrTail(s),
+        });
+        this.sessionDerived.set(s.key, d);
+        const live = this.liveNotices.get(s.key);
+        if (live) live.detailEl.setText(d.detail);
+        // Recovered from a stall: close its notice and re-arm the stall alert.
+        if (d.status === "running" && s.alerted?.includes("stalled")) {
+          this.stallNotices.get(s.key)?.hide();
+          this.stallNotices.delete(s.key);
+          s.alerted = s.alerted.filter((k) => k !== "stalled");
+          dirty = true;
+        }
+        if (d.finished || d.status === "stalled") this.closeRunningNotice(s.key);
+        if (d.finished) this.onSessionFinished(s, d);
+        for (const kind of alertsToFire(d, s.alerted)) {
+          this.showSessionAlert(s, kind, d);
+          s.alerted = [...(s.alerted ?? []), kind];
+          dirty = true;
+        }
+        if (d.finished) {
+          const r = rt.state.result;
+          s.outcome = {
+            status: d.status,
+            detail: d.detail,
+            question: d.question,
+            resultText: r?.text || rt.state.lastText,
+            costUsd: r?.costUsd,
+            numTurns: r?.numTurns,
+            durationMs: r?.durationMs ?? (s.endedAt ?? now) - s.startedAt,
+          };
+          this.sessionRuntime.delete(s.key);
+          dirty = true;
+        }
+      }
+      if (dirty) await this.saveSettings();
+      // Refresh visible bits when a status changes, and once a minute for elapsed times.
+      const sig = this.settings.sessions
+        .map((s) => {
+          const d = this.sessionDerived.get(s.key);
+          return `${s.key}:${d?.status}:${d?.longRunning}:${d?.detail}:${s.acknowledged}`;
+        })
+        .join("|");
+      if (sig !== this.sessionSig) {
+        this.sessionSig = sig;
+        this.refreshSessionViews();
+      }
+      this.updateSessionStatusBar();
+    } catch (e) {
+      console.error("[skill-layer] pollSessions failed:", e);
+    } finally {
+      this.sessionPolling = false;
+    }
+  }
+
+  /** The current status of a session (for the Sessions tab / details modal). */
+  describeSession(s: LaunchedSession): DerivedStatus {
+    const cached = this.sessionDerived.get(s.key);
+    if (cached) return withResumed(cached, s.resumedAt);
+    if (s.outcome) return withResumed(derivedFromOutcome(s.outcome), s.resumedAt);
+    if (s.mode === "headless" && s.logPath) {
+      return { status: "running", longRunning: false, finished: false, detail: "Starting…" };
+    }
+    return deriveSessionStatus({
+      session: s,
+      alive: false,
+      lastActivityAt: s.startedAt,
+      now: Date.now(),
+      stallMinutes: this.settings.stallMinutes,
+      longRunMinutes: this.settings.longRunMinutes,
+    });
+  }
+
+  /** Fully re-read a session's log (details modal): steps, result, stderr. */
+  readSessionDetails(s: LaunchedSession): { state: StreamState; stderr: string } {
+    const rt: SessionRuntime = { offset: 0, partial: "", state: emptyStreamState(), exited: true };
+    this.readSessionOutput(s, rt, true);
+    return { state: rt.state, stderr: this.sessionStderrTail(s, 12) };
+  }
+
+  /** Stop a running headless session (SIGTERM to its process group). */
+  async stopSession(key: string): Promise<void> {
+    const s = this.settings.sessions.find((x) => x.key === key);
+    if (!s || typeof s.pid !== "number") return;
+    try {
+      if (process.platform !== "win32") process.kill(-s.pid, "SIGTERM");
+      else process.kill(s.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(s.pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }
+    s.stopped = true;
+    s.acknowledged = true;
+    await this.saveSettings();
+    new Notice(`Stopped “${s.skillName}”.`);
+    window.setTimeout(() => void this.pollSessions(), 500);
+  }
+
+  /** Mark a session as dealt with, so it leaves "Needs attention". */
+  async acknowledgeSession(key: string): Promise<void> {
+    const s = this.settings.sessions.find((x) => x.key === key);
+    if (!s || s.acknowledged) return;
+    s.acknowledged = true;
+    await this.saveSettings();
+    this.refreshSessionViews();
+    this.updateSessionStatusBar();
+  }
+
+  openSessionDetails(s: LaunchedSession): void {
+    new SessionDetailsModal(this.app, this, s).open();
+  }
+
+  /** Open the browser on the Sessions tab. */
+  async openSessionsTab(): Promise<void> {
+    await this.activateView();
+    for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
+      if (leaf.view instanceof SkillBrowserView) leaf.view.showTab("sessions");
+    }
+  }
+
+  private refreshSessionViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
+      if (leaf.view instanceof SkillBrowserView) leaf.view.refreshSessions();
+    }
+  }
+
+  /** Status-bar summary: "2 running · 1 needs you" (hidden when idle). */
+  updateSessionStatusBar(): void {
+    const el = this.sessionStatusEl;
+    if (!el) return;
+    let running = 0;
+    let attention = 0;
+    for (const s of this.settings.sessions) {
+      const d = this.describeSession(s);
+      if (!d.finished) running++;
+      if (sessionGroup(d, s.acknowledged) === "attention") attention++;
+    }
+    el.empty();
+    el.toggleClass("skill-layer-statusbar-hidden", running === 0 && attention === 0);
+    if (running > 0) {
+      const r = el.createSpan({ cls: "skill-layer-statusbar-part" });
+      setIcon(r.createSpan({ cls: "skill-layer-statusbar-icon" }), "loader");
+      r.createSpan({ text: `${running} running` });
+    }
+    if (attention > 0) {
+      const a = el.createSpan({ cls: "skill-layer-statusbar-part mod-attention" });
+      setIcon(a.createSpan({ cls: "skill-layer-statusbar-icon" }), "alert-triangle");
+      a.createSpan({ text: `${attention} need${attention === 1 ? "s" : ""} you` });
+    }
+    el.setAttr("aria-label", "Skill and Harness Manager sessions — click to open");
+  }
+
+  /**
+   * Show a session notice: a theme-coloured box with a small × in its top-right
+   * corner as the way to dismiss it. Clicking the box body (not a button) opens
+   * the Sessions tab and that session's details. `build` fills the box and gets
+   * a `close` callback for its own buttons.
+   */
+  private sessionNotice(
+    s: LaunchedSession,
+    cls: string,
+    build: (box: HTMLElement, close: () => void) => void,
+    duration = 0,
+  ): Notice {
+    let notice: Notice | null = null;
+    const close = () => notice?.hide();
+    const frag = createFragment((f) => {
+      const box = f.createDiv({ cls: `skill-layer-alert ${cls}` });
+      const x = box.createEl("button", {
+        cls: "skill-layer-alert-close clickable-icon",
+        attr: { "aria-label": "Dismiss" },
+      });
+      setIcon(x, "x");
+      x.addEventListener("click", (e) => {
+        e.stopPropagation();
+        close();
+      });
+      build(box, close);
+      box.setAttr("aria-label", `Open the “${s.skillName}” session`);
+      // Body click → Sessions tab + details. Clicks never reach Obsidian's
+      // click-to-dismiss; the box's own buttons handle themselves.
+      box.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if ((e.target as HTMLElement | null)?.closest("button")) return;
+        void this.openSessionsTab().then(() => this.openSessionDetails(s));
+      });
+    });
+    notice = new Notice(frag, duration);
+    noticeBox(notice)?.addClass("skill-layer-notice");
+    return notice;
+  }
+
+  /** A sticky notice for a session that needs attention. */
+  private showSessionAlert(s: LaunchedSession, kind: AlertKind, d: DerivedStatus): void {
+    const name = `“${s.skillName}”`;
+    const title =
+      kind === "needs-input"
+        ? `${name} needs your input`
+        : kind === "errored"
+          ? `${name} failed`
+          : kind === "stalled"
+            ? `${name} may be stalled`
+            : `${name} is still running after ${formatDuration(Date.now() - s.startedAt)}`;
+    const body = kind === "needs-input" && d.question ? d.question : d.detail;
+    const notice = this.sessionNotice(s, `mod-${kind}`, (box, close) => {
+      box.createDiv({ cls: "skill-layer-alert-title", text: title });
+      if (body) box.createDiv({ cls: "skill-layer-alert-body", text: body });
+      const actions = box.createDiv({ cls: "skill-layer-alert-actions" });
+      // Connect only once the run has ended (a running headless session can't
+      // take input); while it's live, Details is the way in.
+      if (!this.isSessionLive(s)) {
+        actions
+          .createEl("button", { text: "Connect", cls: "mod-cta" })
+          .addEventListener("click", () => {
+            close();
+            this.openSessionTerminal(s);
+          });
+      }
+      actions
+        .createEl("button", { text: "Details" })
+        .addEventListener("click", () => this.openSessionDetails(s));
+    });
+    if (kind === "stalled") this.stallNotices.set(s.key, notice);
+  }
+
+  /**
+   * The live "is running" notice shown at launch: elapsed time + current step,
+   * updated in place. Dismiss with its ×; the session still pops a notice back
+   * up if it stalls / needs input / fails, and briefly when it finishes.
+   */
+  private showRunningNotice(s: LaunchedSession): void {
+    let elapsedEl: HTMLElement | null = null;
+    let detailEl: HTMLElement | null = null;
+    const notice = this.sessionNotice(s, "mod-running", (box) => {
+      box.createDiv({ cls: "skill-layer-alert-title", text: `“${s.skillName}” is running` });
+      const line = box.createDiv({ cls: "skill-layer-alert-body" });
+      line.createSpan({ text: `${s.harnessLabel ?? s.tool} · ` });
+      elapsedEl = line.createSpan({ cls: "skill-layer-alert-elapsed", text: "0s" });
+      line.createSpan({ text: " · " });
+      detailEl = line.createSpan({ text: "Starting…" });
+    });
+    if (elapsedEl && detailEl) this.liveNotices.set(s.key, { notice, elapsedEl, detailEl });
+  }
+
+  private closeRunningNotice(key: string): void {
+    const live = this.liveNotices.get(key);
+    if (!live) return;
+    live.notice.hide();
+    this.liveNotices.delete(key);
+  }
+
+  /** A run just finished: close its stall notice; a clean finish gets a brief notice. */
+  private onSessionFinished(s: LaunchedSession, d: DerivedStatus): void {
+    this.stallNotices.get(s.key)?.hide();
+    this.stallNotices.delete(s.key);
+    if (d.status !== "done") return; // needs-input / errored alert separately; stopped already noticed
+    const ran = formatDuration((s.endedAt ?? Date.now()) - s.startedAt);
+    this.sessionNotice(
+      s,
+      "mod-done",
+      (box) => {
+        box.createDiv({ cls: "skill-layer-alert-title", text: `“${s.skillName}” finished in ${ran}` });
+        if (d.detail) box.createDiv({ cls: "skill-layer-alert-body", text: d.detail });
+        const actions = box.createDiv({ cls: "skill-layer-alert-actions" });
+        actions
+          .createEl("button", { text: "Details" })
+          .addEventListener("click", () => this.openSessionDetails(s));
+      },
+      8000,
+    );
+  }
+
+  /** Every second: tick elapsed times in live notices + the Sessions tab. */
+  private tickSessions(): void {
+    const now = Date.now();
+    for (const [key, live] of this.liveNotices) {
+      const s = this.settings.sessions.find((x) => x.key === key);
+      if (!s || !noticeVisible(live.notice)) {
+        this.liveNotices.delete(key); // dismissed by the user (or forgotten)
+        continue;
+      }
+      live.elapsedEl.setText(formatDuration(now - s.startedAt));
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
+      if (leaf.view instanceof SkillBrowserView) leaf.view.tickSessions(now);
+    }
   }
 
   /**
@@ -2594,8 +3248,17 @@ export default class SkillLayerPlugin extends Plugin {
       const userResume = harness?.resumeCommand;
       const argv =
         userResume && userResume.length > 0 && nodePath.isAbsolute(userResume[0])
-          ? userResume
+          ? resumeArgvForSession(userResume, s.sessionId)
           : buildResumeArgv(s);
+      // Connecting to a finished session counts as dealing with it: it's now
+      // continued interactively, so it shows as Resumed (not its old status).
+      if (this.describeSession(s).finished) {
+        s.resumedAt = Date.now();
+        s.acknowledged = true;
+        void this.saveSettings();
+        this.refreshSessionViews();
+        this.updateSessionStatusBar();
+      }
 
       // Failure hint shown in the terminal if the resume command exits non-zero.
       const label = s.harnessLabel ?? s.tool;
@@ -2608,9 +3271,38 @@ export default class SkillLayerPlugin extends Plugin {
         hint = `Skill and Harness Manager: could not resume — the session may have ended or is no longer resumable.`;
       }
 
-      const { ext, content } = buildTerminalScript(argv, s.cwd, hint, process.platform);
-      this.openTerminalScript(content, ext, `resume-${s.tool}`);
-      new Notice(`Connecting to "${s.skillName}" (${label}) in your terminal…`);
+      // Claude-family sessions are plain Claude Code sessions underneath, so
+      // `claude --resume <id>` can always open them (primary for Isaac, the
+      // fallback for other wrappers whose resume fails to start).
+      const claudeResume = this.claudeResumeFallback(s, argv);
+      // Isaac's own `isaac resume <id>` was seen rewriting the session file at
+      // startup, dropping turns from an earlier Connect (so every Connect landed
+      // back at the original question). Isaac sessions are plain Claude Code
+      // sessions underneath, so resume them with `claude --resume <id>` and
+      // keep `isaac resume` only as the fallback if claude fails to start.
+      const isIsaac =
+        s.tool === "isaac" || nodePath.basename(s.binaryPath).toLowerCase() === "isaac";
+      const primary = isIsaac && claudeResume ? claudeResume : argv;
+      const fallback = isIsaac && claudeResume ? argv : claudeResume;
+      const header =
+        `Resuming “${s.skillName}” (${label})` +
+        (s.sessionId ? ` · session ${s.sessionId}` : "");
+      // Connect opens in the same Preferred terminal as terminal launches (e.g.
+      // Ghostty), not always the OS default, since the default terminal may be
+      // blocked from the vault folder by macOS privacy settings.
+      const term = this.resolvePreferredTerminal();
+      const { ext, content } = buildTerminalScript(primary, s.cwd, hint, process.platform, !term.def.detached, {
+        header,
+        fallback: fallback ?? undefined,
+        fallbackNote: fallback
+          ? isIsaac && claudeResume
+            ? "claude --resume didn't start; trying isaac resume instead…"
+            : `${label} resume didn't start; opening the same session with claude --resume instead…`
+          : undefined,
+        cwdGuard: true,
+      });
+      this.openTerminalScript(content, ext, `resume-${s.tool}`, term);
+      new Notice(`Connecting to "${s.skillName}" (${label}) in ${term.def.label}…`);
     } catch (e) {
       console.error("[skill-layer] openSessionTerminal failed:", e);
       new Notice(`Skill and Harness Manager: could not open a terminal for this session.`);
@@ -2656,7 +3348,7 @@ export default class SkillLayerPlugin extends Plugin {
    * The shared temp-script + terminal-opener surface: write `content` to a temp
    * file with extension `ext`, mark it executable (non-Windows), and open it in a
    * terminal. `terminal` selects the emulator (defaults to the OS default when
-   * omitted — used by Sessions Connect); `tag` labels the temp filename.
+   * omitted); `tag` labels the temp filename.
    */
   private openTerminalScript(
     content: string,
@@ -2683,6 +3375,7 @@ export default class SkillLayerPlugin extends Plugin {
       linuxTerminalEnv: process.env.TERMINAL,
     });
     const child = spawn(opener.bin, opener.args, {
+      env: this.launchEnv(),
       stdio: "ignore",
       detached: true,
       windowsHide: false,
@@ -3069,4 +3762,61 @@ export default class SkillLayerPlugin extends Plugin {
       if (view instanceof SkillBrowserView) view.refresh();
     }
   }
+}
+
+/** In-memory read state for one tracked session (rebuilt after a reload). */
+interface SessionRuntime {
+  offset: number;
+  partial: string;
+  state: StreamState;
+  exited: boolean;
+  decoder?: StringDecoder;
+}
+
+/** A live-updating notice and the spans the ticker rewrites. */
+interface LiveNotice {
+  notice: Notice;
+  elapsedEl: HTMLElement;
+  detailEl: HTMLElement;
+}
+
+/** The notice's outer `.notice` element (containerEl on 1.8+, noticeEl before). */
+function noticeBox(n: Notice): HTMLElement | undefined {
+  const any = n as unknown as { containerEl?: HTMLElement; noticeEl?: HTMLElement };
+  return any.containerEl ?? any.noticeEl;
+}
+
+/** False once the user has dismissed a notice (or it timed out). */
+function noticeVisible(n: Notice): boolean {
+  const el = noticeBox(n);
+  return !!el && el.isConnected;
+}
+
+/** True if a process with this pid exists (EPERM = exists but not ours). */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** A per-launch minutes override, if it's a sane number (1 min – 24 h). */
+function validMinutes(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 1 && v <= 24 * 60 ? v : undefined;
+}
+
+function derivedFromOutcome(o: {
+  status: string;
+  detail: string;
+  question?: string;
+}): DerivedStatus {
+  return {
+    status: o.status as SessionStatus,
+    longRunning: false,
+    finished: true,
+    detail: o.detail,
+    question: o.question,
+  };
 }

@@ -962,3 +962,223 @@ body .tree-item-self.is-flashing {
 .skill-layer-hidden-input {
   display: none;
 }
+
+/* --- Session monitoring: status pills, groups, alerts, status bar --------- */
+.skill-layer-status-pill {
+  font-size: var(--font-ui-smaller);
+  border-radius: var(--radius-s);
+  padding: 0 6px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--background-modifier-hover);
+}
+.skill-layer-status-pill.mod-running {
+  color: var(--color-green);
+  background: rgba(var(--color-green-rgb), 0.12);
+}
+.skill-layer-status-pill.mod-stalled,
+.skill-layer-status-pill.mod-long-running {
+  color: var(--color-orange);
+  background: rgba(var(--color-orange-rgb), 0.14);
+}
+.skill-layer-status-pill.mod-needs-input {
+  color: var(--color-yellow);
+  background: rgba(var(--color-yellow-rgb), 0.16);
+  font-weight: var(--font-medium);
+}
+.skill-layer-status-pill.mod-errored {
+  color: var(--color-red);
+  background: rgba(var(--color-red-rgb), 0.12);
+}
+.skill-layer-status-pill.mod-done {
+  color: var(--color-green);
+  background: rgba(var(--color-green-rgb), 0.12);
+}
+
+.skill-layer-session-group.mod-attention {
+  color: var(--color-orange);
+}
+.skill-layer-session-row.mod-needs-input,
+.skill-layer-session-row.mod-errored,
+.skill-layer-session-row.mod-stalled {
+  border-left: 2px solid var(--color-orange);
+}
+.skill-layer-session-row.mod-errored {
+  border-left-color: var(--color-red);
+}
+
+/* Sticky alert notices (needs input / failed / stalled / long-running). */
+.skill-layer-alert-title {
+  font-weight: var(--font-semibold);
+  margin-bottom: 2px;
+}
+.skill-layer-alert-body {
+  font-size: var(--font-ui-small);
+  opacity: 0.9;
+  margin-bottom: 6px;
+  max-height: 8em;
+  overflow: hidden;
+}
+.skill-layer-alert-actions {
+  display: flex;
+  gap: 6px;
+}
+.skill-layer-alert-link {
+  display: inline-block;
+  margin-top: 4px;
+}
+
+/* Status bar: "2 running · 1 needs you". */
+.skill-layer-statusbar {
+  display: flex;
+  gap: 8px;
+}
+.skill-layer-statusbar-hidden {
+  display: none;
+}
+.skill-layer-statusbar-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.skill-layer-statusbar-part.mod-attention {
+  color: var(--color-orange);
+}
+.skill-layer-statusbar-icon {
+  display: inline-flex;
+}
+.skill-layer-statusbar-icon .svg-icon {
+  --icon-size: 12px;
+}
+
+/* Session details modal. */
+.skill-layer-session-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--size-4-2);
+}
+.skill-layer-session-detail {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+.skill-layer-session-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  font-size: var(--font-ui-small);
+  margin: 0 0 var(--size-4-2);
+}
+.skill-layer-session-facts dt {
+  color: var(--text-muted);
+}
+.skill-layer-session-facts dd {
+  margin: 0;
+  user-select: text;
+  word-break: break-all;
+}
+.skill-layer-session-question {
+  padding: 8px 10px;
+  border-radius: var(--radius-m);
+  background: rgba(var(--color-yellow-rgb), 0.12);
+  user-select: text;
+}
+.skill-layer-session-pre {
+  white-space: pre-wrap;
+  max-height: 16em;
+  overflow: auto;
+  font-size: var(--font-ui-smaller);
+  user-select: text;
+}
+.skill-layer-session-pre.mod-stderr {
+  color: var(--text-error);
+}
+.skill-layer-session-steps {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin: 0;
+  padding-left: 1.6em;
+}
+.skill-layer-minutes-input {
+  width: 5em;
+}
+
+.skill-layer-alert-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.skill-layer-alert.mod-running .skill-layer-alert-title::before {
+  content: "● ";
+  color: var(--color-green);
+}
+.skill-layer-alert.mod-done .skill-layer-alert-title::before {
+  content: "✓ ";
+  color: var(--color-green);
+}
+
+/* Session notices use the theme's own surface colours instead of Obsidian's
+   inverted notice style, and close only via the corner ×. */
+.notice.skill-layer-notice {
+  --notice-background: var(--background-primary);
+  --notice-color: var(--text-normal);
+  --notice-border: var(--border-width, 1px) solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s);
+  padding: 0;
+  cursor: default;
+}
+.skill-layer-alert {
+  position: relative;
+  cursor: pointer;
+  padding: var(--size-4-3) var(--size-4-8) var(--size-4-3) var(--size-4-4);
+}
+.skill-layer-alert-close {
+  position: absolute;
+  top: var(--size-4-1);
+  right: var(--size-4-1);
+  padding: var(--size-2-1);
+  height: auto;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-faint);
+}
+.skill-layer-alert-close:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.skill-layer-alert-close .svg-icon {
+  --icon-size: 14px;
+}
+.skill-layer-alert-body {
+  color: var(--text-muted);
+}
+.skill-layer-alert.mod-needs-input .skill-layer-alert-title,
+.skill-layer-alert.mod-stalled .skill-layer-alert-title,
+.skill-layer-alert.mod-long-running .skill-layer-alert-title {
+  color: var(--color-orange);
+}
+.skill-layer-alert.mod-errored .skill-layer-alert-title {
+  color: var(--text-error);
+}
+.notice.skill-layer-notice:hover {
+  border-color: var(--background-modifier-border-hover);
+}
+
+/* Skills & Commands tab: a heading per kind. */
+.skill-layer-kind-title {
+  margin-top: var(--size-4-3);
+}
+.skill-layer-kind-title:first-child {
+  margin-top: var(--size-4-1);
+}
+
+/* "Use Obsidian's text font" setting: re-point the interface font at the
+   user's Appearance → Text font inside the plugin's UI only. Overriding the
+   variable (not just font-family) carries through to inputs, buttons and menus
+   that read --font-interface; explicit --font-monospace fields are untouched. */
+body.skill-layer-inherit-font .skill-layer-view,
+body.skill-layer-inherit-font .skill-layer-config-modal,
+body.skill-layer-inherit-font .skill-layer-icon-suggestion {
+  --font-interface: var(--font-text);
+  font-family: var(--font-text);
+}

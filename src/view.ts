@@ -6,6 +6,13 @@ import { DEFAULT_TAB, SkillLayerTab, TABS } from "./tabs";
 import { Skill } from "./types";
 import type { CustomHarness } from "./launch";
 import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
+import {
+  DerivedStatus,
+  formatDuration,
+  SessionGroup,
+  sessionGroup,
+  statusLabel,
+} from "./sessionMonitor";
 
 export const SKILL_LAYER_VIEW = "skill-layer-browser";
 
@@ -35,6 +42,9 @@ export class SkillBrowserView extends ItemView {
   /** EXPANDED source-folder groups in the tree, keyed by group label. Sections
    *  default to COLLAPSED; membership here means the user opened it this session. */
   private expandedGroups = new Set<string>();
+  /** Folder groups the user collapsed DURING a search (searching opens every
+   *  matching folder; cleared when the search text changes). */
+  private searchCollapsed = new Set<string>();
   /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
   private activeTab: SkillLayerTab = DEFAULT_TAB;
   /** Container the active tab's content renders into (below the tab bar). */
@@ -72,6 +82,36 @@ export class SkillBrowserView extends ItemView {
   refresh(): void {
     // Re-render whichever tab is showing (rescan also re-scans custom agents).
     this.renderActiveTab();
+  }
+
+  /** Re-render the Sessions tab (if it's showing), keeping the scroll position. */
+  refreshSessions(): void {
+    if (this.activeTab !== "sessions") return;
+    const top = this.contentEl.scrollTop;
+    this.renderActiveTab();
+    this.contentEl.scrollTop = top;
+  }
+
+  /** Update the Sessions tab's elapsed / "started ago" times in place (1s ticker). */
+  tickSessions(now: number): void {
+    if (this.activeTab !== "sessions") return;
+    this.contentEl.querySelectorAll<HTMLElement>("[data-shm-ago]").forEach((el) => {
+      el.setText(relativeTime(Number(el.dataset.shmAgo), now));
+    });
+    this.contentEl.querySelectorAll<HTMLElement>("[data-shm-running]").forEach((el) => {
+      el.setText(`running ${formatDuration(now - Number(el.dataset.shmRunning))}`);
+    });
+  }
+
+  /** Switch to a tab (e.g. the status bar / an alert opening the Sessions tab). */
+  showTab(tab: SkillLayerTab): void {
+    if (this.activeTab === tab) {
+      this.renderActiveTab();
+      return;
+    }
+    this.activeTab = tab;
+    this.resetFilters();
+    this.render();
   }
 
   /** Render the persistent chrome (title + rescan + tab bar) and the active tab. */
@@ -161,11 +201,17 @@ export class SkillBrowserView extends ItemView {
     this.renderTabFooter(c, this.tabFooterText(this.activeTab));
   }
 
-  /** The active browser tab's item kind + label noun. */
-  private get browsing(): { items: Skill[]; noun: string } {
-    return this.activeTab === "commands"
-      ? { items: this.plugin.getCommands(), noun: "command" }
-      : { items: this.plugin.getSkills(), noun: "skill" };
+  /** The two item kinds the Skills & Commands tab shows, one section each. */
+  private get browserSections(): Array<{
+    kind: "skill" | "command";
+    title: string;
+    noun: string;
+    items: Skill[];
+  }> {
+    return [
+      { kind: "skill", title: "Skills", noun: "skill", items: this.plugin.getSkills() },
+      { kind: "command", title: "Commands", noun: "command", items: this.plugin.getCommands() },
+    ];
   }
 
   /** Empty-state block: a muted lucide glyph above the explanatory copy. */
@@ -190,24 +236,21 @@ export class SkillBrowserView extends ItemView {
   /** One-to-two sentence purpose blurb per tab (shown at the tab's bottom). */
   private tabFooterText(tab: SkillLayerTab): string {
     switch (tab) {
-      case "commands":
-        return "Commands are Markdown prompt files invoked as /name (e.g. in .claude/commands/) — the simpler, single-file form of a skill. Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
       case "sessions":
-        return "Sessions are the skills you've launched. Use the Connect button to connect to the session in your terminal; sessions are removed after 12 hours.";
+        return "Sessions are the skills you've launched, with live status. Headless runs that need your input, fail, stall, or run long are flagged here and with a notice; Connect opens that exact session in your terminal. Sessions are removed after 12 hours.";
       case "agents":
         return "Agents are AI assistants that direct their own tools and steps to complete a task, defined in config (e.g. YAML) or code (a Python SDK). Launch a session with one, or open its config to edit it.";
       case "harnesses":
         return "A harness is the runtime that actually runs a skill — it feeds the prompt to your CLI and loops until the task is done. Add your harnesses above; with more than one, use “Set as default” to pick which one a skill's Default harness uses.";
       default:
-        return "Skills are reusable instructions in a SKILL.md file (frontmatter + steps) that an assistant loads when relevant or you invoke as /name. They live in a tool's skills folder (e.g. .claude/skills/). Run one through this UI, add it to the right-click menu, or pin it to the ribbon.";
+        return "Skills are reusable instructions in a SKILL.md file (frontmatter + steps) that an assistant loads when relevant or you invoke as /name, kept in a tool's skills folder (e.g. .claude/skills/). Commands are the simpler single-file form: a Markdown prompt invoked as /name (e.g. in .claude/commands/). Run either through this UI, add it to the right-click menu, or pin it to the ribbon.";
     }
   }
 
-  /** The Skills/Commands browser tab (search + filters + facet + rows). Shared
-   *  between the Skills and Commands tabs — the only difference is the item
-   *  source + label noun (see `browsing`). */
+  /** The Skills & Commands browser tab: one search + filter bar over both kinds,
+   *  then a Skills section and a Commands section, each with its own folder
+   *  groups and folder controls (see `browserSections`). */
   private renderBrowserTab(c: HTMLElement): void {
-    const noun = this.browsing.noun;
     // Search + a compact Refresh (the unified rescan — replaces the old top
     // Rescan button; re-scans skills/commands/agents + re-discovers harnesses).
     const toolbar = c.createDiv({ cls: "skill-layer-searchbar" });
@@ -215,13 +258,15 @@ export class SkillBrowserView extends ItemView {
       cls: "skill-layer-search",
       attr: {
         type: "text",
-        placeholder: `Filter ${noun}s by name, description, source…`,
-        "aria-label": `Filter ${noun}s by name, description, source, or path`,
+        placeholder: "Filter skills & commands by name, description, source…",
+        "aria-label": "Filter skills and commands by name, description, source, or path",
       },
     });
     search.value = this.filter;
     search.addEventListener("input", () => {
       this.filter = search.value.toLowerCase().trim();
+      // A new search starts with every matching folder open again.
+      this.searchCollapsed.clear();
       this.renderList();
     });
 
@@ -232,7 +277,7 @@ export class SkillBrowserView extends ItemView {
     setIcon(refreshBtn, "refresh-cw");
     refreshBtn.addEventListener("click", () => void this.plugin.refreshAll());
 
-    this.renderFilterBar(c, this.browsing.items);
+    this.renderFilterBar(c, this.browserSections.flatMap((sec) => sec.items));
 
     this.listEl = c.createDiv({ cls: "skill-layer-list" });
     this.renderList();
@@ -248,6 +293,7 @@ export class SkillBrowserView extends ItemView {
 
   private resetFilters(): void {
     this.filter = "";
+    this.searchCollapsed.clear();
     this.filterAgents.clear();
     this.filterHarnesses.clear();
     this.filterTags.clear();
@@ -414,31 +460,57 @@ export class SkillBrowserView extends ItemView {
     });
   }
 
-  /** The Sessions tab (M20): resumable conversations the plugin launched, newest
-   *  first. Pruned live (dropped after 12h or when no longer resumable). Each row
-   *  shows the skill, tool, and start time, with a Connect (open terminal) action. */
+  /** The Sessions tab: every launched session with its live status, grouped
+   *  Needs attention → Running → Finished (newest first in each). Pruned live
+   *  (dropped after 12h). Statuses come from the plugin's session monitor. */
   private renderSessionsTab(c: HTMLElement): void {
     const sessions = this.plugin.livePrunedSessions();
     if (sessions.length === 0) {
       this.renderEmptyState(
         c,
-        "No recent sessions. Launch a skill and it appears here — sessions drop " +
-          "off after 12 hours or once they're no longer resumable.",
+        "No recent sessions. Launch a skill and it appears here with its live " +
+          "status — sessions drop off after 12 hours.",
       );
       return;
     }
-    const list = c.createDiv({ cls: "skill-layer-list" });
+    const groups: Record<SessionGroup, Array<[LaunchedSession, DerivedStatus]>> = {
+      attention: [],
+      running: [],
+      finished: [],
+    };
+    for (const s of sessions) {
+      const d = this.plugin.describeSession(s);
+      groups[sessionGroup(d, s.acknowledged)].push([s, d]);
+    }
     const now = Date.now();
-    for (const s of sessions) this.renderSessionRow(list, s, now);
+    const sections: Array<[SessionGroup, string]> = [
+      ["attention", "Needs attention"],
+      ["running", "Running"],
+      ["finished", "Finished"],
+    ];
+    for (const [group, title] of sections) {
+      const items = groups[group];
+      if (items.length === 0) continue;
+      c.createDiv({
+        cls: `skill-layer-section-title skill-layer-session-group mod-${group}`,
+        text: `${title} (${items.length})`,
+      });
+      const list = c.createDiv({ cls: "skill-layer-list" });
+      for (const [s, d] of items) this.renderSessionRow(list, s, d, group, now);
+    }
   }
 
-  /** One Sessions-tab row: skill + tool badge + start time, Connect / Forget. */
+  /** One Sessions-tab row: skill, harness, status, what it's doing, and actions. */
   private renderSessionRow(
     parent: HTMLElement,
     s: LaunchedSession,
+    d: DerivedStatus,
+    group: SessionGroup,
     now: number,
   ): void {
-    const el = parent.createDiv({ cls: "skill-layer-row" });
+    const el = parent.createDiv({
+      cls: `skill-layer-row skill-layer-session-row mod-${d.status} mod-group-${group}`,
+    });
     const main = el.createDiv({ cls: "skill-layer-row-main" });
     const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
     nameLine.createSpan({ text: s.skillName, cls: "skill-layer-row-name" });
@@ -446,30 +518,72 @@ export class SkillBrowserView extends ItemView {
       text: s.harnessLabel ?? s.tool,
       cls: "skill-layer-row-badge",
     });
-
-    const started = new Date(s.startedAt);
-    main.createDiv({
-      cls: "skill-layer-row-desc",
-      text: `Started ${relativeTime(s.startedAt, now)} · ${started.toLocaleString()}`,
+    nameLine.createSpan({
+      cls: `skill-layer-status-pill mod-${d.status}`,
+      text: statusLabel(d.status),
     });
-    main.createDiv({ cls: "skill-layer-row-path", text: resumeTargetLabel(s) });
+    if (d.longRunning) {
+      nameLine.createSpan({
+        cls: "skill-layer-status-pill mod-long-running",
+        text: "Long-running",
+      });
+    }
+
+    main.createDiv({ cls: "skill-layer-row-desc", text: d.detail });
+
+    // Times are live: the plugin's 1s ticker rewrites the data-shm-* spans.
+    const timing = main.createDiv({
+      cls: "skill-layer-row-path",
+      attr: { title: new Date(s.startedAt).toLocaleString() },
+    });
+    timing.createSpan({ text: "Started " });
+    timing.createSpan({
+      text: relativeTime(s.startedAt, now),
+      attr: { "data-shm-ago": String(s.startedAt) },
+    });
+    if (s.mode === "headless") {
+      timing.createSpan({ text: " · " });
+      if (d.finished) {
+        timing.createSpan({ text: `ran ${formatDuration((s.endedAt ?? now) - s.startedAt)}` });
+      } else {
+        timing.createSpan({
+          text: `running ${formatDuration(now - s.startedAt)}`,
+          attr: { "data-shm-running": String(s.startedAt) },
+        });
+      }
+    }
+    if (s.outcome?.costUsd !== undefined) {
+      timing.createSpan({ text: ` · $${s.outcome.costUsd.toFixed(2)}` });
+    }
+    timing.createSpan({ text: ` · ${resumeTargetLabel(s)}` });
 
     const actions = el.createDiv({ cls: "skill-layer-row-actions" });
-    const connect = actions.createEl("button", {
-      cls: "skill-layer-action skill-layer-action-launch",
-      attr: { "aria-label": `Connect to the ${s.skillName} session in a terminal` },
-    });
-    setIcon(connect.createSpan({ cls: "skill-layer-action-icon" }), "terminal");
-    connect.createSpan({ text: " Connect" });
-    connect.addEventListener("click", () => this.plugin.openSessionTerminal(s));
+    const button = (icon: string, label: string, aria: string, primary = false) => {
+      const b = actions.createEl("button", {
+        cls: "skill-layer-action" + (primary ? " skill-layer-action-launch" : ""),
+        attr: { "aria-label": aria },
+      });
+      setIcon(b.createSpan({ cls: "skill-layer-action-icon" }), icon);
+      b.createSpan({ text: ` ${label}` });
+      return b;
+    };
 
-    const forget = actions.createEl("button", {
-      cls: "skill-layer-action",
-      attr: { "aria-label": `Forget the ${s.skillName} session` },
-    });
-    setIcon(forget.createSpan({ cls: "skill-layer-action-icon" }), "x");
-    forget.createSpan({ text: " Forget" });
-    forget.addEventListener("click", () => void this.plugin.forgetSession(s.key));
+    const live = this.plugin.isSessionLive(s);
+    // Connect once the run has ended; a running headless session can't take input.
+    if (!live) {
+      button("terminal", "Connect", `Connect to the ${s.skillName} session in a terminal`, true)
+        .addEventListener("click", () => this.plugin.openSessionTerminal(s));
+    }
+    if (s.logPath) {
+      button("file-text", "Details", `Show details for the ${s.skillName} session`)
+        .addEventListener("click", () => this.plugin.openSessionDetails(s));
+    }
+    if (live) {
+      button("square", "Stop", `Stop the ${s.skillName} session`)
+        .addEventListener("click", () => void this.plugin.stopSession(s.key));
+    }
+    button("x", "Forget", `Forget the ${s.skillName} session`)
+      .addEventListener("click", () => void this.plugin.forgetSession(s.key));
   }
 
   /**
@@ -794,105 +908,130 @@ export class SkillBrowserView extends ItemView {
     if (!container) return;
     container.empty();
 
-    const { items: all, noun } = this.browsing;
-    const kind: "skill" | "command" = this.activeTab === "commands" ? "command" : "skill";
     const unfiltered = !this.filter && !this.hasActiveFacets();
+    // While searching, folder groups open so matches are visible (the user can
+    // still collapse one; that resets when the search text changes).
+    const searching = this.filter.length > 0;
+    let sectionsShown = 0;
 
-    const skills = all.filter((s) => this.matches(s));
+    for (const sec of this.browserSections) {
+      const { kind, noun } = sec;
+      const matched = sec.items.filter((s) => this.matches(s));
 
-    // Group by source folder, rendered as a collapsible tree that mirrors
-    // Obsidian's file explorer.
-    const groups = new Map<string, Skill[]>();
-    for (const s of skills) {
-      const g = groups.get(s.sourceLabel) ?? [];
-      g.push(s);
-      groups.set(s.sourceLabel, g);
-    }
-    // When unfiltered, also surface tool folders that EXIST on disk but hold no
-    // items yet (e.g. a folder the user just added) so each has a section with a
-    // per-section "+" to add its first skill/command.
-    if (unfiltered) {
-      for (const seg of this.plugin.existingToolFolders(kind)) {
-        if (!groups.has(seg)) groups.set(seg, []);
+      // Group by source folder, rendered as a collapsible tree that mirrors
+      // Obsidian's file explorer.
+      const groups = new Map<string, Skill[]>();
+      for (const s of matched) {
+        const g = groups.get(s.sourceLabel) ?? [];
+        g.push(s);
+        groups.set(s.sourceLabel, g);
       }
-    }
+      // When unfiltered, also surface tool folders that EXIST on disk but hold no
+      // items yet (e.g. a folder the user just added) so each has a section with a
+      // per-section "+" to add its first skill/command.
+      if (unfiltered) {
+        for (const seg of this.plugin.existingToolFolders(kind)) {
+          if (!groups.has(seg)) groups.set(seg, []);
+        }
+      }
+      // While filtering, hide a section with no matches.
+      if (!unfiltered && groups.size === 0) continue;
+      sectionsShown++;
 
-    if (groups.size === 0) {
-      this.renderEmptyState(
-        container,
-        all.length === 0
-          ? `No ${noun}s found yet. Use “+ Add folder” below to create one.`
-          : `No ${noun}s match the current filters.`,
-      );
-      // Still show the add/remove folder controls below the empty state.
-      if (unfiltered) this.renderAddFolderRow(container, kind);
-      return;
-    }
-
-    for (const label of Array.from(groups.keys()).sort()) {
-      const items = groups.get(label) ?? [];
-      const collapsed = !this.expandedGroups.has(label); // default-closed
-      const folder = container.createDiv({ cls: "skill-layer-tree-folder" });
-
-      // A DIV (role=button), NOT a <button> — Obsidian's default button chrome
-      // (grey background, box-shadow, radius) otherwise wins over our transparent
-      // styling and draws a grey box around the folder header.
-      const title = folder.createDiv({
-        cls: "skill-layer-tree-folder-title",
-        attr: {
-          "aria-expanded": String(!collapsed),
-          "aria-label": `${label} (${items.length} ${this.browsing.noun}${items.length === 1 ? "" : "s"})`,
-        },
+      container.createDiv({
+        cls: "skill-layer-section-title skill-layer-kind-title",
+        text: unfiltered ? sec.title : `${sec.title} (${matched.length})`,
       });
-      const chevron = title.createSpan({ cls: "skill-layer-tree-chevron" });
-      setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
-      title.createSpan({ cls: "skill-layer-tree-folder-name", text: label });
-      this.makeActivatable(title, () => {
-        if (collapsed) this.expandedGroups.add(label);
-        else this.expandedGroups.delete(label);
-        this.renderList();
-      });
-      // Per-section "+": create a new skill/command in THIS tool folder. Only for
-      // real tool-folder groups (a segment we know how to create into).
-      if (this.plugin.addableFolderSegments(kind).includes(label)) {
-        const add = title.createSpan({
-          cls: "skill-layer-tree-add",
+
+      if (groups.size === 0) {
+        container.createDiv({
+          cls: "skill-layer-tree-empty",
+          text:
+            sec.items.length === 0
+              ? `No ${noun}s found yet. Use “+ Add folder” below to create one.`
+              : `No ${noun}s match the current filters.`,
+        });
+        if (unfiltered) this.renderAddFolderRow(container, kind);
+        continue;
+      }
+
+      for (const label of Array.from(groups.keys()).sort()) {
+        const items = groups.get(label) ?? [];
+        // Keys are per kind so a Skills folder and a Commands folder with the
+        // same label open/close independently.
+        const key = `${kind}:${label}`;
+        const collapsed = searching
+          ? this.searchCollapsed.has(key)
+          : !this.expandedGroups.has(key); // default-closed
+        const folder = container.createDiv({ cls: "skill-layer-tree-folder" });
+
+        // A DIV (role=button), NOT a <button> — Obsidian's default button chrome
+        // (grey background, box-shadow, radius) otherwise wins over our transparent
+        // styling and draws a grey box around the folder header.
+        const title = folder.createDiv({
+          cls: "skill-layer-tree-folder-title",
           attr: {
-            "aria-label": `Add a ${noun} in ${label}`,
-            title: `Add a ${noun} in ${label}`,
-            role: "button",
-            tabindex: "0",
+            "aria-expanded": String(!collapsed),
+            "aria-label": `${label} (${items.length} ${noun}${items.length === 1 ? "" : "s"})`,
           },
         });
-        setIcon(add.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
-        add.createSpan({ text: `Add a ${noun}` });
-        const onAdd = (e: Event) => {
-          e.stopPropagation(); // don't toggle the folder collapse
-          this.promptCreateItem(kind, label);
-        };
-        add.addEventListener("click", onAdd);
-        add.addEventListener("keydown", (e: KeyboardEvent) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onAdd(e);
-          }
+        const chevron = title.createSpan({ cls: "skill-layer-tree-chevron" });
+        setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+        title.createSpan({ cls: "skill-layer-tree-folder-name", text: label });
+        this.makeActivatable(title, () => {
+          if (searching) {
+            if (collapsed) this.searchCollapsed.delete(key);
+            else this.searchCollapsed.add(key);
+          } else if (collapsed) this.expandedGroups.add(key);
+          else this.expandedGroups.delete(key);
+          this.renderList();
         });
-      }
-
-      if (!collapsed) {
-        const children = folder.createDiv({ cls: "skill-layer-tree-children" });
-        if (items.length === 0) {
-          children.createDiv({
-            cls: "skill-layer-tree-empty",
-            text: `No ${noun}s here yet — use + to add one.`,
+        // Per-section "+": create a new skill/command in THIS tool folder. Only for
+        // real tool-folder groups (a segment we know how to create into).
+        if (this.plugin.addableFolderSegments(kind).includes(label)) {
+          const add = title.createSpan({
+            cls: "skill-layer-tree-add",
+            attr: {
+              "aria-label": `Add a ${noun} in ${label}`,
+              title: `Add a ${noun} in ${label}`,
+              role: "button",
+              tabindex: "0",
+            },
+          });
+          setIcon(add.createSpan({ cls: "skill-layer-tree-add-icon" }), "plus");
+          add.createSpan({ text: `Add a ${noun}` });
+          const onAdd = (e: Event) => {
+            e.stopPropagation(); // don't toggle the folder collapse
+            this.promptCreateItem(kind, label);
+          };
+          add.addEventListener("click", onAdd);
+          add.addEventListener("keydown", (e: KeyboardEvent) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onAdd(e);
+            }
           });
         }
-        for (const skill of items) this.renderRow(children, skill);
+
+        if (!collapsed) {
+          const children = folder.createDiv({ cls: "skill-layer-tree-children" });
+          if (items.length === 0) {
+            children.createDiv({
+              cls: "skill-layer-tree-empty",
+              text: `No ${noun}s here yet — use + to add one.`,
+            });
+          }
+          for (const skill of items) this.renderRow(children, skill);
+        }
       }
+
+      // Per-section folder controls: "Add a … folder" + "Remove a … folder".
+      if (unfiltered) this.renderAddFolderRow(container, kind);
     }
 
-    // Bottom folder controls: "Add a … folder" + "Remove a … folder".
-    if (unfiltered) this.renderAddFolderRow(container, kind);
+    if (sectionsShown === 0) {
+      this.renderEmptyState(container, "No skills or commands match the current filters.");
+    }
   }
 
   /** True when any multi-select facet filter is active (affects add-affordance visibility). */

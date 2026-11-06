@@ -181,6 +181,19 @@ export interface SkillLayerSettings {
    */
   sessions: LaunchedSession[];
   /**
+   * Session monitoring: flag a headless run as STALLED after this many minutes
+   * with no output (it may be hung on a login, an MCP server, or a long command).
+   * The launch popup can override it per run.
+   */
+  stallMinutes: number;
+  /** Flag a headless run as LONG-RUNNING once it passes this many minutes. */
+  longRunMinutes: number;
+  /**
+   * Append the `NEEDS INPUT:` instruction to headless prompts, so a run that
+   * can't continue without the user says so explicitly (and is flagged).
+   */
+  needsInputInstruction: boolean;
+  /**
    * Preferred TERMINAL EMULATOR id (a `KNOWN_TERMINALS` id from `terminal.ts`)
    * used for TERMINAL launches — which terminal app opens to run the skill's
    * harness command. Blank / "auto" = the OS default terminal. Re-validated
@@ -208,6 +221,13 @@ export interface SkillLayerSettings {
    * container on open (undocumented layout internals; no-ops if unavailable).
    */
   panelWidth: number;
+  /**
+   * When true, the plugin's UI (browser view + its modals) uses the font chosen
+   * in Obsidian → Settings → Appearance → Text font (`--font-text`) instead of
+   * the interface font. Applied as a body class (`skill-layer-inherit-font`);
+   * monospace fields (script bodies, args) stay monospace.
+   */
+  inheritTextFont: boolean;
   /**
    * True once the bundled example skill has been seeded to
    * `<vault>/.agents/skills/`. Set after the first successful seed so deleting the
@@ -241,8 +261,12 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   appendVaultAnchor: true,
   showHiddenFolders: false,
   sessions: [],
+  stallMinutes: 5,
+  longRunMinutes: 30,
+  needsInputInstruction: true,
   preferredTerminal: "",
   defaultLaunchMode: "headless",
   skillLaunchMode: {},
   panelWidth: 520,
+  inheritTextFont: false,
 };

@@ -185,6 +185,8 @@ const {
   buildRawTerminalScript,
   resumeTargetLabel,
   relativeTime,
+  scrubClaudeSessionEnv,
+  CLAUDE_SESSION_ENV_VARS,
 } = await import(pathToFileURL(sessionsOut).href);
 
 // Preferred-terminal registry + detection + opener command (pure; fs injected).
@@ -1269,14 +1271,14 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "commands", "sessions", "agents", "harnesses"]));
-  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Commands", "Sessions", "Agents", "Harnesses"]));
+  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "sessions", "agents", "harnesses"]));
+  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Sessions", "Agents", "Harnesses"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
   eq("starts on Skills", tab, "skills");
   tab = TABS[1].id;
-  eq("switching to Commands → commands", tab, "commands");
+  eq("switching to Sessions → sessions", tab, "sessions");
   tab = TABS.find((x) => x.id === "agents").id;
   eq("switching to Agents → agents", tab, "agents");
   tab = TABS[0].id;
@@ -2098,6 +2100,161 @@ console.log("\n[terminal] interactive argv + keep-open");
   check("no keepOpen → no exec shell", !noOpen.content.includes("exec \"${SHELL"));
   const winOpen = buildTerminalScript(["C:\\b\\isaac.exe", "x"], "C:\\v", "h", "win32", true);
   check("keepOpen win uses cmd /k", winOpen.content.includes("cmd /k"));
+}
+
+// =====================================================================
+// Session monitoring (sessionMonitor.ts): stream-json parsing, NEEDS INPUT
+// detection, status derivation, alerts, grouping, exact-session resume.
+{
+  const monOut = join(builtDir, "sessionMonitor.mjs");
+  await esbuild.build({
+    entryPoints: [join(here, "..", "src", "sessionMonitor.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: monOut,
+    logLevel: "silent",
+  });
+  const M = await import(pathToFileURL(monOut).href);
+
+  // --- which argv gets stream-json
+  check("claude -p is claude headless", M.isClaudeHeadlessArgv(["/b/claude", "-p", "x"]));
+  check("isaac -p is claude headless", M.isClaudeHeadlessArgv(["/b/isaac", "-p", "x"]));
+  check("ucode claude -p is claude headless", M.isClaudeHeadlessArgv(["/b/ucode", "claude", "-p", "x"]));
+  check("ucode codex exec is NOT", !M.isClaudeHeadlessArgv(["/b/ucode", "codex", "exec", "x"]));
+  check("claude without -p is NOT", !M.isClaudeHeadlessArgv(["/b/claude", "x"]));
+  check("other binary is NOT", !M.isClaudeHeadlessArgv(["/b/gemini", "-p", "x"]));
+  const sj = M.withStreamJson(["/b/claude", "-p", "hi"]);
+  check("stream-json appended", deepEq(sj.argv, ["/b/claude", "-p", "hi", "--output-format", "stream-json", "--verbose"]) && sj.streaming);
+  const keepJson = M.withStreamJson(["/b/claude", "-p", "hi", "--output-format", "json"]);
+  check("existing output format kept (not streaming)", deepEq(keepJson.argv, ["/b/claude", "-p", "hi", "--output-format", "json"]) && !keepJson.streaming);
+  check("existing stream-json= is streaming", M.withStreamJson(["/b/claude", "-p", "x", "--output-format=stream-json"]).streaming);
+  const codex = M.withStreamJson(["/b/codex", "exec", "x"]);
+  check("non-claude argv untouched", deepEq(codex.argv, ["/b/codex", "exec", "x"]) && !codex.streaming);
+
+  // --- stream parsing
+  const st = M.emptyStreamState();
+  M.applyStreamLine(st, JSON.stringify({ type: "system", subtype: "init", session_id: "abc-123" }));
+  M.applyStreamLine(st, "not json");
+  M.applyStreamLine(st, JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }));
+  M.applyStreamLine(st, JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: "/v/src/main.ts" } }, { type: "text", text: "Done editing" }] } }));
+  eq("session id captured", st.sessionId, "abc-123");
+  check("steps summarized", deepEq(st.steps, ["Bash: npm test", "Edit: main.ts"]), st.steps);
+  eq("last text kept", st.lastText, "Done editing");
+  eq("non-json ignored (3 events)", st.events, 3);
+  check("bad session id rejected", (() => { const x = M.emptyStreamState(); M.applyStreamLine(x, JSON.stringify({ type: "system", session_id: "a b;rm" })); return x.sessionId === undefined; })());
+  M.applyStreamLine(st, JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "All good", num_turns: 4, total_cost_usd: 0.12, duration_ms: 5000, permission_denials: [{ tool_name: "Write" }] }));
+  check("result parsed", st.result && st.result.text === "All good" && st.result.numTurns === 4 && st.result.costUsd === 0.12 && deepEq(st.result.denials, ["Write"]));
+  const sc = M.splitChunk("", '{"a":1}\n{"b"');
+  check("splitChunk keeps partial", deepEq(sc.lines, ['{"a":1}']) && sc.partial === '{"b"');
+  check("splitChunk completes partial", deepEq(M.splitChunk(sc.partial, ':2}\n').lines, ['{"b":2}']));
+
+  // --- NEEDS INPUT
+  eq("plain marker", M.extractNeedsInput("Did stuff.\nNEEDS INPUT: which env?"), "which env?");
+  eq("bold marker", M.extractNeedsInput("**NEEDS INPUT:** pick red or blue"), "pick red or blue");
+  eq("bold colon-outside", M.extractNeedsInput("**NEEDS INPUT**: approve deploy?"), "approve deploy?");
+  eq("last marker wins", M.extractNeedsInput("NEEDS INPUT: a\nNEEDS INPUT: b"), "b");
+  eq("empty marker → generic", M.extractNeedsInput("NEEDS INPUT:"), "The session needs your input.");
+  eq("a question alone is NOT needs-input", M.extractNeedsInput("Do you prefer red or blue?"), null);
+  eq("marker mid-sentence is NOT matched", M.extractNeedsInput("I won't write NEEDS INPUT: here"), null);
+
+  // --- status
+  const now = 10_000_000;
+  const base = { key: "k", tool: "claude", skillName: "s", binaryPath: "/b/claude", cwd: "/v", startedAt: now - 60_000, mode: "headless", logPath: "/t/x.jsonl", stream: "claude" };
+  const run = (over = {}, stream, alive = true, lastActivityAt = now - 1000) =>
+    M.deriveSessionStatus({ session: { ...base, ...over }, stream, alive, lastActivityAt, now, stallMinutes: 5, longRunMinutes: 30 });
+  const fresh = M.emptyStreamState();
+  fresh.steps.push("Bash: ls");
+  check("active → running w/ step", (() => { const d = run({}, fresh); return d.status === "running" && d.detail === "Bash: ls" && !d.finished; })());
+  check("quiet 6m → stalled (not needs-input)", (() => { const d = run({}, fresh, true, now - 6 * 60_000); return d.status === "stalled" && /No activity for 6m/.test(d.detail); })());
+  check("long-running flag", run({ startedAt: now - 31 * 60_000 }, fresh).longRunning === true);
+  const withResult = (r) => { const x = M.emptyStreamState(); x.result = { isError: false, subtype: "success", text: "", denials: [], ...r }; return x; };
+  check("result success → done", run({}, withResult({ text: "Wrote the summary" }), false).status === "done");
+  check("result with marker → needs-input", (() => { const d = run({}, withResult({ text: "Stuck.\nNEEDS INPUT: which account?" })); return d.status === "needs-input" && d.question === "which account?"; })());
+  check("result ending in ? → done (no marker)", run({}, withResult({ text: "Want me to continue?" }), false).status === "done");
+  check("permission denial → needs-input", (() => { const d = run({}, withResult({ text: "ok", denials: ["Bash", "Bash"] })); return d.status === "needs-input" && /Bash$/.test(d.detail); })());
+  check("is_error → errored", run({}, withResult({ isError: true, text: "API down" }), false).status === "errored");
+  check("result while process still alive → NOT finished", run({}, withResult({ text: "done" }), true).finished === false);
+  // Background work: a turn ends (result) but the process keeps running.
+  {
+    const bg = M.emptyStreamState();
+    M.applyStreamLine(bg, JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }));
+    M.applyStreamLine(bg, JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a", description: "Transcribe Nov 2" }, { task_id: "b", task_type: "local_bash" }] }));
+    M.applyStreamLine(bg, JSON.stringify({ type: "result", subtype: "success", result: "Both transcriptions are running." }));
+    check("bg tasks parsed", deepEq(bg.backgroundTasks, ["Transcribe Nov 2", "local_bash"]) && bg.turnOpen === false);
+    const waiting = run({}, bg, true, now - 20 * 60_000);
+    check("waiting on bg tasks → running, not stalled", waiting.status === "running" && !waiting.finished && /Waiting on 2 background tasks: Transcribe Nov 2/.test(waiting.detail), waiting);
+    M.applyStreamLine(bg, JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }));
+    check("woken turn reopens", bg.turnOpen === true);
+    check("quiet mid-turn → stalled", run({}, bg, true, now - 20 * 60_000).status === "stalled");
+    M.applyStreamLine(bg, JSON.stringify({ type: "result", subtype: "success", result: "All transcripts filed." }));
+    M.applyStreamLine(bg, JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [] }));
+    const ended = run({}, bg, false);
+    check("exit → latest result is final", ended.status === "done" && ended.finished && ended.detail === "All transcripts filed.");
+    const ask = M.emptyStreamState();
+    M.applyStreamLine(ask, JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [{ description: "job" }] }));
+    M.applyStreamLine(ask, JSON.stringify({ type: "result", subtype: "success", result: "NEEDS INPUT: which folder?" }));
+    const askD = run({}, ask, true);
+    check("needs-input while alive → flagged, not finished", askD.status === "needs-input" && !askD.finished);
+    check("unfinished needs-input → attention", M.sessionGroup(askD) === "attention");
+  }
+  check("dead, exit 1 → errored w/ stderr", (() => { const d = M.deriveSessionStatus({ session: { ...base, exitCode: 1 }, stream: fresh, alive: false, lastActivityAt: now, now, stallMinutes: 5, longRunMinutes: 30, stderrTail: "boom" }); return d.status === "errored" && /code 1 — boom/.test(d.detail); })());
+  check("dead claude w/o result → errored", run({}, fresh, false).status === "errored");
+  check("stopped → stopped", run({ stopped: true }, fresh, false).status === "stopped");
+  check("dead non-stream exit 0 → done", run({ stream: undefined, exitCode: 0 }, undefined, false).status === "done");
+  check("terminal launch → terminal", run({ mode: "terminal" }).status === "terminal");
+  check("legacy record → untracked", run({ mode: undefined, logPath: undefined }).status === "untracked");
+
+  // --- alerts + grouping
+  const stalled = run({}, fresh, true, now - 6 * 60_000);
+  check("stalled alert fires once", deepEq(M.alertsToFire(stalled, []), ["stalled"]) && deepEq(M.alertsToFire(stalled, ["stalled"]), []));
+  check("done → no alerts", M.alertsToFire(run({}, withResult({ text: "x" })), []).length === 0);
+  check("long-running alert", M.alertsToFire(run({ startedAt: now - 40 * 60_000 }, fresh), []).includes("long-running"));
+  check("needs-input groups as attention", M.sessionGroup(run({}, withResult({ text: "NEEDS INPUT: x" }))) === "attention");
+  check("acknowledged needs-input → finished", M.sessionGroup(run({}, withResult({ text: "NEEDS INPUT: x" }), false), true) === "finished");
+  check("running → running", M.sessionGroup(run({}, fresh)) === "running");
+  check("stalled → attention; acked → running", M.sessionGroup(stalled) === "attention" && M.sessionGroup(stalled, true) === "running");
+  eq("formatDuration s", M.formatDuration(45_000), "45s");
+  eq("formatDuration m", M.formatDuration(12 * 60_000), "12m");
+  eq("formatDuration h", M.formatDuration(65 * 60_000), "1h 05m");
+
+  // --- exact-session resume
+  check("append id after --resume", deepEq(M.resumeArgvForSession(["/b/claude", "--resume"], "abc"), ["/b/claude", "--resume", "abc"]));
+  check("append id after -r", deepEq(M.resumeArgvForSession(["/b/ucode", "claude", "-r"], "abc"), ["/b/ucode", "claude", "-r", "abc"]));
+  check("append id after resume", deepEq(M.resumeArgvForSession(["/b/isaac", "resume"], "abc"), ["/b/isaac", "resume", "abc"]));
+  check("{session} substituted", deepEq(M.resumeArgvForSession(["/b/x", "--session", "{session}"], "abc"), ["/b/x", "--session", "abc"]));
+  check("no id → {session} dropped", deepEq(M.resumeArgvForSession(["/b/x", "{session}"], undefined), ["/b/x"]));
+  check("--last command left alone", deepEq(M.resumeArgvForSession(["/b/codex", "resume", "--last"], "abc"), ["/b/codex", "resume", "--last"]));
+  check("unsafe id not appended", deepEq(M.resumeArgvForSession(["/b/claude", "--resume"], "a;b"), ["/b/claude", "--resume"]));
+  check("built-in claude resume uses id", deepEq(buildResumeArgv({ tool: "claude", binaryPath: "/b/claude", sessionId: "abc" }), ["/b/claude", "--resume", "abc"]));
+  check("built-in isaac resume uses id", deepEq(buildResumeArgv({ tool: "isaac", binaryPath: "/b/isaac", sessionId: "abc" }), ["/b/isaac", "resume", "abc"]));
+  eq("log base sanitized", M.sessionLogBase("isaac:123:ab/c"), "isaac_123_ab_c");
+  // Inherited per-session Claude Code vars are stripped; config vars stay.
+  const scrubbed = scrubClaudeSessionEnv({ CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_PID: "20410", CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "x", CLAUDE_CODE_USE_GATEWAY: "1", PATH: "/bin" });
+  check("child-session vars stripped", !("CLAUDE_CODE_CHILD_SESSION" in scrubbed) && !("CLAUDE_PID" in scrubbed) && !("CLAUDECODE" in scrubbed) && !("CLAUDE_CODE_SESSION_ID" in scrubbed));
+  check("config vars kept", scrubbed.CLAUDE_CODE_USE_GATEWAY === "1" && scrubbed.PATH === "/bin");
+  const unsetScript = buildTerminalScript(["/b/claude", "--resume", "a"], "/v", "h", "darwin").content;
+  check("terminal script unsets session vars before running", unsetScript.includes("unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_PID") && unsetScript.indexOf("unset ") < unsetScript.indexOf("'/b/claude'"));
+  check("scrub list covers CLAUDE_CODE_CHILD_SESSION", CLAUDE_SESSION_ENV_VARS.includes("CLAUDE_CODE_CHILD_SESSION"));
+  const asked = run({}, withResult({ text: "NEEDS INPUT: which folder?" }), false);
+  const resumed = M.withResumed(asked, now);
+  check("connected needs-input → Resumed", resumed.status === "resumed" && resumed.question === undefined && M.statusLabel(resumed.status) === "Resumed");
+  check("Resumed groups as finished", M.sessionGroup(resumed, true) === "finished");
+  check("no resumedAt → unchanged", M.withResumed(asked, undefined).status === "needs-input");
+  check("running session never shown as Resumed", M.withResumed(run({}, fresh), now).status === "running");
+  // Connect script: header + quick-failure fallback to claude --resume.
+  const fbScript = buildTerminalScript(["/b/isaac", "resume", "abc"], "/v", "hint", "darwin", false, {
+    header: "Resuming “x” (Isaac) · session abc",
+    fallback: ["/b/claude", "--resume", "abc"],
+    fallbackNote: "isaac resume didn't start",
+  }).content;
+  check("script clears + prints header", fbScript.includes("clear") && fbScript.includes("echo 'Resuming “x” (Isaac) · session abc'"));
+  check("fallback only on quick failure", /if \[ "\$code" -ne 0 \] && \[ \$\(\(SECONDS - start\)\) -lt 20 \]; then/.test(fbScript));
+  check("fallback runs claude --resume", fbScript.includes("'/b/claude' '--resume' 'abc'"));
+  check("no fallback by default", !buildTerminalScript(["/b/claude", "--resume", "a"], "/v", "h", "darwin").content.includes("SECONDS - start)) -lt"));
+  const guarded = buildTerminalScript(["/b/claude", "--resume", "a"], "/Users/x/Documents/Vault", "h", "darwin", false, { cwdGuard: true }).content;
+  check("cwd guard checks readability", guarded.includes("if ! ls . >/dev/null 2>&1; then") && guarded.includes("Privacy & Security"));
+  check("cwd guard runs before the command", guarded.indexOf("ls . >/dev/null") < guarded.indexOf("'/b/claude'"));
 }
 
 // =====================================================================

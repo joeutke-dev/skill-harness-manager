@@ -71,6 +71,21 @@ export class SkillLayerSettingTab extends PluginSettingTab {
         );
     }
 
+    // --- Use Obsidian's text font -------------------------------------------
+    // Off = the plugin follows the interface font like the rest of the sidebar.
+    // On = it uses the font picked in Appearance → Text font. Applied live.
+    new Setting(containerEl)
+      .setName("Use Obsidian's text font")
+      .setDesc(
+        "Display the skills browser and its dialogs in the font selected under " +
+          "Settings → Appearance → Text font, instead of the interface font.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.inheritTextFont).onChange(async (value) => {
+          await this.plugin.setInheritTextFont(value);
+        }),
+      );
+
     // --- Preferred terminal (terminal launches) ---------------------------
     // Which terminal emulator opens when a skill/command/script runs in
     // "terminal" launch mode. It runs the SAME command headless mode would (the
@@ -81,7 +96,8 @@ export class SkillLayerSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Preferred terminal")
       .setDesc(
-        `Which terminal opens for terminal-mode launches. Auto uses your OS default. ` +
+        `Which terminal opens for terminal-mode launches and for Connect on a session. ` +
+          `Auto uses your OS default. ` +
           `Resolved: ${resolvedTerm.def.label}.`,
       )
       .addDropdown((d) => {
@@ -174,6 +190,58 @@ export class SkillLayerSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(settings.appendVaultAnchor).onChange(async (value) => {
           settings.appendVaultAnchor = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    // --- Session monitoring --------------------------------------------------
+    // Headless runs are tracked in the Sessions tab; these are the defaults the
+    // launch popup starts from (it can override them per run).
+    new Setting(containerEl).setName("Session monitoring").setHeading();
+
+    const minutes = (
+      name: string,
+      desc: string,
+      get: () => number,
+      set: (n: number) => void,
+    ) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addText((text) => {
+          text.inputEl.type = "number";
+          text.inputEl.min = "1";
+          text.inputEl.addClass("skill-layer-minutes-input");
+          text.setValue(String(get())).onChange(async (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n) || n < 1 || n > 24 * 60) return;
+            set(n);
+            await this.plugin.saveSettings();
+          });
+        });
+    minutes(
+      "Flag as stalled after (minutes)",
+      "A headless run with no output for this long is flagged as stalled and you get a notice. " +
+        "A long single command can also look quiet, so it's a nudge to check, not a failure.",
+      () => settings.stallMinutes,
+      (n) => (settings.stallMinutes = n),
+    );
+    minutes(
+      "Flag as long-running after (minutes)",
+      "A headless run still going after this long is flagged and you get a notice.",
+      () => settings.longRunMinutes,
+      (n) => (settings.longRunMinutes = n),
+    );
+    new Setting(containerEl)
+      .setName("Ask headless runs to flag when they need you")
+      .setDesc(
+        "Adds an instruction to headless prompts: if the run can't finish without you, it " +
+          "ends with a “NEEDS INPUT:” line, which is flagged as Needs input. Runs blocked " +
+          "on a tool permission are flagged either way.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.needsInputInstruction).onChange(async (value) => {
+          settings.needsInputInstruction = value;
           await this.plugin.saveSettings();
         }),
       );
