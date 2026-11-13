@@ -7,6 +7,13 @@ import { Skill } from "./types";
 import type { CustomHarness } from "./launch";
 import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
 import {
+  describeTrigger,
+  formatWhen,
+  nextRunAt,
+  Schedule,
+  ScheduleRun,
+} from "./schedules";
+import {
   DerivedStatus,
   formatDuration,
   SessionGroup,
@@ -47,6 +54,8 @@ export class SkillBrowserView extends ItemView {
   private searchCollapsed = new Set<string>();
   /** Active tab (M10). Defaults to Skills; switching re-renders the view. */
   private activeTab: SkillLayerTab = DEFAULT_TAB;
+  /** Config-tab section open state; undefined = the section's default. */
+  private configSectionOpen: { harnesses?: boolean; agents?: boolean } = {};
   /** Container the active tab's content renders into (below the tab bar). */
   private tabContentEl: HTMLElement | null = null;
 
@@ -82,6 +91,14 @@ export class SkillBrowserView extends ItemView {
   refresh(): void {
     // Re-render whichever tab is showing (rescan also re-scans custom agents).
     this.renderActiveTab();
+  }
+
+  /** Re-render the Schedules tab (if it's showing), keeping the scroll position. */
+  refreshSchedules(): void {
+    if (this.activeTab !== "schedules") return;
+    const top = this.contentEl.scrollTop;
+    this.renderActiveTab();
+    this.contentEl.scrollTop = top;
   }
 
   /** Re-render the Sessions tab (if it's showing), keeping the scroll position. */
@@ -193,8 +210,8 @@ export class SkillBrowserView extends ItemView {
     const c = this.tabContentEl;
     if (!c) return;
     c.empty();
-    if (this.activeTab === "agents") this.renderAgentsTab(c);
-    else if (this.activeTab === "harnesses") this.renderHarnessesTab(c);
+    if (this.activeTab === "config") this.renderConfigTab(c);
+    else if (this.activeTab === "schedules") this.renderSchedulesTab(c);
     else if (this.activeTab === "sessions") this.renderSessionsTab(c);
     else this.renderBrowserTab(c); // skills OR commands (same browser UI)
     // Every tab ends with a muted purpose blurb (icon + 1–2 sentences).
@@ -237,13 +254,13 @@ export class SkillBrowserView extends ItemView {
   private tabFooterText(tab: SkillLayerTab): string {
     switch (tab) {
       case "sessions":
-        return "Sessions are the skills you've launched, with live status. Headless runs that need your input, fail, stall, or run long are flagged here and with a notice; Connect opens that exact session in your terminal. Sessions are removed after 12 hours.";
-      case "agents":
-        return "Agents are AI assistants that direct their own tools and steps to complete a task, defined in config (e.g. YAML) or code (a Python SDK). Launch a session with one, or open its config to edit it.";
-      case "harnesses":
-        return "A harness is the runtime that actually runs a skill — it feeds the prompt to your CLI and loops until the task is done. Add your harnesses above; with more than one, use “Set as default” to pick which one a skill's Default harness uses.";
+        return "Runs you've started, with live status. Cleared after 12 hours.";
+      case "schedules":
+        return "Run a skill or prompt in the background, on repeat or once.";
+      case "config":
+        return "Harnesses are the CLIs that run your skills; agents are assistants they can run as.";
       default:
-        return "Skills are reusable instructions in a SKILL.md file (frontmatter + steps) that an assistant loads when relevant or you invoke as /name, kept in a tool's skills folder (e.g. .claude/skills/). Commands are the simpler single-file form: a Markdown prompt invoked as /name (e.g. in .claude/commands/). Run either through this UI, add it to the right-click menu, or pin it to the ribbon.";
+        return "Your skills and commands. Run them, pin them to the ribbon, or add them to the right-click menu.";
     }
   }
 
@@ -468,8 +485,7 @@ export class SkillBrowserView extends ItemView {
     if (sessions.length === 0) {
       this.renderEmptyState(
         c,
-        "No recent sessions. Launch a skill and it appears here with its live " +
-          "status — sessions drop off after 12 hours.",
+        "No sessions yet.",
       );
       return;
     }
@@ -587,7 +603,230 @@ export class SkillBrowserView extends ItemView {
   }
 
   /**
-   * The Agents tab: a Refresh control + every discovered agent, grouped by its
+   * The Schedules tab: a New-schedule button, then one row per schedule (what it
+   * runs, its trigger, next/last run) with Run now / Pause / Edit / Delete and an
+   * expandable run history linking into Sessions. Active schedules sort by next
+   * run; paused and finished ones follow.
+   */
+  private renderSchedulesTab(c: HTMLElement): void {
+    const toolbar = c.createDiv({ cls: "skill-layer-agents-toolbar" });
+    const add = toolbar.createEl("button", { cls: "skill-layer-action skill-layer-action-launch" });
+    setIcon(add.createSpan({ cls: "skill-layer-action-icon" }), "plus");
+    add.createSpan({ text: " New schedule" });
+    add.addEventListener("click", () => this.plugin.openScheduleModal());
+
+    const schedules = this.plugin.getSchedules();
+    if (schedules.length === 0) {
+      this.renderEmptyState(
+        c,
+        "No schedules yet.",
+      );
+      return;
+    }
+    const now = Date.now();
+    const rank = (s: Schedule): number => {
+      if (s.done) return Number.MAX_SAFE_INTEGER;
+      if (!s.enabled) return Number.MAX_SAFE_INTEGER - 1;
+      return nextRunAt(s, now) ?? Number.MAX_SAFE_INTEGER - 2;
+    };
+    const list = c.createDiv({ cls: "skill-layer-list" });
+    for (const s of [...schedules].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))) {
+      this.renderScheduleRow(list, s, now);
+    }
+  }
+
+  /** "in 25m" / "in 3h" for the next hour-ish, else a date + time. */
+  private whenLabel(t: number, now: number): string {
+    const diff = t - now;
+    if (diff <= 60_000) return "now";
+    if (diff < 60 * 60_000) return `in ${Math.round(diff / 60_000)}m`;
+    if (diff < 12 * 60 * 60_000) return `in ${Math.round(diff / (60 * 60_000))}h · ${formatWhen(t)}`;
+    return formatWhen(t);
+  }
+
+  /** A run's display status: live from its session when still tracked, else the stored one. */
+  private scheduleRunStatus(run: ScheduleRun): { cls: string; text: string; session?: LaunchedSession } {
+    const session = this.plugin.getScheduleRunSession(run);
+    if (run.status === "launched" && session) {
+      const d = this.plugin.describeSession(session);
+      return { cls: d.status, text: statusLabel(d.status), session };
+    }
+    const labels: Record<ScheduleRun["status"], [string, string]> = {
+      launched: ["running", "Started"],
+      done: ["done", "Done"],
+      "needs-input": ["needs-input", "Needs input"],
+      errored: ["errored", "Failed"],
+      stopped: ["stopped", "Stopped"],
+      failed: ["errored", "Didn't start"],
+    };
+    const [cls, text] = labels[run.status];
+    return { cls, text, session };
+  }
+
+  private renderScheduleRow(parent: HTMLElement, s: Schedule, now: number): void {
+    const el = parent.createDiv({
+      cls: "skill-layer-row skill-layer-schedule-row" + (!s.enabled || s.done ? " is-inactive" : ""),
+    });
+    const main = el.createDiv({ cls: "skill-layer-row-main" });
+    const nameLine = main.createDiv({ cls: "skill-layer-row-nameline" });
+    nameLine.createSpan({ text: s.name, cls: "skill-layer-row-name" });
+    nameLine.createSpan({ text: s.task.kind === "skill" ? "skill" : "prompt", cls: "skill-layer-row-badge" });
+    if (s.done) nameLine.createSpan({ cls: "skill-layer-status-pill mod-done", text: "Finished" });
+    else if (!s.enabled) nameLine.createSpan({ cls: "skill-layer-status-pill mod-stopped", text: "Paused" });
+
+    main.createDiv({ cls: "skill-layer-row-desc", text: describeTrigger(s.trigger) });
+
+    const what =
+      s.task.kind === "skill"
+        ? `Runs ${s.task.itemKind === "command" ? `/${s.task.skillName}` : s.task.skillName}` +
+          (s.task.prompt ? ` — “${s.task.prompt.slice(0, 80)}”` : "")
+        : `“${s.task.prompt.replace(/\s+/g, " ").slice(0, 100)}${s.task.prompt.length > 100 ? "…" : ""}”`;
+    main.createDiv({ cls: "skill-layer-row-path", text: what });
+
+    const timing = main.createDiv({ cls: "skill-layer-row-path" });
+    const next = nextRunAt(s, now);
+    if (next !== null) timing.createSpan({ text: `Next: ${this.whenLabel(next, now)}` });
+    const last = s.runs[0];
+    if (last) {
+      if (timing.childElementCount > 0) timing.createSpan({ text: " · " });
+      const st = this.scheduleRunStatus(last);
+      timing.createSpan({ text: `Last: ${relativeTime(last.at, now)} ` });
+      timing.createSpan({ cls: `skill-layer-status-pill mod-${st.cls}`, text: st.text });
+    }
+
+    const actions = el.createDiv({ cls: "skill-layer-row-actions" });
+    const button = (icon: string, label: string, aria: string, primary = false) => {
+      const b = actions.createEl("button", {
+        cls: "skill-layer-action" + (primary ? " skill-layer-action-launch" : ""),
+        attr: { "aria-label": aria },
+      });
+      setIcon(b.createSpan({ cls: "skill-layer-action-icon" }), icon);
+      if (label) b.createSpan({ text: ` ${label}` });
+      return b;
+    };
+    button("play", "Run now", `Run ${s.name} now`, true).addEventListener("click", () => {
+      void this.plugin.runScheduleNow(s.id);
+    });
+    if (!s.done) {
+      button(s.enabled ? "pause" : "play-circle", s.enabled ? "Pause" : "Resume", `${s.enabled ? "Pause" : "Resume"} ${s.name}`)
+        .addEventListener("click", () => void this.plugin.setScheduleEnabled(s.id, !s.enabled));
+    }
+    if (s.runs.length > 0) {
+      const open = this.expandedGroups.has(`schedule:${s.id}`);
+      button(open ? "chevron-down" : "history", `History (${s.runs.length})`, `Show run history for ${s.name}`)
+        .addEventListener("click", () => {
+          if (open) this.expandedGroups.delete(`schedule:${s.id}`);
+          else this.expandedGroups.add(`schedule:${s.id}`);
+          this.renderActiveTab();
+        });
+    }
+    const edit = button("settings", "", `Edit ${s.name}`);
+    edit.addClass("skill-layer-action-gear");
+    edit.addEventListener("click", () => this.plugin.openScheduleModal(s));
+    const del = button("trash-2", "", `Delete ${s.name}`);
+    del.addEventListener("click", () => {
+      // Two-step delete: the first click arms it.
+      if (del.hasClass("is-armed")) {
+        void this.plugin.deleteSchedule(s.id);
+        return;
+      }
+      del.addClass("is-armed");
+      del.empty();
+      setIcon(del.createSpan({ cls: "skill-layer-action-icon" }), "trash-2");
+      del.createSpan({ text: " Delete?" });
+      window.setTimeout(() => {
+        if (!del.isConnected) return;
+        del.removeClass("is-armed");
+        del.empty();
+        setIcon(del.createSpan({ cls: "skill-layer-action-icon" }), "trash-2");
+      }, 4000);
+    });
+
+    if (this.expandedGroups.has(`schedule:${s.id}`) && s.runs.length > 0) {
+      const hist = main.createDiv({ cls: "skill-layer-schedule-history" });
+      const reasons: Record<ScheduleRun["reason"], string> = {
+        schedule: "on schedule",
+        "catch-up": "caught up",
+        manual: "run now",
+      };
+      for (const run of s.runs) {
+        const st = this.scheduleRunStatus(run);
+        const line = hist.createDiv({ cls: "skill-layer-schedule-history-row" });
+        line.createSpan({ text: formatWhen(run.at), attr: { title: new Date(run.at).toLocaleString() } });
+        line.createSpan({ cls: "skill-layer-schedule-history-reason", text: reasons[run.reason] });
+        line.createSpan({ cls: `skill-layer-status-pill mod-${st.cls}`, text: st.text });
+        if (run.note) line.createSpan({ cls: "skill-layer-schedule-history-reason", text: run.note });
+        const session = st.session;
+        if (session?.logPath) {
+          const link = line.createEl("a", { text: "Details", attr: { href: "#" } });
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            this.plugin.openSessionDetails(session);
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * The Config tab: Harnesses and Agents as two collapsible sections (they're
+   * set up once and rarely touched, so they share one tab instead of two).
+   * Harnesses starts open only when none are configured yet (so a new user finds
+   * the add form); Agents starts collapsed. Collapsed headers show a summary.
+   */
+  private renderConfigTab(c: HTMLElement): void {
+    const harnesses = this.plugin.getCustomHarnesses();
+    const def = this.plugin.resolveDefaultHarness();
+    const agentCount = this.buildAgentRows().length;
+    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+    this.renderConfigSection(
+      c,
+      "harnesses",
+      "Harnesses",
+      harnesses.length === 0
+        ? "none yet — add one to run skills"
+        : `${harnesses.length} harness${harnesses.length === 1 ? "" : "es"}` +
+            (def ? ` · default: ${def.label}` : ""),
+      harnesses.length === 0,
+      (body) => this.renderHarnessesTab(body),
+    );
+    this.renderConfigSection(
+      c,
+      "agents",
+      "Agents",
+      agentCount === 0 ? "none found" : plural(agentCount, "agent"),
+      false,
+      (body) => this.renderAgentsTab(body),
+    );
+  }
+
+  /** One collapsible Config-tab section: a header row (chevron + title + summary) and its body. */
+  private renderConfigSection(
+    c: HTMLElement,
+    id: "harnesses" | "agents",
+    title: string,
+    summary: string,
+    openByDefault: boolean,
+    renderBody: (body: HTMLElement) => void,
+  ): void {
+    const open = this.configSectionOpen[id] ?? openByDefault;
+    const section = c.createDiv({ cls: "skill-layer-config-section" });
+    const header = section.createDiv({
+      cls: "skill-layer-config-header",
+      attr: { "aria-expanded": String(open), "aria-label": `${title}: ${summary}` },
+    });
+    setIcon(header.createSpan({ cls: "skill-layer-tree-chevron" }), open ? "chevron-down" : "chevron-right");
+    header.createSpan({ cls: "skill-layer-config-title", text: title });
+    header.createSpan({ cls: "skill-layer-config-summary", text: summary });
+    this.makeActivatable(header, () => {
+      this.configSectionOpen[id] = !open;
+      this.renderActiveTab();
+    });
+    if (open) renderBody(section.createDiv({ cls: "skill-layer-config-body" }));
+  }
+
+  /**
+   * The Agents section (Config tab): a Refresh control + every discovered agent, grouped by its
    * actual source folder (like Skills/Commands). Agents come from two sources:
    *  • omnigent bundle agents (`.omnigent/agent-configs`) — LAUNCHABLE as a
    *    standalone `omnigent run <agent>` session;
@@ -609,8 +848,7 @@ export class SkillBrowserView extends ItemView {
     if (rows.length === 0) {
       this.renderEmptyState(
         c,
-        "No agents found. Define one in .omnigent/agent-configs/ (omnigent) or " +
-          ".claude/agents / .codex/agents (Claude/Codex), then Refresh.",
+        "No agents found in .claude/agents, .codex/agents or .omnigent/agent-configs.",
       );
       return;
     }

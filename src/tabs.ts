@@ -8,8 +8,9 @@
 import type { CustomAgent } from "./launch";
 
 /** The browser tabs. "skills" is the combined Skills & Commands browser (one
- *  tab, a section per kind); Agents (M10) and Harnesses (M15.3) are config lists. */
-export type SkillLayerTab = "skills" | "sessions" | "agents" | "harnesses";
+ *  tab, a section per kind); "config" holds the rarely-used Harnesses (M15.3)
+ *  and Agents (M10) lists as two collapsible sections. */
+export type SkillLayerTab = "skills" | "sessions" | "schedules" | "config";
 
 /** The tab shown on first open. */
 export const DEFAULT_TAB: SkillLayerTab = "skills";
@@ -18,8 +19,8 @@ export const DEFAULT_TAB: SkillLayerTab = "skills";
 export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "sessions", label: "Sessions" },
-  { id: "agents", label: "Agents" },
-  { id: "harnesses", label: "Harnesses" },
+  { id: "schedules", label: "Schedules" },
+  { id: "config", label: "Config" },
 ];
 
 /** Empty-state copy for the Agents tab when discovery returns nothing. */

@@ -11,7 +11,7 @@ If you collect *skills* (`SKILL.md` files), slash-commands, and agents across `.
 
 **The plugin scans a set of configurable roots and lists everything it finds in an Obsidian side pane** A skill is a `SKILL.md` with `name` + `description` frontmatter, or any Markdown file directly inside a `skills/` folder — so the same rule surfaces skills from every tool that follows this convention. Results are grouped into a collapsible source-folder tree enabling you to search and filter by agent, harness, and tag. 
 
-Out of the box it scans your vault and the common in-vault tool folders (`.claude/skills`, `.codex/skills`, `.cursor/skills`, `.agents/skills`, and others). The browser opens from the `brain-circuit` ribbon icon and has tabs for Skills, Commands, Scripts, Sessions, Agents, and Harnesses.
+Out of the box it scans your vault and the common in-vault tool folders (`.claude/skills`, `.codex/skills`, `.cursor/skills`, `.agents/skills`, and others). The browser opens from the `brain-circuit` ribbon icon and has four tabs: **Skills** (skills and commands), **Sessions**, **Schedules**, and **Config** (harnesses and agents, as collapsible sections).
 
 
 ### Adding an external skills folder
@@ -43,9 +43,26 @@ Pin a skill to the ribbon to create a one-click launcher with its own Lucide ico
 
 ### Headless or terminal
 
-Each skill runs one of two ways, set globally or per skill. *Headless* spawns the run in the background and surfaces progress through notices and the Sessions tab. *Terminal* runs the identical command visibly in your preferred terminal so you can watch and interact. There is an option to add 3rd party terminals but this feature is still being developed.
+Each skill runs one of two ways, set globally or per skill. *Headless* spawns the run in the background and surfaces progress through notices and the Sessions tab. *Terminal* runs the identical command visibly in your preferred terminal so you can watch and interact. Pick the terminal in Settings: Terminal, cmux or Ghostty.
+
+### cmux and Ghostty (optional)
+
+Neither is required, but both get first-class support when installed:
+
+- **cmux.** Terminal runs and session Connects open as new, named tabs in one cmux workspace (*Obsidian Sessions* by default, created on first use). Optionally, headless runs post a cmux notification when they finish, fail or need input. cmux only accepts outside connections once its socket allows them. The bundled **setup-cmux** skill (Settings → cmux → *Install setup skill*) switches it to password mode and checks cmux can read your vault. *Test connection* confirms it works.
+- **Ghostty.** On Ghostty 1.3+ runs open as tabs (or windows) in your existing Ghostty via AppleScript. Older versions open a separate Ghostty copy per run. The bundled **setup-ghostty** skill checks the version, offers the upgrade and checks permissions.
 
 ---
+
+### Schedules
+
+The **Schedules** tab runs things for you on a timer, modelled on Databricks Jobs triggers:
+
+- **What runs:** a *skill* (with optional extra instructions), or a *prompt* of your own that names any skills itself. For example: "Use the gmail skill to send this email:", followed by the email text. Line breaks are kept.
+- **When:** *Recurring*, at a set time on the days you choose, or *Once*, at a later date and time.
+- **How:** scheduled runs are always headless. A run missed while the laptop was asleep or Obsidian was closed runs once when you're back (several missed runs collapse into one). Pause, Run now and Delete are on each schedule's row.
+
+Schedules run while Obsidian is open. Runs missed while the laptop was asleep wait about a minute after you open it, so the network and logins can recover. Each run appears in **Sessions**, and each schedule keeps its last 10 runs. You can also schedule a skill from its ⚙ Configure panel, or with the *New schedule* command.
 
 ## 4. Harnesses
 
@@ -73,7 +90,7 @@ On top of the harness, a skill can pin an agent so it runs as a specific persona
 
 **Claude sub-agents** — when a skill's harness is a Claude-based custom harness, a `.claude/agents/*.md` sub-agent can be selected and is substituted into the harness command's `{agent}` token.
 
-Discovered agents appear in the **Agents** tab, and the per-skill agent selector lives in each skill's configuration panel.
+Discovered agents appear in the **Agents** section of the **Config** tab, and the per-skill agent selector lives in each skill's configuration panel.
 
 
 ---

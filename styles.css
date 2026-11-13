@@ -267,6 +267,47 @@
   justify-content: center;
 }
 
+/* Config tab: Harnesses + Agents as collapsible sections. */
+.skill-layer-config-section {
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: var(--size-2-2) 0;
+}
+
+.skill-layer-config-header {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-3);
+  padding: var(--size-2-3) var(--size-2-2);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.skill-layer-config-header:hover {
+  background: var(--background-modifier-hover);
+}
+
+.skill-layer-config-header:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+  outline: none;
+}
+
+.skill-layer-config-title {
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.skill-layer-config-summary {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-layer-config-body {
+  padding: 0 var(--size-2-2) var(--size-2-2);
+}
+
 /* Agents-tab toolbar holding the Refresh control. */
 .skill-layer-agents-toolbar {
   display: flex;
@@ -1182,3 +1223,69 @@ body.skill-layer-inherit-font .skill-layer-icon-suggestion {
   --font-interface: var(--font-text);
   font-family: var(--font-text);
 }
+
+/* --- Schedules ------------------------------------------------------------- */
+.skill-layer-schedule-row.is-inactive .skill-layer-row-name {
+  color: var(--text-muted);
+}
+
+.skill-layer-action.is-armed {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.skill-layer-schedule-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  margin-top: var(--size-2-3);
+  padding-left: var(--size-4-2);
+  border-left: 2px solid var(--background-modifier-border);
+  font-size: var(--font-ui-smaller);
+}
+
+.skill-layer-schedule-history-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-2-3);
+}
+
+.skill-layer-schedule-history-reason {
+  color: var(--text-muted);
+}
+
+/* Schedule popup: textarea rows put the control under the name/description. */
+.skill-layer-schedule-textrow {
+  flex-wrap: wrap;
+}
+
+.skill-layer-schedule-textrow .setting-item-control {
+  flex: 1 1 100%;
+  margin-top: var(--size-2-3);
+}
+
+.skill-layer-schedule-textarea {
+  width: 100%;
+  font-family: var(--font-text);
+  resize: vertical;
+}
+
+.skill-layer-schedule-days {
+  display: flex;
+  gap: var(--size-2-1);
+}
+
+.skill-layer-schedule-day {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: var(--font-ui-smaller);
+}
+
+.skill-layer-schedule-day.is-on {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+

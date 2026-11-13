@@ -207,7 +207,6 @@ const {
   resolvePreferredTerminal,
   buildOpenerCommand,
   buildDefaultOpener,
-  TMUX_SESSION,
 } = await import(pathToFileURL(terminalOut).href);
 
 // hiddenFiles.ts imports `obsidian` (App type + FileSystemAdapter value) which
@@ -1271,16 +1270,16 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
 {
   // --- tab-switch state: default Skills; switch to Agents and back ---------
   eq("default tab is Skills", DEFAULT_TAB, "skills");
-  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "sessions", "agents", "harnesses"]));
-  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Sessions", "Agents", "Harnesses"]));
+  check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "sessions", "schedules", "config"]));
+  check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Sessions", "Schedules", "Config"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;
   eq("starts on Skills", tab, "skills");
   tab = TABS[1].id;
   eq("switching to Sessions → sessions", tab, "sessions");
-  tab = TABS.find((x) => x.id === "agents").id;
-  eq("switching to Agents → agents", tab, "agents");
+  tab = TABS.find((x) => x.id === "config").id;
+  eq("switching to Config → config", tab, "config");
   tab = TABS[0].id;
   eq("switching back to Skills → skills", tab, "skills");
 
@@ -2008,9 +2007,12 @@ console.log("\n[terminal] Preferred-terminal registry + detection + opener");
   // auto is always first + always detected; GUI emulators need an app bundle.
   check("auto is first known terminal", KNOWN_TERMINALS[0].id === "auto");
 
-  // Ghostty present as an APP BUNDLE ONLY (no CLI binary) + tmux binary present.
-  const tmuxBin = "/opt/homebrew/bin/tmux";
-  const present = new Set(["/Applications/Ghostty.app", tmuxBin]);
+  // Only Terminal (auto), cmux and Ghostty are offered.
+  check("registry is Terminal, cmux, Ghostty", deepEq(KNOWN_TERMINALS.map((t) => t.id), ["auto", "cmux", "ghostty"]));
+  eq("auto is labelled Terminal", KNOWN_TERMINALS[0].label, "Terminal");
+
+  // Ghostty present as an app bundle; extra emulators (tmux/iTerm) are ignored.
+  const present = new Set(["/Applications/Ghostty.app", "/opt/homebrew/bin/tmux", "/Applications/iTerm.app"]);
   const detected = detectInstalledTerminals({
     homedir: HOME,
     appDirs: ["/Applications"],
@@ -2019,38 +2021,25 @@ console.log("\n[terminal] Preferred-terminal registry + detection + opener");
   });
   check("auto always detected", detected.some((d) => d.def.id === "auto"));
   check("Ghostty detected (app bundle present)", detected.some((d) => d.def.id === "ghostty" && d.binPath === undefined));
-  check("tmux detected with bin path", detected.some((d) => d.def.id === "tmux" && d.binPath === tmuxBin));
-  check("iTerm NOT detected (no bundle)", !detected.some((d) => d.def.id === "iterm"));
-
-  // When the ghostty CLI binary IS present, detection attaches its path.
-  const withBin = detectInstalledTerminals({
-    homedir: HOME,
-    appDirs: ["/Applications"],
-    exists: (p) => p === "/opt/homebrew/bin/ghostty" || p === "/Applications/Ghostty.app",
-    platform: "darwin",
-  });
-  const ghosttyBin = withBin.find((d) => d.def.id === "ghostty");
-  check("Ghostty detected with CLI binPath when present", ghosttyBin?.binPath === "/opt/homebrew/bin/ghostty");
+  check("tmux / iTerm no longer offered", !detected.some((d) => d.def.id === "tmux" || d.def.id === "iterm"));
+  // A ghostty CLI on PATH is ignored (it can't open windows on macOS).
+  const withCli = detectInstalledTerminals({ homedir: HOME, appDirs: ["/Applications"], exists: (p) => p === "/opt/homebrew/bin/ghostty" || p === "/Applications/Ghostty.app", platform: "darwin" });
+  check("ghostty CLI not used", withCli.find((d) => d.def.id === "ghostty")?.binPath === undefined);
 
   // Off macOS, only auto is offered.
   const linux = detectInstalledTerminals({ homedir: HOME, appDirs: ["/Applications"], exists: () => true, platform: "linux" });
   check("non-macOS → only auto", linux.length === 1 && linux[0].def.id === "auto");
 
-  // resolvePreferredTerminal fails closed to auto.
+  // resolvePreferredTerminal fails closed to auto (incl. removed emulators).
   eq("preferred honored when detected", resolvePreferredTerminal("ghostty", detected).def.id, "ghostty");
-  eq("stale preferred → auto", resolvePreferredTerminal("iterm", detected).def.id, "auto");
+  eq("removed tmux → Terminal", resolvePreferredTerminal("tmux", detected).def.id, "auto");
+  eq("removed iterm → Terminal", resolvePreferredTerminal("iterm", detected).def.id, "auto");
   eq("blank preferred → auto", resolvePreferredTerminal("", detected).def.id, "auto");
 
-  // buildOpenerCommand: app-bundle-only Ghostty falls back to `open -na … -e bash`.
+  // buildOpenerCommand: pre-1.3 Ghostty uses `open -na … -e bash`.
   const ghostty = resolvePreferredTerminal("ghostty", detected);
   const gop = buildOpenerCommand({ terminal: ghostty, scriptPath: "/tmp/s.command", platform: "darwin" });
-  check("Ghostty (app only) opener uses open -na … -e bash", gop.bin === "/usr/bin/open" && gop.args.includes("Ghostty") && gop.args.includes("-e") && gop.args[gop.args.length - 1] === "/tmp/s.command");
-  // With the CLI binary, the reliable `ghostty -e bash <script>` form is used.
-  const gopBin = buildOpenerCommand({ terminal: ghosttyBin, scriptPath: "/tmp/s.command", platform: "darwin" });
-  check("Ghostty (CLI) opener is `ghostty -e bash <script>`", deepEq(gopBin, { bin: "/opt/homebrew/bin/ghostty", args: ["-e", "bash", "/tmp/s.command"] }));
-  const tmux = resolvePreferredTerminal("tmux", detected);
-  const top = buildOpenerCommand({ terminal: tmux, scriptPath: "/tmp/s.command", platform: "darwin" });
-  check("tmux opener new-session -A -s", top.bin === tmuxBin && deepEq(top.args, ["new-session", "-A", "-s", TMUX_SESSION, "bash", "/tmp/s.command"]));
+  check("Ghostty opener uses open -na … -e bash", gop.bin === "/usr/bin/open" && gop.args.includes("Ghostty") && gop.args.includes("-e") && gop.args[gop.args.length - 1] === "/tmp/s.command");
   const auto = resolvePreferredTerminal("", detected);
   const aop = buildOpenerCommand({ terminal: auto, scriptPath: "/tmp/s.command", platform: "darwin" });
   check("auto opener is default `open <script>`", deepEq(aop, { bin: "/usr/bin/open", args: ["/tmp/s.command"] }));
@@ -2060,8 +2049,8 @@ console.log("\n[terminal] Preferred-terminal registry + detection + opener");
   check("default opener linux uses $TERMINAL/bash", deepEq(buildDefaultOpener("/tmp/s.sh", "linux", "kitty"), { bin: "kitty", args: ["-e", "bash", "/tmp/s.sh"] }));
 
   // bin candidates probe standard dirs.
-  check("tmux bin candidates include /opt/homebrew/bin", terminalBinCandidates("tmux", HOME, "darwin").includes("/opt/homebrew/bin/tmux"));
-  check("terminalById resolves", terminalById("tmux").id === "tmux");
+  check("bin candidates include /opt/homebrew/bin", terminalBinCandidates("cmux", HOME, "darwin").includes("/opt/homebrew/bin/cmux"));
+  check("terminalById resolves", terminalById("cmux").id === "cmux" && terminalById("tmux") === undefined);
 }
 
 // =====================================================================
@@ -2255,6 +2244,188 @@ console.log("\n[terminal] interactive argv + keep-open");
   const guarded = buildTerminalScript(["/b/claude", "--resume", "a"], "/Users/x/Documents/Vault", "h", "darwin", false, { cwdGuard: true }).content;
   check("cwd guard checks readability", guarded.includes("if ! ls . >/dev/null 2>&1; then") && guarded.includes("Privacy & Security"));
   check("cwd guard runs before the command", guarded.indexOf("ls . >/dev/null") < guarded.indexOf("'/b/claude'"));
+}
+
+// =====================================================================
+// cmux + Ghostty integrations (pure helpers) and terminal detection additions.
+{
+  console.log("\n[cmux/ghostty] integration helpers");
+  const cmuxOut = join(builtDir, "cmux.mjs");
+  await esbuild.build({ entryPoints: [join(here, "..", "src", "cmux.ts")], bundle: true, format: "esm", platform: "node", outfile: cmuxOut, logLevel: "silent" });
+  const C = await import(pathToFileURL(cmuxOut).href);
+  const ghOut = join(builtDir, "ghostty.mjs");
+  await esbuild.build({ entryPoints: [join(here, "..", "src", "ghostty.ts")], bundle: true, format: "esm", platform: "node", outfile: ghOut, logLevel: "silent" });
+  const G = await import(pathToFileURL(ghOut).href);
+
+  // Workspace list parsing + lookup (custom title preferred, case-insensitive).
+  const listJson = JSON.stringify({ window_ref: "window:1", workspaces: [
+    { ref: "workspace:1", id: "A", title: "obsidian sessions", custom_title: null },
+    { ref: "workspace:2", id: "B", title: "Obsidian Sessions", custom_title: "Obsidian Sessions" },
+    { id: "no-ref" },
+  ] });
+  const ws = C.parseCmuxWorkspaces(listJson);
+  eq("cmux: parses workspaces with refs only", ws.length, 2);
+  eq("cmux: custom-titled workspace preferred", C.findCmuxWorkspace(ws, "  OBSIDIAN sessions ")?.ref, "workspace:2");
+  eq("cmux: auto-title match as fallback", C.findCmuxWorkspace([ws[0]], "Obsidian Sessions")?.ref, "workspace:1");
+  eq("cmux: missing workspace → undefined", C.findCmuxWorkspace(ws, "Other"), undefined);
+  check("cmux: malformed JSON → []", C.parseCmuxWorkspaces("not json").length === 0 && C.parseCmuxWorkspaces("{}").length === 0);
+  eq("cmux: blank workspace setting → default", C.resolveCmuxWorkspaceName("  "), C.CMUX_DEFAULT_WORKSPACE);
+  eq("cmux: workspace setting strips control chars", C.resolveCmuxWorkspaceName("My\nRuns"), "MyRuns");
+
+  // argv builders: every value is its own inert element.
+  const cmd = C.cmuxRunCommand("/tmp/skill harness's.command");
+  eq("cmux: run command single-quotes the script", cmd, "bash '/tmp/skill harness'\\''s.command'");
+  check("cmux: new-workspace argv", deepEq(C.cmuxNewWorkspaceArgs({ name: "Obsidian Sessions", cwd: "/v", command: cmd, focus: true }),
+    ["new-workspace", "--name", "Obsidian Sessions", "--cwd", "/v", "--command", cmd, "--focus", "true"]));
+  check("cmux: new-surface argv targets the workspace", deepEq(C.cmuxNewSurfaceArgs({ workspace: "workspace:2", cwd: "/v", command: cmd, focus: false }),
+    ["new-surface", "--type", "terminal", "--workspace", "workspace:2", "--working-directory", "/v", "--command", cmd, "--focus", "false"]));
+  check("cmux: rename-tab uses -- before title", deepEq(C.cmuxRenameTabArgs({ workspace: "workspace:2", surface: "surface:9", title: "--evil\ttitle" }),
+    ["rename-tab", "--workspace", "workspace:2", "--surface", "surface:9", "--", "--eviltitle"]));
+  check("cmux: rename-tab without surface", deepEq(C.cmuxRenameTabArgs({ workspace: "w:1", title: "" }), ["rename-tab", "--workspace", "w:1", "--", "Obsidian"]));
+  eq("cmux: tab title capped at 60", C.cmuxTabTitle("x".repeat(100)).length, 60);
+  check("cmux: notify flattens body + targets workspace", deepEq(C.cmuxNotifyArgs({ title: "Done", body: "line1\nline2", workspace: "workspace:2" }),
+    ["notify", "--title", "Done", "--body", "line1 line2", "--workspace", "workspace:2"]));
+  check("cmux: notify omits empty body/workspace", deepEq(C.cmuxNotifyArgs({ title: "T" }), ["notify", "--title", "T"]));
+
+  // OK-line refs + error classification + capabilities.
+  check("cmux: parses OK refs", deepEq(C.parseCmuxRefs("OK surface:1000020012 pane:1000020006 workspace:1000020005"),
+    { surface: "surface:1000020012", pane: "pane:1000020006", workspace: "workspace:1000020005" }));
+  eq("cmux: workspace-only OK", C.parseCmuxRefs("OK workspace:7").workspace, "workspace:7");
+  eq("cmux: access denied classified", C.classifyCmuxError("Error: ERROR: Access denied - only processes started inside cmux can connect"), "access-denied");
+  eq("cmux: missing socket classified", C.classifyCmuxError("connect: No such file or directory"), "not-running");
+  eq("cmux: other errors", C.classifyCmuxError("weird"), "other");
+  check("cmux: access-denied message points at setup-cmux", C.cmuxErrorMessage("access-denied").includes("setup-cmux"));
+  eq("cmux: access mode parsed", C.parseCmuxAccessMode('{"access_mode":"password","capabilities":[]}'), "password");
+  eq("cmux: bad capabilities → ''", C.parseCmuxAccessMode("nope"), "");
+  check("cmux: bundled CLI preferred", C.cmuxCliCandidates("/Users/me", ["/Applications"])[0] === "/Applications/cmux.app/Contents/Resources/bin/cmux");
+
+  // Terminal detection: cmux found via the CLI inside its app bundle; no opener.
+  const present = new Set(["/Applications/cmux.app", "/Applications/cmux.app/Contents/Resources/bin/cmux", "/Applications/Ghostty.app"]);
+  const det = detectInstalledTerminals({ homedir: "/Users/me", appDirs: ["/Applications"], exists: (p) => present.has(p), platform: "darwin" });
+  const cm = det.find((d) => d.def.id === "cmux");
+  eq("terminal: cmux binPath is the bundled CLI", cm?.binPath, "/Applications/cmux.app/Contents/Resources/bin/cmux");
+  eq("terminal: cmux appPath recorded", cm?.appPath, "/Applications/cmux.app");
+  eq("terminal: cmux uses the cmux integration", cm?.def.integration, "cmux");
+  eq("terminal: Ghostty appPath recorded", det.find((d) => d.def.id === "ghostty")?.appPath, "/Applications/Ghostty.app");
+  check("terminal: cmux opener fallback is the OS default (no broken open -na)",
+    deepEq(buildOpenerCommand({ terminal: cm, scriptPath: "/tmp/s.command", platform: "darwin" }), { bin: "/usr/bin/open", args: ["/tmp/s.command"] }));
+  const cmNoCli = detectInstalledTerminals({ homedir: "/Users/me", appDirs: ["/Applications"], exists: (p) => p === "/Applications/cmux.app", platform: "darwin" }).find((d) => d.def.id === "cmux");
+  check("terminal: cmux app without CLI → no binPath (integration skipped)", !!cmNoCli && cmNoCli.binPath === undefined);
+
+  // Ghostty versions + AppleScript.
+  check("ghostty: 1.2.3 has no AppleScript", !G.ghosttySupportsAppleScript("1.2.3"));
+  check("ghostty: 1.3.0 has AppleScript", G.ghosttySupportsAppleScript("1.3.0"));
+  check("ghostty: 1.4.0 / 2.0 have AppleScript", G.ghosttySupportsAppleScript("1.4.0") && G.ghosttySupportsAppleScript("2.0"));
+  check("ghostty: unknown version → no AppleScript", !G.ghosttySupportsAppleScript("") && !G.ghosttySupportsAppleScript(undefined));
+  check("ghostty: dev suffix parsed", G.ghosttySupportsAppleScript("1.3.0-dev+abc123"));
+  eq("ghostty: reads plist version", G.readBundleVersion("<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>1.2.3</string>"), "1.2.3");
+  eq("ghostty: AppleScript string escapes", G.appleScriptString('a"b\\c\nd'), '"a\\"b\\\\cd"');
+  const tabScript = G.buildGhosttyAppleScript({ cwd: "/Users/x/My \"Vault\"", command: "bash '/tmp/s.command'", title: "daily-note", openIn: "tab" });
+  check("ghostty: tab script uses new tab in front window", tabScript.includes("new tab in front window with configuration cfg"));
+  check("ghostty: tab script falls back to a window when none open", tabScript.includes("if (count of windows) is 0 then"));
+  check("ghostty: cwd escaped as a literal", tabScript.includes('set initial working directory of cfg to "/Users/x/My \\"Vault\\""'));
+  check("ghostty: command typed + Return", tabScript.includes(`set initial input of cfg to "bash '/tmp/s.command'" & linefeed`));
+  check("ghostty: tab titled", tabScript.includes('perform action "set_tab_title:daily-note" on term'));
+  const winScript = G.buildGhosttyAppleScript({ cwd: "/v", command: "x", title: "t\n\"; do shell script \"rm", openIn: "window" });
+  check("ghostty: window mode", winScript.includes("new window with configuration cfg") && !winScript.includes("new tab"));
+  check("ghostty: hostile title stays inside the string literal", winScript.includes('perform action "set_tab_title:t\\"; do shell script \\"rm" on term'));
+
+  // Bundled setup skills: frontmatter name matches the folder.
+  for (const name of ["setup-cmux", "setup-ghostty"]) {
+    const body = readFileSync(join(here, "..", "src", "skills", name, "SKILL.md"), "utf8");
+    check(`bundled skill ${name}: frontmatter name`, body.startsWith("---\n") && body.includes(`\nname: ${name}\n`));
+    check(`bundled skill ${name}: has a description`, /\ndescription: .{40,}\n/.test(body));
+  }
+}
+
+// =====================================================================
+// Schedules: triggers, next/latest occurrence, due/missed evaluation, wake.
+{
+  console.log("\n[schedules] timing + evaluation");
+  const schOut = join(builtDir, "schedules.mjs");
+  await esbuild.build({ entryPoints: [join(here, "..", "src", "schedules.ts")], bundle: true, format: "esm", platform: "node", outfile: schOut, logLevel: "silent" });
+  const S = await import(pathToFileURL(schOut).href);
+  const at = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi, 0, 0).getTime();
+  const MIN = 60 * 1000, HOUR = 60 * MIN;
+  // Nov 12 2026 is a Thursday.
+  const thu9 = at(2026, 11, 12, 9, 0);
+  eq("sch: Nov 12 2026 is Thursday", new Date(thu9).getDay(), 4);
+
+  // HH:MM + clock formatting
+  check("sch: parseHHMM ok", deepEq(S.parseHHMM("08:30"), [8, 30]) && deepEq(S.parseHHMM("7:05"), [7, 5]));
+  check("sch: parseHHMM rejects bad", S.parseHHMM("24:00") === null && S.parseHHMM("8") === null && S.parseHHMM("") === null);
+  eq("sch: formatClock AM", S.formatClock("08:30"), "8:30 AM");
+  eq("sch: formatClock noon/midnight", `${S.formatClock("12:00")}|${S.formatClock("00:15")}`, "12:00 PM|12:15 AM");
+
+  // weekly
+  const weekdays830 = { kind: "weekly", time: "08:30", days: [1, 2, 3, 4, 5] };
+  eq("sch: weekly next after Thu 9:00 → Fri 8:30", S.nextOccurrence(weekdays830, thu9), at(2026, 11, 13, 8, 30));
+  eq("sch: weekly next after Fri 9:00 skips weekend → Mon", S.nextOccurrence(weekdays830, at(2026, 11, 13, 9)), at(2026, 11, 16, 8, 30));
+  eq("sch: weekly next same day when earlier", S.nextOccurrence(weekdays830, at(2026, 11, 12, 7)), at(2026, 11, 12, 8, 30));
+  eq("sch: weekly latest at/before Sun → Fri", S.latestOccurrence(weekdays830, at(2026, 11, 15, 12)), at(2026, 11, 13, 8, 30));
+  eq("sch: weekly with no days → null", S.nextOccurrence({ kind: "weekly", time: "08:30", days: [] }, thu9), null);
+
+  // once
+  eq("sch: once in future", S.nextOccurrence({ kind: "once", at: thu9 + HOUR }, thu9), thu9 + HOUR);
+  eq("sch: once in past → null", S.nextOccurrence({ kind: "once", at: thu9 - HOUR }, thu9), null);
+  eq("sch: once latest", S.latestOccurrence({ kind: "once", at: thu9 }, thu9 + HOUR), thu9);
+
+  // evaluate
+  const mk = (over) => ({ id: "s1", name: "n", enabled: true, task: { kind: "skill", skillId: "/x", skillName: "x" }, trigger: weekdays830, createdAt: at(2026, 11, 11, 12), cursor: at(2026, 11, 11, 12), runs: [], ...over });
+  const fri = at(2026, 11, 13, 8, 30);
+  eq("sch: not yet due", S.evaluateSchedule(mk({ cursor: thu9 }), fri - MIN).action, "none");
+  const onTime = S.evaluateSchedule(mk({ cursor: thu9 }), fri + 30 * 1000);
+  check("sch: due on time → run, not missed", onTime.action === "run" && onTime.missed === false && onTime.slot === fri && onTime.reason === "schedule");
+  const late = S.evaluateSchedule(mk({ cursor: thu9 }), fri + 2 * HOUR);
+  check("sch: due while asleep → catch-up run", late.action === "run" && late.missed === true && late.reason === "catch-up");
+  const away = S.evaluateSchedule(mk({ cursor: at(2026, 11, 10, 9) }), at(2026, 11, 16, 10));
+  check("sch: several missed collapse to one (slot = latest)", away.action === "run" && away.slot === at(2026, 11, 16, 8, 30));
+  check("sch: after firing, cursor=slot → not due again", S.evaluateSchedule(mk({ cursor: fri }), fri + 5 * MIN).action === "none");
+  eq("sch: paused never fires", S.evaluateSchedule(mk({ cursor: thu9, enabled: false }), fri + MIN).action, "none");
+  eq("sch: done never fires", S.evaluateSchedule(mk({ cursor: thu9, done: true }), fri + MIN).action, "none");
+  const once = mk({ trigger: { kind: "once", at: fri }, cursor: thu9 });
+  eq("sch: once fires when due", S.evaluateSchedule(once, fri + MIN).action, "run");
+
+  // wake detection (holds catch-ups until the network is back)
+  check("sch: wake gap detection", S.isWakeGap(thu9, thu9 + 10 * MIN) && !S.isWakeGap(thu9, thu9 + 40 * 1000) && !S.isWakeGap(0, thu9));
+
+  // nextRunAt + history
+  eq("sch: nextRunAt upcoming", S.nextRunAt(mk({ cursor: thu9 }), thu9), fri);
+  eq("sch: nextRunAt paused → null", S.nextRunAt(mk({ cursor: thu9, enabled: false }), thu9), null);
+  eq("sch: nextRunAt overdue → now", S.nextRunAt(mk({ cursor: thu9 }), fri + HOUR), fri + HOUR);
+  let runs = [];
+  for (let i = 0; i < 15; i++) runs = S.addRun(runs, { at: i, reason: "schedule", status: "launched" });
+  check("sch: history capped newest-first", runs.length === S.RUN_HISTORY_MAX && runs[0].at === 14);
+
+  // describe
+  eq("sch: describe weekdays", S.describeTrigger(weekdays830), "Weekdays at 8:30 AM");
+  eq("sch: describe every day", S.describeTrigger({ kind: "weekly", time: "07:00", days: [0, 1, 2, 3, 4, 5, 6] }), "Every day at 7:00 AM");
+  eq("sch: describe some days", S.describeTrigger({ kind: "weekly", time: "17:00", days: [5, 1, 3] }), "Mon, Wed, Fri at 5:00 PM");
+  eq("sch: describe weekends", S.describeDays([6, 0]), "Weekends");
+  check("sch: describe once includes time", S.describeTrigger({ kind: "once", at: fri }).includes("8:30 AM"));
+
+  // prompt tasks
+  eq("sch: prompt used as written", S.buildPromptTaskPrompt({ prompt: "  Use the gmail skill to send it.  ", vaultPath: "/v", appendAnchor: false }), "Use the gmail skill to send it.");
+  const multi = S.buildPromptTaskPrompt({ prompt: "Email body:\r\nHi Jeff,\nThanks", vaultPath: "/v", appendAnchor: true });
+  check("sch: prompt line breaks kept as literal \\n", multi.includes("Email body:\\nHi Jeff,\\nThanks") && multi.includes("written as \\n") && !/[\r\n]/.test(multi));
+  check("sch: prompt anchor appended", multi.endsWith("delegate the final file write."));
+
+  // normalize
+  const norm = S.normalizeSchedules([
+    { id: "a", name: " Daily note ", task: { kind: "skill", skillId: "/s", skillName: "daily-note" }, trigger: { kind: "weekly", time: "07:00", days: [1, 1, 9, 2] }, createdAt: 5, runs: [{ at: 1, status: "bogus" }, { at: 2, status: "done", reason: "manual" }] },
+    { id: "b", task: { kind: "prompt", prompt: "x" }, trigger: { kind: "interval", every: 2, unit: "hours", anchor: 1 } },
+    { id: "w", task: { kind: "prompt", prompt: "x" }, trigger: { kind: "nextWake" } },
+    { id: "c", task: { kind: "prompt", prompt: "x" }, trigger: { kind: "once", at: 9 }, enabled: false, onMissed: "skip", mode: "terminal" },
+    { task: { kind: "skill" } },
+    "junk",
+  ]);
+  eq("sch: normalize drops malformed", norm.map((x) => x.id).join(","), "a,c");
+  check("sch: normalize trims name + dedupes days", norm[0].name === "Daily note" && deepEq(norm[0].trigger.days, [1, 2]));
+  check("sch: normalize defaults", norm[0].enabled && norm[0].cursor === 5);
+  check("sch: normalize filters bad runs", norm[0].runs.length === 1 && norm[0].runs[0].reason === "manual");
+  check("sch: normalize keeps paused, drops removed options", !norm[1].enabled && !("onMissed" in norm[1]) && !("mode" in norm[1]) && !("skipIfRunning" in norm[1]));
+  check("sch: normalize non-array → []", S.normalizeSchedules(null).length === 0);
+  check("sch: ids unique-ish", S.newScheduleId(1, () => 0.1) !== S.newScheduleId(1, () => 0.2));
 }
 
 // =====================================================================

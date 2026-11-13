@@ -2,6 +2,7 @@
 
 import type { CustomHarness, SkillAgent } from "./launch";
 import type { LaunchedSession } from "./sessions";
+import type { Schedule } from "./schedules";
 
 /**
  * How a skill/command/script is launched:
@@ -181,6 +182,12 @@ export interface SkillLayerSettings {
    */
   sessions: LaunchedSession[];
   /**
+   * Scheduled skill / prompt runs (Schedules tab). They fire only while Obsidian
+   * is open; missed runs can be caught up on wake. Validated on load by
+   * `normalizeSchedules`. Plugin-local state.
+   */
+  schedules: Schedule[];
+  /**
    * Session monitoring: flag a headless run as STALLED after this many minutes
    * with no output (it may be hung on a login, an MCP server, or a long command).
    * The launch popup can override it per run.
@@ -202,6 +209,25 @@ export interface SkillLayerSettings {
    * Plugin-local state.
    */
   preferredTerminal: string;
+  /**
+   * cmux integration: name of the cmux workspace that terminal-mode runs and
+   * session Connects open into (as new tabs). Created on first use when absent.
+   * Blank = the default ("Obsidian Sessions"). Plugin-local state.
+   */
+  cmuxWorkspaceName: string;
+  /** cmux integration: bring cmux to the front (and select the workspace) on each open. */
+  cmuxFocus: boolean;
+  /**
+   * cmux integration: post a cmux notification (to the plugin's workspace) when a
+   * headless run finishes, fails or needs input — in addition to the Obsidian
+   * notice. Only used when cmux is installed and reachable.
+   */
+  cmuxNotify: boolean;
+  /**
+   * Ghostty integration (Ghostty ≥ 1.3, AppleScript): open runs as a new TAB in
+   * the front Ghostty window, or as a new WINDOW.
+   */
+  ghosttyOpenIn: "tab" | "window";
   /**
    * Global default launch mode for skills/commands (headless or terminal). A
    * per-item override in `skillLaunchMode` wins when present. Default `headless`
@@ -261,10 +287,15 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   appendVaultAnchor: true,
   showHiddenFolders: false,
   sessions: [],
+  schedules: [],
   stallMinutes: 5,
   longRunMinutes: 30,
   needsInputInstruction: true,
   preferredTerminal: "",
+  cmuxWorkspaceName: "",
+  cmuxFocus: true,
+  cmuxNotify: false,
+  ghosttyOpenIn: "tab",
   defaultLaunchMode: "headless",
   skillLaunchMode: {},
   panelWidth: 520,

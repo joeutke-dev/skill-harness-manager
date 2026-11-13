@@ -4,7 +4,7 @@ import type SkillLayerPlugin from "./main";
 /**
  * The Skill and Harness Manager settings page: general preferences only (toggles,
  * terminal / launch mode, panel width, pinned icon, vault anchor). Skill folders
- * are managed in the Skills tab and harnesses in the Harnesses tab of the skills
+ * are managed in the Skills tab and harnesses in the Config tab of the skills
  * browser, not here.
  */
 export class SkillLayerSettingTab extends PluginSettingTab {
@@ -23,7 +23,7 @@ export class SkillLayerSettingTab extends PluginSettingTab {
 
     // Per Obsidian's settings guidelines the first/default section is UNLABELED
     // (no heading — and never a "General" heading). Skill folders are managed in
-    // the Skills tab and harnesses in the Harnesses tab, so this page is a single
+    // the Skills tab and harnesses in the Config tab, so this page is a single
     // unlabeled section of general preferences.
 
     // --- Show hidden folders (M15, placed first) --------------------------
@@ -90,15 +90,12 @@ export class SkillLayerSettingTab extends PluginSettingTab {
     // Which terminal emulator opens when a skill/command/script runs in
     // "terminal" launch mode. It runs the SAME command headless mode would (the
     // skill's harness / the script body), just visibly. Options are the terminals
-    // detected on disk (macOS app bundles + tmux); Auto uses the OS default.
+    // Terminal (the OS default) plus cmux / Ghostty when installed.
     const terminals = this.plugin.getDetectedTerminals();
-    const resolvedTerm = this.plugin.resolvePreferredTerminal();
     new Setting(containerEl)
       .setName("Preferred terminal")
       .setDesc(
-        `Which terminal opens for terminal-mode launches and for Connect on a session. ` +
-          `Auto uses your OS default. ` +
-          `Resolved: ${resolvedTerm.def.label}.`,
+        "Where terminal-mode runs and session Connects open. cmux and Ghostty appear when installed.",
       )
       .addDropdown((d) => {
         for (const t of terminals) d.addOption(t.def.id, t.def.label);
@@ -246,7 +243,143 @@ export class SkillLayerSettingTab extends PluginSettingTab {
         }),
       );
 
+    this.renderCmuxSection(containerEl);
+    this.renderGhosttySection(containerEl);
+
     // Skill folders (add tool folders / external scan roots) and harnesses are
-    // managed in the skills browser — its Skills and Harnesses tabs — not here.
+    // managed in the skills browser — its Skills and Config tabs — not here.
+  }
+
+  /**
+   * cmux section — only when cmux (with its bundled CLI) is installed. cmux is
+   * optional; these settings apply when it's the Preferred terminal (tabs in a
+   * dedicated workspace) and, for notifications, to headless runs regardless.
+   */
+  private renderCmuxSection(containerEl: HTMLElement): void {
+    if (!this.plugin.getCmuxTerminal()) return;
+    const settings = this.plugin.settings;
+    const active = this.plugin.resolvePreferredTerminal().def.id === "cmux";
+    new Setting(containerEl).setName("cmux").setHeading();
+    if (!active) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text:
+          "cmux is installed. Choose it as the Preferred terminal to open terminal runs and " +
+          "session Connects as tabs in one cmux workspace.",
+      });
+    }
+
+    new Setting(containerEl)
+      .setName("Workspace")
+      .setDesc(
+        "The cmux workspace runs open into, one tab per run. It's created on the first run if it doesn't exist.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(this.plugin.cmuxWorkspaceName())
+          .setValue(settings.cmuxWorkspaceName)
+          .onChange(async (v) => {
+            settings.cmuxWorkspaceName = v;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Bring cmux to front")
+      .setDesc("Switch to the workspace and activate cmux each time a run opens. Off: tabs open in the background.")
+      .addToggle((toggle) =>
+        toggle.setValue(settings.cmuxFocus).onChange(async (value) => {
+          settings.cmuxFocus = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("cmux notifications")
+      .setDesc(
+        "Also post a cmux notification when a headless run finishes, fails or needs input, " +
+          "so the cmux workspace works as an inbox for your runs.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.cmuxNotify).onChange(async (value) => {
+          settings.cmuxNotify = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    const conn = new Setting(containerEl)
+      .setName("Connection")
+      .setDesc(
+        "cmux only accepts connections from its own terminals by default, so Obsidian is refused " +
+          "until its socket allows it. The setup-cmux skill switches it to password mode.",
+      );
+    conn.addButton((b) =>
+      b.setButtonText("Test connection").onClick(async () => {
+        b.setDisabled(true);
+        conn.setDesc("Testing…");
+        const r = await this.plugin.testCmuxConnection();
+        conn.setDesc(`${r.ok ? "✓" : "✗"} ${r.text}`);
+        b.setDisabled(false);
+      }),
+    );
+
+    this.setupSkillSetting(containerEl, "setup-cmux", "Configures cmux's socket access and checks it can read your vault.");
+  }
+
+  /** Ghostty section — only when Ghostty is installed. */
+  private renderGhosttySection(containerEl: HTMLElement): void {
+    const g = this.plugin.getGhosttyStatus();
+    if (!g.installed) return;
+    const settings = this.plugin.settings;
+    new Setting(containerEl).setName("Ghostty").setHeading();
+    const version = g.version || "unknown version";
+    new Setting(containerEl)
+      .setName("Tab support")
+      .setDesc(
+        g.tabs
+          ? `Ghostty ${version}: terminal runs and Connects open as tabs via AppleScript. ` +
+              `macOS asks once to let Obsidian control Ghostty.`
+          : `Ghostty ${version}: each run opens a separate copy of Ghostty. ` +
+              `Ghostty 1.3+ supports opening runs as tabs; the setup-ghostty skill can upgrade it.`,
+      );
+    if (g.tabs) {
+      new Setting(containerEl)
+        .setName("Open runs in")
+        .addDropdown((d) => {
+          d.addOption("tab", "New tab in the front window");
+          d.addOption("window", "New window");
+          d.setValue(settings.ghosttyOpenIn);
+          d.onChange(async (v) => {
+            settings.ghosttyOpenIn = v === "window" ? "window" : "tab";
+            await this.plugin.saveSettings();
+          });
+        });
+    }
+    this.setupSkillSetting(containerEl, "setup-ghostty", "Checks your Ghostty version, AppleScript and folder access.");
+  }
+
+  /** "Setup skill" row: install the bundled skill into the vault (or show it's there). */
+  private setupSkillSetting(
+    containerEl: HTMLElement,
+    id: "setup-cmux" | "setup-ghostty",
+    what: string,
+  ): void {
+    const installed = this.plugin.isBundledSkillInstalled(id);
+    new Setting(containerEl)
+      .setName("Setup skill")
+      .setDesc(
+        installed
+          ? `“${id}” is installed in .agents/skills/. Run it from the Skills tab. ${what}`
+          : `Add the “${id}” skill to your vault (.agents/skills/). ${what}`,
+      )
+      .addButton((b) =>
+        b
+          .setButtonText(installed ? "Installed" : "Install setup skill")
+          .setDisabled(installed)
+          .onClick(async () => {
+            await this.plugin.installBundledSkill(id);
+            this.display();
+          }),
+      );
   }
 }

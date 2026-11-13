@@ -39,7 +39,7 @@ finds in the **Skills** browser.
 - **Choose how it runs** — open the ⚙ **Configure** panel to pick a launch mode:
   *headless* (runs in the background) or *terminal* (runs the same command in a
   terminal window). Set the global default and your preferred terminal (Terminal,
-  Ghostty, kitty, tmux, …) in the plugin's settings.
+  cmux or Ghostty) in the plugin's settings.
 - **Pin it to the ribbon** — from ⚙ Configure, add it to the ribbon for one-click
   launch, and give it a custom icon.
 - **Right-click a file** — enable the right-click menu (⚙ Configure) and you can

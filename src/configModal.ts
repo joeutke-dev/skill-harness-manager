@@ -65,7 +65,7 @@ export class SkillConfigModal extends Modal {
     new Setting(c)
       .setName("Harness")
       .setDesc(
-        "Pin a specific harness for this skill. Default uses the default harness set in Settings → Harnesses.",
+        "Pin a specific harness for this skill. Default uses the default harness (Config tab → Harnesses).",
       )
       .addDropdown((d) => {
         d.addOption(HARNESS_DEFAULT_VALUE, "Default");
@@ -168,6 +168,24 @@ export class SkillConfigModal extends Modal {
       .addButton((b) =>
         b.setButtonText("Copy").onClick(() => void this.plugin.copyInvocation(skill)),
       );
+
+    // 6) Schedule — open the schedule popup pre-filled with this skill.
+    const count = this.plugin
+      .getSchedules()
+      .filter((x) => x.task.kind === "skill" && x.task.skillId === skill.id).length;
+    new Setting(c)
+      .setName("Schedule")
+      .setDesc(
+        count > 0
+          ? `Scheduled ${count} time${count === 1 ? "" : "s"} (see the Schedules tab). Add another run.`
+          : "Run this on a schedule: recurring on chosen days, or once at a later date and time.",
+      )
+      .addButton((b) =>
+        b.setButtonText("Schedule…").onClick(() => {
+          this.close();
+          this.plugin.openScheduleModal(undefined, skill);
+        }),
+      );
   }
 }
 
@@ -231,7 +249,7 @@ export class LaunchModal extends Modal {
     c.createEl("p", {
       cls: "skill-layer-launch-hint skill-layer-launch-where",
       text: !harness
-        ? "No harness is set for this skill: choose a Default harness in Settings → Harnesses."
+        ? "No harness is set for this skill: choose a default harness in the Config tab → Harnesses."
         : terminal
           ? `Opens in ${plugin.resolvePreferredTerminal().def.label} via “${harness.label}”, so you can interact with it directly.`
           : `Runs headless via “${harness.label}”. You'll get a notice if it needs your input, fails, stalls, or runs long, and can follow it in the Sessions tab.`,

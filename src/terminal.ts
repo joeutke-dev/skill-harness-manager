@@ -32,12 +32,12 @@ export interface TerminalDefinition {
   label: string;
   /** macOS app bundle base name, e.g. "Ghostty" (detected in the app dirs). */
   appName?: string;
-  /** CLI binary name, e.g. "ghostty"/"tmux" (detected in the standard bin dirs). */
+  /** CLI binary name, e.g. "ghostty" (detected in the standard bin dirs). */
   binName?: string;
   /**
    * Opener using the resolved CLI BINARY (preferred when the binary is detected)
-   * — the reliable way to run a command in emulators that ship a CLI (Ghostty,
-   * kitty, WezTerm all take `-e`/`start`). Pure function of (binPath, scriptPath).
+   * — the reliable way to run a command in emulators that ship a CLI (Ghostty
+   * takes `-e`). Pure function of (binPath, scriptPath).
    */
   binOpener?: (binPath: string, scriptPath: string) => OpenerCommand;
   /**
@@ -46,80 +46,48 @@ export interface TerminalDefinition {
    */
   macOpener?: (scriptPath: string) => OpenerCommand;
   /**
-   * True when this terminal runs the script DETACHED (no window we control), so
-   * the caller shows a "how to attach" hint instead of a plain open Notice
-   * (currently only tmux). Display concern only.
+   * CLI path INSIDE the app bundle (relative to `<appDir>/<appName>.app`), probed
+   * when no standalone `binName` is found — cmux ships its CLI this way.
    */
-  detached?: boolean;
+  bundledBin?: string;
+  /**
+   * A richer launch integration main.ts uses instead of the opener command when
+   * available: `cmux` (workspace + tabs over the cmux CLI) or `ghostty` (tabs via
+   * AppleScript on Ghostty ≥ 1.3). The opener remains the fallback.
+   */
+  integration?: "cmux" | "ghostty";
 }
 
-/** Fixed tmux session name reused across launches so attaches are predictable. */
-export const TMUX_SESSION = "skill-harness";
-
 /**
- * The hardcoded terminal registry. `auto` first (the safe default). GUI
- * emulators use `open`/`open -na`; tmux runs the script in a detached session the
- * user attaches to. Order is the settings-dropdown order.
+ * The hardcoded terminal registry, in settings-dropdown order: Terminal (the OS
+ * default terminal — Terminal.app on macOS; always available), cmux and Ghostty
+ * (each only when installed). A stale stored id (e.g. a removed emulator)
+ * resolves back to Terminal.
  */
 export const KNOWN_TERMINALS: readonly TerminalDefinition[] = [
-  { id: "auto", label: "Auto (OS default terminal)" },
+  { id: "auto", label: "Terminal" },
   {
-    id: "terminal",
-    label: "Terminal",
-    appName: "Terminal",
-    macOpener: (s) => ({ bin: "/usr/bin/open", args: ["-a", "Terminal", s] }),
-  },
-  {
-    id: "iterm",
-    label: "iTerm",
-    appName: "iTerm",
-    macOpener: (s) => ({ bin: "/usr/bin/open", args: ["-a", "iTerm", s] }),
+    id: "cmux",
+    label: "cmux",
+    appName: "cmux",
+    // cmux is a native macOS terminal (libghostty) with workspaces + tabs and a
+    // CLI bundled in its app. Runs are opened by main.ts's cmux integration (a
+    // tab in the "Obsidian Sessions" workspace via `cmux new-surface`), NOT by an
+    // opener command — so no binOpener/macOpener here. If the integration can't
+    // reach cmux the run falls back to the OS default terminal with a Notice.
+    bundledBin: "Contents/Resources/bin/cmux",
+    integration: "cmux",
   },
   {
     id: "ghostty",
     label: "Ghostty",
     appName: "Ghostty",
-    binName: "ghostty",
-    // Preferred: the ghostty CLI runs an initial command via `-e` reliably.
-    binOpener: (bin, s) => ({ bin, args: ["-e", "bash", s] }),
-    // Fallback (no CLI): `open -na` does NOT reliably pass `-e`, so just open the
-    // app — the script won't auto-run. Install the `ghostty` CLI for auto-run.
+    // Ghostty ≥ 1.3 is driven by AppleScript (a tab in the front window; see
+    // ghostty.ts). Before 1.3 — or if AppleScript fails — `open -na … -e` runs the
+    // script in a separate Ghostty instance. (The `ghostty` CLI can't open
+    // windows on macOS, so it's never used.)
+    integration: "ghostty",
     macOpener: (s) => ({ bin: "/usr/bin/open", args: ["-na", "Ghostty", "--args", "-e", "bash", s] }),
-  },
-  {
-    id: "kitty",
-    label: "kitty",
-    appName: "kitty",
-    binName: "kitty",
-    binOpener: (bin, s) => ({ bin, args: ["bash", s] }),
-    macOpener: (s) => ({ bin: "/usr/bin/open", args: ["-na", "kitty", "--args", "bash", s] }),
-  },
-  {
-    id: "wezterm",
-    label: "WezTerm",
-    appName: "WezTerm",
-    binName: "wezterm",
-    binOpener: (bin, s) => ({ bin, args: ["start", "--", "bash", s] }),
-    macOpener: (s) => ({ bin: "/usr/bin/open", args: ["-na", "WezTerm", "--args", "start", "--", "bash", s] }),
-  },
-  {
-    id: "cmux",
-    label: "cmux",
-    appName: "cmux",
-    // cmux (manaflow-ai/cmux) is an Electron agent-orchestration app, not a
-    // classic emulator with a documented run-a-command flag. Best-effort: open
-    // the app with the script path as an arg. If cmux ignores it, the launch
-    // won't auto-run — use Ghostty/Terminal for a guaranteed run.
-    macOpener: (s) => ({
-      bin: "/usr/bin/open",
-      args: ["-na", "cmux", "--args", s],
-    }),
-  },
-  {
-    id: "tmux",
-    label: "tmux",
-    binName: "tmux",
-    detached: true,
   },
 ] as const;
 
@@ -131,7 +99,7 @@ export function terminalById(
   return KNOWN_TERMINALS.find((t) => t.id === id);
 }
 
-/** Standard bin dirs a CLI terminal (tmux) is probed in (POSIX / Windows). */
+/** Standard bin dirs a terminal's CLI is probed in (POSIX / Windows). */
 export function terminalBinCandidates(
   binName: string,
   homedir: string,
@@ -152,8 +120,10 @@ export function terminalBinCandidates(
 /** A detected terminal: its definition plus (when found) the resolved CLI binary path. */
 export interface DetectedTerminal {
   def: TerminalDefinition;
-  /** Resolved CLI binary path when detected (ghostty/kitty/wezterm/tmux); else undefined. */
+  /** Resolved CLI binary path when detected (ghostty/cmux); else undefined. */
   binPath?: string;
+  /** The detected app bundle path (e.g. `/Applications/Ghostty.app`), when found. */
+  appPath?: string;
 }
 
 /**
@@ -189,11 +159,18 @@ export function detectInstalledTerminals(opts: {
         }
       }
     }
-    const hasApp =
-      !!def.appName &&
-      opts.appDirs.some((dir) => opts.exists(nodePath.join(dir, `${def.appName}.app`)));
-    if (binPath) out.push({ def, binPath });
-    else if (hasApp) out.push({ def });
+    const appDir = def.appName
+      ? opts.appDirs
+          .map((dir) => nodePath.join(dir, `${def.appName}.app`))
+          .find((p) => opts.exists(p))
+      : undefined;
+    // An app that bundles its CLI (cmux): use that copy when no standalone one.
+    if (!binPath && appDir && def.bundledBin) {
+      const bundled = nodePath.join(appDir, def.bundledBin);
+      if (opts.exists(bundled)) binPath = bundled;
+    }
+    if (binPath) out.push({ def, binPath, appPath: appDir });
+    else if (appDir) out.push({ def, appPath: appDir });
   }
   return out;
 }
@@ -217,11 +194,8 @@ export function resolvePreferredTerminal(
 
 /**
  * Build the opener command that runs the written `scriptPath` in `terminal`.
- * - tmux → `<tmux> new-session -A -s skill-harness bash <script>` (detached; the
- *   caller tells the user to `tmux attach -t skill-harness`).
  * - a CLI binary was detected + the def has a `binOpener` → run via the binary
  *   (the RELIABLE run-a-command path; e.g. `ghostty -e bash <script>`).
- * - tmux (binName, no binOpener) → its detached `new-session` form.
  * - a macOS GUI emulator with a `macOpener` (and platform darwin) → that opener.
  * - otherwise → the DEFAULT opener: `open <script>` (macOS), `cmd /c start "" …`
  *   (Windows), `$TERMINAL -e bash <script>` / `x-terminal-emulator` (Linux).
@@ -240,12 +214,6 @@ export function buildOpenerCommand(opts: {
   // Preferred: a detected CLI binary with a binOpener runs the command reliably.
   if (binPath && def.binOpener) {
     return def.binOpener(binPath, s);
-  }
-  if (def.id === "tmux" && binPath) {
-    return {
-      bin: binPath,
-      args: ["new-session", "-A", "-s", TMUX_SESSION, "bash", s],
-    };
   }
   if (platform === "darwin" && def.macOpener) {
     return def.macOpener(s);

@@ -34,6 +34,8 @@ const context = await esbuild.context({
     ...builtinModules,
     ...builtinModules.map((m) => `node:${m}`),
   ],
+  // Bundled setup skills (src/skills/*/SKILL.md) are embedded as strings.
+  loader: { ".md": "text" },
   format: "cjs",
   target: "es2018",
   logLevel: "info",

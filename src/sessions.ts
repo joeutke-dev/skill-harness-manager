@@ -76,6 +76,8 @@ export interface LaunchedSession {
   resumedAt?: number;
   /** The user stopped it from the Sessions tab. */
   stopped?: boolean;
+  /** The schedule that started this run (Schedules tab), if any. */
+  scheduleId?: string;
   /** Final status snapshot, cached once the run has finished. */
   outcome?: SessionOutcome;
 }

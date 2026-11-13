@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import { shell } from "electron";
 import * as fs from "fs";
 import * as os from "os";
@@ -24,9 +24,39 @@ import {
   DetectedTerminal,
   detectInstalledTerminals,
   resolvePreferredTerminal,
-  TMUX_SESSION,
 } from "./terminal";
 import { EXAMPLE_SKILL_BODY, EXAMPLE_SKILL_REL_PATH } from "./example";
+import { BUNDLED_SKILLS, BundledSkillId } from "./bundledSkills";
+import {
+  classifyCmuxError,
+  cmuxErrorMessage,
+  cmuxNewSurfaceArgs,
+  cmuxNewWorkspaceArgs,
+  cmuxNotifyArgs,
+  cmuxRenameTabArgs,
+  cmuxRunCommand,
+  findCmuxWorkspace,
+  parseCmuxAccessMode,
+  parseCmuxRefs,
+  parseCmuxWorkspaces,
+  resolveCmuxWorkspaceName,
+} from "./cmux";
+import {
+  addRun,
+  buildPromptTaskPrompt,
+  evaluateSchedule,
+  isWakeGap,
+  normalizeSchedules,
+  Schedule,
+  ScheduleRun,
+  TICK_MS,
+  WAKE_SETTLE_MS,
+} from "./schedules";
+import {
+  buildGhosttyAppleScript,
+  ghosttySupportsAppleScript,
+  readBundleVersion,
+} from "./ghostty";
 import {
   DEFAULT_PINNED_ICON,
   elementHasSvg,
@@ -121,6 +151,7 @@ import {
   withStreamJson,
 } from "./sessionMonitor";
 import { SessionDetailsModal } from "./sessionDetails";
+import { ScheduleModal } from "./scheduleModal";
 import { StringDecoder } from "string_decoder";
 import { addTagToContent, removeTagFromContent } from "./tagEdit";
 import {
@@ -176,6 +207,16 @@ export default class SkillLayerPlugin extends Plugin {
 
   /** Cached terminal emulators detected on disk (for the preferred-terminal dropdown). */
   private detectedTerminals: DetectedTerminal[] = [];
+  /** Installed Ghostty version (from its Info.plist), "" when not installed/unknown. */
+  private ghosttyVersion = "";
+  /** Scheduler: time of the previous tick (0 = none yet) — a long gap means the machine slept. */
+  private scheduleLastTick = 0;
+  /** Scheduler: a wake/startup waiting WAKE_SETTLE_MS before schedules fire. */
+  private pendingWake: { wakeAt: number; settleAt: number } | null = null;
+  /** Scheduler: re-entrancy guard (a tick can await launches). */
+  private scheduleTicking = false;
+  /** Serialises cmux opens so concurrent runs can't each create the workspace. */
+  private cmuxQueue: Promise<void> = Promise.resolve();
 
   /** Cached Claude subagents (M17) from `<vault>/.claude/agents` + `~/.claude/agents`. */
   private claudeAgents: ClaudeAgent[] = [];
@@ -241,6 +282,15 @@ export default class SkillLayerPlugin extends Plugin {
     // 1s ticker: elapsed times in the live notices + Sessions tab, updated in place.
     this.registerInterval(window.setInterval(() => this.tickSessions(), 1_000));
     this.app.workspace.onLayoutReady(() => void this.pollSessions());
+    // Scheduler: tick every 30s. Obsidian starting counts as a wake, so runs
+    // missed while it was closed catch up ~1 min after launch.
+    this.pendingWake = { wakeAt: Date.now(), settleAt: Date.now() + WAKE_SETTLE_MS };
+    this.registerInterval(window.setInterval(() => void this.tickSchedules(), TICK_MS));
+    this.addCommand({
+      id: "new-schedule",
+      name: "New schedule",
+      callback: () => this.openScheduleModal(),
+    });
 
     this.addCommand({
       id: "open-browser",
@@ -407,6 +457,7 @@ export default class SkillLayerPlugin extends Plugin {
     // tabs; bump a still-default value up to the new 520. A width the user chose
     // themselves (anything other than the old default) is left untouched.
     if (this.settings.panelWidth === 420) this.settings.panelWidth = 520;
+    this.settings.schedules = normalizeSchedules(this.settings.schedules);
   }
 
   async saveSettings(): Promise<void> {
@@ -681,7 +732,7 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   // --- Preferred terminal + launch mode ----------------------------------
-  /** Re-detect installed terminal emulators into the cache (app bundles + tmux). */
+  /** Re-detect installed terminal emulators into the cache (app bundles). */
   private detectTerminals(): void {
     this.detectedTerminals = detectInstalledTerminals({
       homedir: os.homedir(),
@@ -689,6 +740,17 @@ export default class SkillLayerPlugin extends Plugin {
       appDirs: ["/Applications", nodePath.join(os.homedir(), "Applications")],
       exists: (p) => fs.existsSync(p),
     });
+    // Ghostty ≥ 1.3 gets the AppleScript tab integration; read its version once.
+    this.ghosttyVersion = "";
+    const ghostty = this.detectedTerminals.find((t) => t.def.id === "ghostty");
+    if (ghostty?.appPath) {
+      try {
+        const plist = fs.readFileSync(nodePath.join(ghostty.appPath, "Contents", "Info.plist"), "utf8");
+        this.ghosttyVersion = readBundleVersion(plist);
+      } catch {
+        /* binary plist / unreadable — treat as unknown (pre-1.3 behaviour) */
+      }
+    }
   }
 
   /** The terminal emulators detected on disk (for the settings dropdown). */
@@ -1291,7 +1353,7 @@ export default class SkillLayerPlugin extends Plugin {
    * The default custom harness "Default" resolves to: the explicitly-designated
    * one when set and valid, else — with no explicit choice — a LONE harness (so a
    * single configured harness is the default automatically). Null when there are
-   * zero, or 2+ with none marked (the user must then pick one in the Harnesses tab).
+   * zero, or 2+ with none marked (the user must then pick one in the Config tab → Harnesses).
    */
   resolveDefaultHarness(): CustomHarness | null {
     const harnesses = this.settings.harnesses;
@@ -1347,7 +1409,7 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   // --- Custom harnesses (M15.3) ------------------------------------------
-  /** The user-defined custom harnesses (for the Harnesses tab + dropdown). */
+  /** The user-defined custom harnesses (for the Config tab → Harnesses + dropdown). */
   getCustomHarnesses(): CustomHarness[] {
     return this.settings.harnesses;
   }
@@ -2361,23 +2423,24 @@ export default class SkillLayerPlugin extends Plugin {
     userPrompt?: string,
     selectionText?: string,
     monitor?: { stallMinutes?: number; longRunMinutes?: number },
-  ): Promise<void> {
+    opts?: { scheduleId?: string; mode?: LaunchMode },
+  ): Promise<LaunchedSession | null> {
     // Desktop + filesystem capability gate.
     if (!this.detector.canScanExternal()) {
       new Notice("Skill and Harness Manager: launching requires the desktop app.");
-      return;
+      return null;
     }
     const cwd = this.detector.vaultBasePath();
     if (!cwd) {
       new Notice("Skill and Harness Manager: could not resolve the vault path; not launching.");
-      return;
+      return null;
     }
 
     // Natural-language prompt (NOT the `/slash` invocation): a leading-slash
     // first token would hit omnigent's REPL slash dispatcher ("Unknown
     // command") instead of selecting the host skill. Reuse the spawn cwd as the
     // vault path in the anchor text. ("Copy invocation" keeps the slash form.)
-    let prompt = buildLaunchPrompt(
+    const prompt = buildLaunchPrompt(
       skill.name,
       cwd,
       this.settings.appendVaultAnchor,
@@ -2386,26 +2449,41 @@ export default class SkillLayerPlugin extends Plugin {
       skill.kind ?? "skill",
       selectionText,
     );
-    const mode = this.effectiveLaunchMode(skill.id);
+    const mode = opts?.mode ?? this.effectiveLaunchMode(skill.id);
+    return this.runLaunch(skill, prompt, cwd, mode, monitor, null, opts?.scheduleId);
+  }
+
+  /**
+   * The shared tail of every skill / prompt launch: add the NEEDS INPUT
+   * instruction for headless runs, build the harness plan ONCE, then run it
+   * headless (tracked) or in the preferred terminal — the SAME command either
+   * way. `harnessOverride` (prompt tasks) replaces the per-skill harness
+   * lookup; `scheduleId` tags the session record. Returns the recorded session.
+   */
+  private runLaunch(
+    skill: Skill,
+    basePrompt: string,
+    cwd: string,
+    mode: LaunchMode,
+    monitor?: { stallMinutes?: number; longRunMinutes?: number },
+    harnessOverride?: CustomHarness | null,
+    scheduleId?: string,
+  ): LaunchedSession | null {
+    let prompt = basePrompt;
     // Headless runs can't stop and wait for an answer, so (Settings toggle) tell
     // the model to end with a `NEEDS INPUT:` line when it truly needs the user.
     if (mode !== "terminal" && this.settings.needsInputInstruction) {
       prompt = `${prompt}\n\n${NEEDS_INPUT_INSTRUCTION}`;
     }
-
-    // Build the skill's harness command (argv + session record + Notices) ONCE,
-    // then run it either headless (detached spawn) or in the user's preferred
-    // terminal — the SAME command in both modes. Per-item launch-mode override
-    // wins over the global default.
-    const plan = this.buildLaunchPlan(skill, prompt, cwd);
-    if (!plan) return; // a Notice was already shown (invalid harness / binary).
+    const plan = this.buildLaunchPlan(skill, prompt, cwd, harnessOverride);
+    if (!plan) return null; // a Notice was already shown (invalid harness / binary).
+    const tag: Partial<LaunchedSession> = scheduleId ? { scheduleId } : {};
 
     if (mode === "terminal") {
       this.runPlanInTerminal(plan, skill.name, cwd);
-      plan.record({ mode: "terminal" });
-      return;
+      return plan.record({ mode: "terminal", ...tag });
     }
-    this.launchTrackedHeadless(plan, cwd, monitor);
+    return this.launchTrackedHeadless(plan, cwd, monitor, tag);
   }
 
   /**
@@ -2424,7 +2502,8 @@ export default class SkillLayerPlugin extends Plugin {
     },
     cwd: string,
     monitor?: { stallMinutes?: number; longRunMinutes?: number },
-  ): void {
+    tag: Partial<LaunchedSession> = {},
+  ): LaunchedSession | null {
     const { argv, streaming } = withStreamJson(plan.argv);
     const base = sessionLogBase(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     const dir = this.sessionLogDir();
@@ -2444,9 +2523,9 @@ export default class SkillLayerPlugin extends Plugin {
         void this.pollSessions();
       },
     });
-    if (pid === null) return; // spawn failed; a Notice was already shown.
+    if (pid === null) return null; // spawn failed; a Notice was already shown.
 
-    const extra: Partial<LaunchedSession> = { mode: "headless", pid, logPath, errPath };
+    const extra: Partial<LaunchedSession> = { mode: "headless", pid, logPath, errPath, ...tag };
     if (streaming) extra.stream = "claude";
     const stall = validMinutes(monitor?.stallMinutes);
     const longRun = validMinutes(monitor?.longRunMinutes);
@@ -2459,6 +2538,7 @@ export default class SkillLayerPlugin extends Plugin {
     } else {
       new Notice(plan.successNotice);
     }
+    return rec;
   }
 
   /**
@@ -2472,6 +2552,7 @@ export default class SkillLayerPlugin extends Plugin {
     skill: Skill,
     prompt: string,
     cwd: string,
+    harnessOverride?: CustomHarness | null,
   ): {
     argv: string[];
     label: string;
@@ -2481,11 +2562,11 @@ export default class SkillLayerPlugin extends Plugin {
     // The skill runs through a CUSTOM harness: its explicit `custom:` pick, else
     // the designated default harness ("Default"). With neither set there is no
     // runtime to launch — show a Notice rather than fall back to omnigent.
-    const harness = this.effectiveCustomHarness(skill.id);
+    const harness = harnessOverride ?? this.effectiveCustomHarness(skill.id);
     if (!harness) {
       new Notice(
         "Skill and Harness Manager: no harness set. Choose a Default harness in " +
-          "Settings → Harnesses, or pick one in the skill's ⚙ Configure panel.",
+          "the Config tab → Harnesses, or pick one in the skill's ⚙ Configure panel.",
       );
       return null;
     }
@@ -2724,6 +2805,7 @@ export default class SkillLayerPlugin extends Plugin {
         "stream",
         "stallMinutes",
         "longRunMinutes",
+        "scheduleId",
       ] as const) {
         if (extra[k] !== undefined) (rec as unknown as Record<string, unknown>)[k] = extra[k];
       }
@@ -3149,6 +3231,7 @@ export default class SkillLayerPlugin extends Plugin {
             ? `${name} may be stalled`
             : `${name} is still running after ${formatDuration(Date.now() - s.startedAt)}`;
     const body = kind === "needs-input" && d.question ? d.question : d.detail;
+    if (kind === "needs-input" || kind === "errored") this.cmuxNotifySession(title, body);
     const notice = this.sessionNotice(s, `mod-${kind}`, (box, close) => {
       box.createDiv({ cls: "skill-layer-alert-title", text: title });
       if (body) box.createDiv({ cls: "skill-layer-alert-body", text: body });
@@ -3200,8 +3283,10 @@ export default class SkillLayerPlugin extends Plugin {
   private onSessionFinished(s: LaunchedSession, d: DerivedStatus): void {
     this.stallNotices.get(s.key)?.hide();
     this.stallNotices.delete(s.key);
+    this.noteScheduleRunStatus(s, d.status);
     if (d.status !== "done") return; // needs-input / errored alert separately; stopped already noticed
     const ran = formatDuration((s.endedAt ?? Date.now()) - s.startedAt);
+    this.cmuxNotifySession(`“${s.skillName}” finished in ${ran}`, d.detail);
     this.sessionNotice(
       s,
       "mod-done",
@@ -3291,7 +3376,7 @@ export default class SkillLayerPlugin extends Plugin {
       // Ghostty), not always the OS default, since the default terminal may be
       // blocked from the vault folder by macOS privacy settings.
       const term = this.resolvePreferredTerminal();
-      const { ext, content } = buildTerminalScript(primary, s.cwd, hint, process.platform, !term.def.detached, {
+      const { ext, content } = buildTerminalScript(primary, s.cwd, hint, process.platform, true, {
         header,
         fallback: fallback ?? undefined,
         fallbackNote: fallback
@@ -3301,8 +3386,8 @@ export default class SkillLayerPlugin extends Plugin {
           : undefined,
         cwdGuard: true,
       });
-      this.openTerminalScript(content, ext, `resume-${s.tool}`, term);
-      new Notice(`Connecting to "${s.skillName}" (${label}) in ${term.def.label}…`);
+      this.openTerminalScript(content, ext, `resume-${s.tool}`, term, `↻ ${s.skillName}`);
+      new Notice(`Connecting to "${s.skillName}" (${label}) in ${this.terminalPlaceLabel(term)}…`);
     } catch (e) {
       console.error("[skill-layer] openSessionTerminal failed:", e);
       new Notice(`Skill and Harness Manager: could not open a terminal for this session.`);
@@ -3312,8 +3397,7 @@ export default class SkillLayerPlugin extends Plugin {
   /**
    * Run a launch PLAN (skill's harness argv) VISIBLY in the user's PREFERRED
    * terminal. Writes a `cd <cwd> && <argv>` script (POSIX-quoted by
-   * `buildTerminalScript`) and opens it in the chosen emulator. Shows a tmux
-   * attach hint when the preferred terminal is tmux (detached). Never throws.
+   * `buildTerminalScript`) and opens it in the chosen emulator. Never throws.
    */
   private runPlanInTerminal(
     plan: { argv: string[]; label: string },
@@ -3325,19 +3409,13 @@ export default class SkillLayerPlugin extends Plugin {
     // Terminal mode is for an INTERACTIVE session: strip the harness's headless
     // print flag (`-p`) so the CLI opens a session seeded with the prompt rather
     // than answering-and-exiting, and keep the window open afterward so the user
-    // can continue. (tmux is detached, so keep-open doesn't apply there.)
+    // can continue.
     const argv = toInteractiveArgv(plan.argv);
-    const keepOpen = !term.def.detached;
+    const keepOpen = true;
     try {
       const { ext, content } = buildTerminalScript(argv, cwd, hint, process.platform, keepOpen);
-      this.openTerminalScript(content, ext, `run-${plan.label}`, term);
-      if (term.def.detached) {
-        new Notice(
-          `Started "${skillName}" in ${term.def.label} — attach with: tmux attach -t ${TMUX_SESSION}`,
-        );
-      } else {
-        new Notice(`Opening "${skillName}" in ${term.def.label}…`);
-      }
+      this.openTerminalScript(content, ext, `run-${plan.label}`, term, skillName);
+      new Notice(`Opening "${skillName}" in ${this.terminalPlaceLabel(term)}…`);
     } catch (e) {
       console.error("[skill-layer] runPlanInTerminal failed:", e);
       new Notice("Skill and Harness Manager: could not open a terminal.");
@@ -3348,13 +3426,19 @@ export default class SkillLayerPlugin extends Plugin {
    * The shared temp-script + terminal-opener surface: write `content` to a temp
    * file with extension `ext`, mark it executable (non-Windows), and open it in a
    * terminal. `terminal` selects the emulator (defaults to the OS default when
-   * omitted); `tag` labels the temp filename.
+   * omitted); `tag` labels the temp filename; `title` names the tab where the
+   * terminal supports it (cmux, Ghostty ≥ 1.3).
+   *
+   * Integrations: cmux opens the script as a new tab in the plugin's cmux
+   * workspace; Ghostty ≥ 1.3 opens it as a tab via AppleScript. Either falls back
+   * to a plain opener (with a Notice) if it fails.
    */
   private openTerminalScript(
     content: string,
     ext: string,
     tag: string,
     terminal?: DetectedTerminal,
+    title?: string,
   ): void {
     const plat = process.platform;
     // Sanitize the tag so the temp FILENAME never contains spaces or other shell-
@@ -3366,12 +3450,81 @@ export default class SkillLayerPlugin extends Plugin {
     const file = `${os.tmpdir()}/skill-harness-${safeTag}-${Date.now()}${ext}`;
     fs.writeFileSync(file, content, plat === "win32" ? {} : { mode: 0o755 });
 
+    const term: DetectedTerminal = terminal ?? { def: { id: "auto", label: "Auto" } };
+    const tabTitle = title ?? tag;
+    let integrated = false;
+    if (plat === "darwin" && term.def.integration === "cmux" && term.binPath) {
+      integrated = true;
+      const bin = term.binPath;
+      this.cmuxQueue = this.cmuxQueue
+        .then(() => this.openInCmux(bin, term.appPath, file, tabTitle))
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("[skill-layer] cmux open failed:", e);
+          new Notice(
+            `Skill and Harness Manager: ${cmuxErrorMessage(classifyCmuxError(msg), msg)} ` +
+              `Opening in your default terminal instead.`,
+            12000,
+          );
+          this.spawnTerminalOpener(file, { def: { id: "auto", label: "Auto" } });
+        });
+    } else if (
+      plat === "darwin" &&
+      term.def.integration === "ghostty" &&
+      ghosttySupportsAppleScript(this.ghosttyVersion)
+    ) {
+      integrated = true;
+      this.openInGhostty(file, tabTitle).catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("[skill-layer] Ghostty AppleScript open failed:", e);
+        const denied = /-1743|not authori[sz]ed|not allowed/i.test(msg);
+        new Notice(
+          denied
+            ? "Skill and Harness Manager: macOS blocked Obsidian from controlling Ghostty. " +
+                "Allow it in System Settings → Privacy & Security → Automation → Obsidian → Ghostty. " +
+                "Opening a separate Ghostty window instead."
+            : "Skill and Harness Manager: couldn't open a Ghostty tab; opening a separate Ghostty window instead.",
+          12000,
+        );
+        this.spawnTerminalOpener(file, term);
+      });
+    } else {
+      this.spawnTerminalOpener(file, term);
+    }
+
+    // Belt-and-suspenders cleanup: delete the temp launcher once the terminal has
+    // read+started it. The script also self-deletes at run time (`rm -f "$0"`);
+    // this covers the case where the terminal never launched so a stale script
+    // can't be re-run by session-restore. Integrations get longer (cmux may have
+    // to start up first). Never throws.
+    window.setTimeout(
+      () => {
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          /* already gone (self-deleted) or never created — fine */
+        }
+      },
+      integrated ? 90_000 : 10_000,
+    );
+  }
+
+  /** Where a terminal open lands, for Notices: "cmux › Obsidian Sessions", "Ghostty", … */
+  private terminalPlaceLabel(term: DetectedTerminal): string {
+    if (term.def.integration === "cmux" && term.binPath) {
+      return `cmux › ${this.cmuxWorkspaceName()}`;
+    }
+    return term.def.label;
+  }
+
+  /** Open a written launcher script with the terminal's plain opener command. */
+  private spawnTerminalOpener(file: string, term: DetectedTerminal): void {
     // A specific preferred terminal, else the OS default (auto). buildOpenerCommand
-    // handles tmux + macOS GUI emulators + the per-platform default.
+    // handles macOS GUI emulators + the per-platform default.
     const opener = buildOpenerCommand({
-      terminal: terminal ?? { def: { id: "auto", label: "Auto" } },
+      terminal: term,
       scriptPath: file,
-      platform: plat,
+      platform: process.platform,
       linuxTerminalEnv: process.env.TERMINAL,
     });
     const child = spawn(opener.bin, opener.args, {
@@ -3381,18 +3534,447 @@ export default class SkillLayerPlugin extends Plugin {
       windowsHide: false,
     });
     child.unref?.();
+  }
 
-    // Belt-and-suspenders cleanup: delete the temp launcher a few seconds later,
-    // once the terminal has read+started it. The script also self-deletes at run
-    // time (`rm -f "$0"`); this covers the case where the terminal never launched
-    // so a stale script can't be re-run by session-restore. Never throws.
-    window.setTimeout(() => {
+  // --- cmux integration ---------------------------------------------------
+  /** The detected cmux terminal (with its CLI path), or undefined. */
+  getCmuxTerminal(): DetectedTerminal | undefined {
+    return this.detectedTerminals.find((t) => t.def.id === "cmux" && !!t.binPath);
+  }
+
+  /** The cmux workspace name runs open into. */
+  cmuxWorkspaceName(): string {
+    return resolveCmuxWorkspaceName(this.settings.cmuxWorkspaceName);
+  }
+
+  /**
+   * Run the cmux CLI with inert argv (execFile, no shell). Resolves stdout;
+   * rejects with an Error whose message is the CLI's stderr/stdout. The env drops
+   * any inherited CMUX_* surface ids (if Obsidian was started from a cmux tab) so
+   * cmux never resolves "the caller's" workspace/tab for us.
+   */
+  private runCmux(bin: string, args: string[], timeoutMs = 8000): Promise<string> {
+    const env: NodeJS.ProcessEnv = { ...this.launchEnv(), CMUX_QUIET: "1" };
+    for (const k of ["CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID"]) {
+      delete env[k];
+    }
+    return new Promise((resolve, reject) => {
+      execFile(
+        bin,
+        args,
+        { env, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error(`${String(stderr || "")} ${String(stdout || "")} ${err.message}`.trim()));
+          } else {
+            resolve(String(stdout));
+          }
+        },
+      );
+    });
+  }
+
+  /**
+   * Make sure cmux is up and accepting us. If its socket isn't reachable, open
+   * the app and poll for up to ~15s. An access-denied answer is thrown right away
+   * (no point waiting: the socket mode has to change — see setup-cmux).
+   */
+  private async ensureCmuxRunning(bin: string, appPath?: string): Promise<void> {
+    try {
+      await this.runCmux(bin, ["capabilities", "--json"], 4000);
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (classifyCmuxError(msg) === "access-denied") throw e;
+    }
+    spawn("/usr/bin/open", ["-a", appPath ?? "cmux"], { stdio: "ignore", detached: true }).unref?.();
+    let last: unknown = null;
+    for (let i = 0; i < 15; i++) {
+      await new Promise((r) => window.setTimeout(r, 1000));
       try {
-        fs.unlinkSync(file);
-      } catch {
-        /* already gone (self-deleted) or never created — fine */
+        await this.runCmux(bin, ["capabilities", "--json"], 3000);
+        return;
+      } catch (e) {
+        last = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (classifyCmuxError(msg) === "access-denied") throw e;
       }
-    }, 10000);
+    }
+    throw last instanceof Error ? last : new Error("cmux did not start (not running)");
+  }
+
+  /** Find the plugin's cmux workspace (by name); undefined when absent. */
+  private async findCmuxWorkspaceRef(bin: string): Promise<string | undefined> {
+    const list = parseCmuxWorkspaces(await this.runCmux(bin, ["workspace", "list", "--json"]));
+    return findCmuxWorkspace(list, this.cmuxWorkspaceName())?.ref;
+  }
+
+  /**
+   * Open a launcher script as a new tab in the plugin's cmux workspace, creating
+   * the workspace (with this run as its first tab) when it doesn't exist yet.
+   * The tab is titled; when "Bring cmux to front" is on the workspace is selected
+   * and cmux activated. Throws on failure (caller falls back).
+   */
+  private async openInCmux(
+    bin: string,
+    appPath: string | undefined,
+    scriptFile: string,
+    title: string,
+  ): Promise<void> {
+    await this.ensureCmuxRunning(bin, appPath);
+    const cwd = this.detector.vaultBasePath() ?? os.homedir();
+    const command = cmuxRunCommand(scriptFile);
+    const focus = this.settings.cmuxFocus;
+    let wsRef = await this.findCmuxWorkspaceRef(bin);
+    if (wsRef) {
+      const refs = parseCmuxRefs(
+        await this.runCmux(bin, cmuxNewSurfaceArgs({ workspace: wsRef, cwd, command, focus })),
+      );
+      await this.runCmux(bin, cmuxRenameTabArgs({ workspace: wsRef, surface: refs.surface, title })).catch(
+        () => undefined,
+      );
+    } else {
+      const refs = parseCmuxRefs(
+        await this.runCmux(
+          bin,
+          cmuxNewWorkspaceArgs({ name: this.cmuxWorkspaceName(), cwd, command, focus }),
+        ),
+      );
+      wsRef = refs.workspace;
+      if (wsRef) {
+        await this.runCmux(bin, cmuxRenameTabArgs({ workspace: wsRef, title })).catch(() => undefined);
+      }
+    }
+    if (focus) {
+      if (wsRef) {
+        await this.runCmux(bin, ["select-workspace", "--workspace", wsRef]).catch(() => undefined);
+      }
+      spawn("/usr/bin/open", ["-a", appPath ?? "cmux"], { stdio: "ignore", detached: true }).unref?.();
+    }
+  }
+
+  /**
+   * Settings "Test connection": report whether the plugin can drive cmux and
+   * where runs will open. Never throws.
+   */
+  async testCmuxConnection(): Promise<{ ok: boolean; text: string }> {
+    const cmux = this.getCmuxTerminal();
+    if (!cmux?.binPath) {
+      return { ok: false, text: "cmux isn't installed (no cmux.app with its bundled CLI found)." };
+    }
+    try {
+      const caps = await this.runCmux(cmux.binPath, ["capabilities", "--json"], 4000);
+      const mode = parseCmuxAccessMode(caps) || "unknown";
+      const ws = await this.findCmuxWorkspaceRef(cmux.binPath);
+      const name = this.cmuxWorkspaceName();
+      return {
+        ok: true,
+        text:
+          `Connected (socket mode: ${mode}). Runs open as tabs in the “${name}” workspace` +
+          (ws ? ` (${ws}).` : ", which will be created on the first run."),
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, text: cmuxErrorMessage(classifyCmuxError(msg), msg) };
+    }
+  }
+
+  /**
+   * Post a cmux notification for a session event (finished / failed / needs
+   * input) when "cmux notifications" is on. Best-effort and silent: never starts
+   * cmux and never surfaces an error.
+   */
+  private cmuxNotifySession(title: string, body?: string): void {
+    if (!this.settings.cmuxNotify || process.platform !== "darwin") return;
+    const cmux = this.getCmuxTerminal();
+    if (!cmux?.binPath) return;
+    const bin = cmux.binPath;
+    void (async () => {
+      const ws = await this.findCmuxWorkspaceRef(bin).catch(() => undefined);
+      await this.runCmux(bin, cmuxNotifyArgs({ title, body, workspace: ws }));
+    })().catch((e) => console.debug("[skill-layer] cmux notify skipped:", e));
+  }
+
+  // --- Ghostty integration (≥ 1.3, AppleScript) ---------------------------
+  /** Installed Ghostty version + whether runs open as tabs (for the settings UI). */
+  getGhosttyStatus(): { installed: boolean; version: string; tabs: boolean } {
+    const installed = this.detectedTerminals.some((t) => t.def.id === "ghostty");
+    return {
+      installed,
+      version: this.ghosttyVersion,
+      tabs: installed && ghosttySupportsAppleScript(this.ghosttyVersion),
+    };
+  }
+
+  /** Open a launcher script as a Ghostty tab/window via AppleScript. Rejects on failure. */
+  private openInGhostty(scriptFile: string, title: string): Promise<void> {
+    const script = buildGhosttyAppleScript({
+      cwd: this.detector.vaultBasePath() ?? os.homedir(),
+      command: cmuxRunCommand(scriptFile),
+      title,
+      openIn: this.settings.ghosttyOpenIn === "window" ? "window" : "tab",
+    });
+    return new Promise((resolve, reject) => {
+      execFile("/usr/bin/osascript", ["-e", script], { timeout: 15000 }, (err, _out, stderr) => {
+        if (err) reject(new Error(`${String(stderr || "")} ${err.message}`.trim()));
+        else resolve();
+      });
+    });
+  }
+
+  // --- Schedules ------------------------------------------------------------
+  /** All schedules (Schedules tab). */
+  getSchedules(): Schedule[] {
+    return this.settings.schedules;
+  }
+
+  /** The custom harnesses (for the schedule modal's harness picker). */
+  getScheduleHarnessOptions(): CustomHarness[] {
+    return this.settings.harnesses.filter((h) => isValidCustomHarnessCommand(h.command));
+  }
+
+  /** Open the create/edit schedule modal (optionally pre-filled with a skill). */
+  openScheduleModal(existing?: Schedule, skill?: Skill): void {
+    new ScheduleModal(this.app, this, existing, skill).open();
+  }
+
+  /**
+   * Create or update a schedule. A new schedule, or one whose trigger changed,
+   * starts its cursor NOW — so past occurrences never fire immediately — and a
+   * finished one-shot whose trigger changed becomes live again.
+   */
+  async saveSchedule(next: Schedule): Promise<void> {
+    const list = this.settings.schedules;
+    const i = list.findIndex((x) => x.id === next.id);
+    const now = Date.now();
+    if (i === -1) {
+      list.push({ ...next, createdAt: now, cursor: now, done: undefined, runs: [] });
+    } else {
+      const prev = list[i];
+      const triggerChanged = JSON.stringify(prev.trigger) !== JSON.stringify(next.trigger);
+      list[i] = {
+        ...next,
+        createdAt: triggerChanged ? now : prev.createdAt,
+        cursor: triggerChanged ? now : prev.cursor,
+        done: triggerChanged ? undefined : prev.done,
+        runs: prev.runs,
+      };
+    }
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  async deleteSchedule(id: string): Promise<void> {
+    this.settings.schedules = this.settings.schedules.filter((x) => x.id !== id);
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  /** Pause / resume. Resuming starts the cursor now, so runs missed while paused don't fire. */
+  async setScheduleEnabled(id: string, enabled: boolean): Promise<void> {
+    const sch = this.settings.schedules.find((x) => x.id === id);
+    if (!sch) return;
+    sch.enabled = enabled;
+    if (enabled) sch.cursor = Date.now();
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
+  /** Run a schedule right now (doesn't change when it next runs on its own). */
+  async runScheduleNow(id: string): Promise<void> {
+    const sch = this.settings.schedules.find((x) => x.id === id);
+    if (sch) await this.fireSchedule(sch, "manual");
+  }
+
+  /** The live session a schedule run started, if it's still tracked. */
+  getScheduleRunSession(run: ScheduleRun): LaunchedSession | undefined {
+    return run.sessionKey ? this.settings.sessions.find((x) => x.key === run.sessionKey) : undefined;
+  }
+
+  /**
+   * Scheduler tick (every 30s). A gap since the last tick longer than a few
+   * minutes means the machine slept → a wake. After a wake (or startup) nothing
+   * fires until it has settled for a minute, so network/VPN/auth come back first.
+   * Then every schedule is evaluated: due ones fire, and ones missed while away
+   * are caught up once.
+   */
+  private async tickSchedules(): Promise<void> {
+    const now = Date.now();
+    if (isWakeGap(this.scheduleLastTick, now)) {
+      this.pendingWake = { wakeAt: now, settleAt: now + WAKE_SETTLE_MS };
+    }
+    this.scheduleLastTick = now;
+    // Keep "Next: in 25m" current on a visible Schedules tab.
+    for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
+      if (leaf.view instanceof SkillBrowserView) leaf.view.refreshSchedules();
+    }
+    if (this.scheduleTicking) return;
+    if (this.pendingWake && now < this.pendingWake.settleAt) return;
+    this.pendingWake = null;
+    if (this.settings.schedules.length === 0) return;
+    this.scheduleTicking = true;
+    try {
+      let changed = false;
+      for (const sch of [...this.settings.schedules]) {
+        const d = evaluateSchedule(sch, now);
+        if (d.action === "none") continue;
+        changed = true;
+        // Advance the cursor / finish one-shots BEFORE launching, so a reload or
+        // crash mid-launch can never fire the same occurrence twice.
+        sch.cursor = d.slot;
+        if (sch.trigger.kind === "once") sch.done = true;
+        await this.saveSettings();
+        await this.fireSchedule(sch, d.reason);
+      }
+      if (changed) {
+        await this.saveSettings();
+        this.refreshViews();
+      }
+    } catch (e) {
+      console.error("[skill-layer] schedule tick failed:", e);
+    } finally {
+      this.scheduleTicking = false;
+    }
+  }
+
+  /** Launch one schedule's task now (always headless) and record the run in its history. Never throws. */
+  private async fireSchedule(sch: Schedule, reason: ScheduleRun["reason"]): Promise<void> {
+    const now = Date.now();
+    const record = async (run: Omit<ScheduleRun, "at" | "reason">) => {
+      sch.runs = addRun(sch.runs, { at: now, reason, ...run });
+      await this.saveSettings();
+      this.refreshViews();
+    };
+    try {
+      if (reason !== "manual") {
+        new Notice(
+          reason === "catch-up"
+            ? `Scheduled: running “${sch.name}” (missed while you were away).`
+            : `Scheduled: running “${sch.name}”.`,
+        );
+      }
+      let rec: LaunchedSession | null = null;
+      if (sch.task.kind === "skill") {
+        const task = sch.task;
+        const skill =
+          this.getSkillById(task.skillId) ??
+          [...this.getSkills(), ...this.getCommands()].find(
+            (x) => x.name === task.skillName && (x.kind ?? "skill") === (task.itemKind ?? "skill"),
+          );
+        if (!skill) {
+          new Notice(`Scheduled “${sch.name}”: the ${task.itemKind ?? "skill"} “${task.skillName}” wasn't found.`);
+          await record({ status: "failed", note: `“${task.skillName}” not found` });
+          return;
+        }
+        rec = await this.launchSkill(skill, undefined, task.prompt, undefined, undefined, {
+          scheduleId: sch.id,
+          mode: "headless",
+        });
+      } else {
+        rec = this.launchPromptTask(sch);
+      }
+      await record(rec ? { status: "launched", sessionKey: rec.key } : { status: "failed", note: "Couldn't launch (see the notice)" });
+    } catch (e) {
+      console.error("[skill-layer] fireSchedule failed:", e);
+      await record({ status: "failed", note: "Launch error" });
+    }
+  }
+
+  /** Launch a PROMPT task through its harness (or the default one). */
+  private launchPromptTask(sch: Schedule): LaunchedSession | null {
+    if (sch.task.kind !== "prompt") return null;
+    if (!this.detector.canScanExternal()) {
+      new Notice("Skill and Harness Manager: launching requires the desktop app.");
+      return null;
+    }
+    const cwd = this.detector.vaultBasePath();
+    if (!cwd) {
+      new Notice("Skill and Harness Manager: could not resolve the vault path; not launching.");
+      return null;
+    }
+    const harnessId = sch.task.harnessId;
+    const harness = harnessId
+      ? this.getScheduleHarnessOptions().find((h) => h.id === harnessId) ?? this.resolveDefaultHarness()
+      : this.resolveDefaultHarness();
+    const prompt = buildPromptTaskPrompt({
+      prompt: sch.task.prompt,
+      vaultPath: cwd,
+      appendAnchor: this.settings.appendVaultAnchor,
+    });
+    // A synthetic item so the shared launch path (session record, notices,
+    // terminal tab title) shows the schedule's name.
+    const item: Skill = {
+      id: `schedule:${sch.id}`,
+      kind: "skill",
+      name: sch.name,
+      description: "",
+      path: "",
+      vaultPath: null,
+      sourceRoot: "",
+      sourceLabel: "schedule",
+      detection: "vault",
+      tags: [],
+    };
+    return this.runLaunch(item, prompt, cwd, "headless", undefined, harness, sch.id);
+  }
+
+  /** A scheduled run's session ended: copy its final status into the schedule's history. */
+  private noteScheduleRunStatus(s: LaunchedSession, status: string): void {
+    if (!s.scheduleId) return;
+    const sch = this.settings.schedules.find((x) => x.id === s.scheduleId);
+    const run = sch?.runs.find((r) => r.sessionKey === s.key);
+    if (!run) return;
+    const map: Record<string, ScheduleRun["status"]> = {
+      done: "done",
+      "needs-input": "needs-input",
+      errored: "errored",
+      stopped: "stopped",
+    };
+    const next = map[status];
+    if (!next || run.status === next) return;
+    run.status = next;
+    void this.saveSettings();
+    this.refreshViews();
+  }
+
+  // --- Bundled setup skills -------------------------------------------------
+  /** Absolute path a bundled skill installs to, or null without a vault path. */
+  private bundledSkillPath(id: BundledSkillId): string | null {
+    const base = this.detector.vaultBasePath();
+    return base ? nodePath.join(base, BUNDLED_SKILLS[id].relPath) : null;
+  }
+
+  /** True when the bundled skill's SKILL.md already exists in the vault. */
+  isBundledSkillInstalled(id: BundledSkillId): boolean {
+    const abs = this.bundledSkillPath(id);
+    return !!abs && fs.existsSync(abs);
+  }
+
+  /**
+   * Write a bundled setup skill (setup-cmux / setup-ghostty) into the vault's
+   * `.agents/skills/` so it shows up in the Skills tab. Never overwrites an
+   * existing copy (the user may have edited it). Never throws.
+   */
+  async installBundledSkill(id: BundledSkillId): Promise<void> {
+    const sk = BUNDLED_SKILLS[id];
+    const abs = this.bundledSkillPath(id);
+    if (!abs || !this.detector.canScanExternal()) {
+      new Notice("Skill and Harness Manager: installing skills requires the desktop app.");
+      return;
+    }
+    try {
+      if (fs.existsSync(abs)) {
+        new Notice(`“${sk.name}” is already installed (${sk.relPath}).`);
+        return;
+      }
+      await fs.promises.mkdir(nodePath.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, sk.body, "utf8");
+      await this.rescan();
+      new Notice(`Installed “${sk.name}”. Run it from the Skills tab.`, 8000);
+    } catch (err) {
+      console.error(`[skill-layer] installing ${sk.name} failed:`, err);
+      new Notice(`Skill and Harness Manager: couldn't install “${sk.name}”.`);
+    }
   }
 
   // --- Custom agents (Agents tab, M10) -----------------------------------
