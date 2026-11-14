@@ -178,14 +178,17 @@ export class SkillBrowserView extends ItemView {
           "skill-layer-tab" +
           (active ? " is-active" : "") +
           (divider ? " has-divider" : ""),
-        text: tab.label,
         attr: {
           role: "tab",
           tabindex: "0",
           "aria-label": `${tab.label} tab`,
           "aria-selected": String(active),
+          // Tooltip — the label is hidden in a narrow panel (icon-only tabs).
+          title: tab.label,
         },
       });
+      setIcon(btn.createSpan({ cls: "skill-layer-tab-icon" }), tab.icon);
+      btn.createSpan({ cls: "skill-layer-tab-label", text: tab.label });
       const activate = () => {
         if (this.activeTab === tab.id) return;
         this.activeTab = tab.id;

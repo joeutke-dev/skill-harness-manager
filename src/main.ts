@@ -4,12 +4,14 @@ import * as fs from "fs";
 import * as os from "os";
 import * as nodePath from "path";
 import {
+  addIcon,
   Editor,
   FileSystemAdapter,
   MarkdownFileInfo,
   MarkdownView,
   Menu,
   Notice,
+  normalizePath,
   Platform,
   Plugin,
   TAbstractFile,
@@ -62,6 +64,8 @@ import {
   elementHasSvg,
   pinAction,
   resolvePinnedIcon,
+  SKILL_TAB_ICON_ID,
+  SKILL_TAB_ICON_SVG,
 } from "./icon";
 import { IconPickerModal } from "./iconPicker";
 import {
@@ -269,6 +273,7 @@ export default class SkillLayerPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new SkillBrowserView(leaf, this),
     );
 
+    addIcon(SKILL_TAB_ICON_ID, SKILL_TAB_ICON_SVG);
     this.addRibbonIcon("brain-circuit", "Skill and Harness Manager: toggle skills browser", () => {
       void this.toggleView();
     });
@@ -462,6 +467,53 @@ export default class SkillLayerPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  /**
+   * The DEV build (`npm run dev:install` installs it as
+   * "skill-harness-manager-dev") shares the community install's data.json
+   * instead of keeping its own, so everything set while testing — schedules,
+   * pins, terminal, harnesses — is the real configuration and is still there
+   * after switching back to the released plugin. Null for the released plugin
+   * (it uses its own data.json as usual) or when there is no community install.
+   */
+  private async sharedDataPath(): Promise<string | null> {
+    const id = this.manifest.id;
+    if (!id.endsWith("-dev")) return null;
+    const dir = normalizePath(`${this.app.vault.configDir}/plugins/${id.slice(0, -"-dev".length)}`);
+    return (await this.app.vault.adapter.exists(dir)) ? `${dir}/data.json` : null;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches Plugin.loadData's signature
+  async loadData(): Promise<any> {
+    const shared = await this.sharedDataPath();
+    if (!shared) return super.loadData();
+    try {
+      if (!(await this.app.vault.adapter.exists(shared))) return null;
+      return JSON.parse(await this.app.vault.adapter.read(shared));
+    } catch (e) {
+      console.error("[skill-layer] reading the shared (community) data.json failed:", e);
+      return null;
+    }
+  }
+
+  async saveData(data: unknown): Promise<void> {
+    const shared = await this.sharedDataPath();
+    if (!shared) return super.saveData(data);
+    await this.app.vault.adapter.write(shared, JSON.stringify(data, null, 2));
+  }
+
+  /**
+   * Obsidian calls this when data.json changes on disk outside the plugin (Obsidian
+   * Sync, a restore, another device). Reload settings so schedules, sessions and
+   * the views reflect the file instead of being overwritten by stale in-memory
+   * state on the next save. (Ribbon pins are rebuilt on the next plugin load.)
+   */
+  async onExternalSettingsChange(): Promise<void> {
+    await this.loadSettings();
+    document.body.toggleClass(INHERIT_FONT_CLASS, this.settings.inheritTextFont);
+    this.refreshViews();
+    this.updateSessionStatusBar();
   }
 
   /**

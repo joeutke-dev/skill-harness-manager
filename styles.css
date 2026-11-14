@@ -44,6 +44,9 @@
    reads as part of the page while curving out of the darker frame. Inactive tabs
    are muted labels. */
 .skill-layer-tabbar {
+  /* Size container: below ~380px the tab labels hide and tabs show only icons
+     (see the @container rule after the tab styles). */
+  container: shm-tabbar / inline-size;
   display: flex;
   align-items: flex-end;
   gap: var(--size-2-1);
@@ -82,8 +85,39 @@
      is ellipsized via text-overflow: it's fine because the flare-foot pseudos are
      positioned OUTSIDE the box and unaffected by the text clip. */
   overflow: visible;
-  text-overflow: ellipsis;
   transition: color 0.1s ease;
+  /* Icon + label, centred. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-2-2);
+}
+
+.skill-layer-tab-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  /* A touch larger than the 16px default so the glyphs read clearly. */
+  --icon-size: 19px;
+  --icon-stroke: 1.85px;
+}
+
+/* The label clips with an ellipsis INSIDE its own box, so a squeezed tab never
+   spills its text over its neighbour (the tab itself must stay overflow:visible
+   for the active tab's flare feet). */
+.skill-layer-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Narrow panel: icon-only tabs (the label stays as the tooltip / aria-label). */
+@container shm-tabbar (max-width: 380px) {
+  .skill-layer-tab-label {
+    display: none;
+  }
+  .skill-layer-tab {
+    flex: 1 1 0;
+  }
 }
 
 .skill-layer-tab:not(.is-active):hover {

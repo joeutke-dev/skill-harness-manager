@@ -1272,6 +1272,7 @@ console.log("\n[p] M10 tabbed UI (tab state, agents-tab model, agent launch)");
   eq("default tab is Skills", DEFAULT_TAB, "skills");
   check("TABS ids", deepEq(TABS.map((t) => t.id), ["skills", "sessions", "schedules", "config"]));
   check("TABS labels", deepEq(TABS.map((t) => t.label), ["Skills", "Sessions", "Schedules", "Config"]));
+  check("TABS icons", deepEq(TABS.map((t) => t.icon), ["shm-skill-page", "list", "clock", "settings"]));
   // Simulate the click handler: state := clicked tab.id (assigned directly,
   // as src/view.ts does — the id always comes from the known TABS list).
   let tab = DEFAULT_TAB;

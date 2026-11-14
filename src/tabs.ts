@@ -6,6 +6,7 @@
 // render; no behavior lives here.
 
 import type { CustomAgent } from "./launch";
+import { SKILL_TAB_ICON_ID } from "./icon";
 
 /** The browser tabs. "skills" is the combined Skills & Commands browser (one
  *  tab, a section per kind); "config" holds the rarely-used Harnesses (M15.3)
@@ -15,12 +16,13 @@ export type SkillLayerTab = "skills" | "sessions" | "schedules" | "config";
 /** The tab shown on first open. */
 export const DEFAULT_TAB: SkillLayerTab = "skills";
 
-/** Tab bar definition (id + display label), in display order. */
-export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string }> = [
-  { id: "skills", label: "Skills" },
-  { id: "sessions", label: "Sessions" },
-  { id: "schedules", label: "Schedules" },
-  { id: "config", label: "Config" },
+/** Tab bar definition (id + label + icon), in display order. The icon sits left
+ *  of the label; in a narrow panel the labels hide and only icons show. */
+export const TABS: ReadonlyArray<{ id: SkillLayerTab; label: string; icon: string }> = [
+  { id: "skills", label: "Skills", icon: SKILL_TAB_ICON_ID },
+  { id: "sessions", label: "Sessions", icon: "list" },
+  { id: "schedules", label: "Schedules", icon: "clock" },
+  { id: "config", label: "Config", icon: "settings" },
 ];
 
 /** Empty-state copy for the Agents tab when discovery returns nothing. */
