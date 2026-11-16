@@ -484,8 +484,7 @@ export default class SkillLayerPlugin extends Plugin {
     return (await this.app.vault.adapter.exists(dir)) ? `${dir}/data.json` : null;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches Plugin.loadData's signature
-  async loadData(): Promise<any> {
+  async loadData(): Promise<unknown> {
     const shared = await this.sharedDataPath();
     if (!shared) return super.loadData();
     try {
