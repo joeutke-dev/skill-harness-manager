@@ -167,6 +167,7 @@ import {
 } from "./types";
 import { SKILL_LAYER_VIEW, SkillBrowserView } from "./view";
 import { decideToggleAction } from "./viewToggle";
+import { collectSkillIds, placeholderSkillName, remapSkillIds } from "./remapIds";
 import {
   canOpenInYamlViewer,
   detectYamlViewerEnabled,
@@ -343,7 +344,14 @@ export default class SkillLayerPlugin extends Plugin {
 
     // Initial scan + restore pinned ribbon icons once the layout is ready.
     this.app.workspace.onLayoutReady(async () => {
-      await this.rescan();
+      // Never let a scan or migration error stop the pinned ribbons from being
+      // drawn — an undetected pin still gets a working placeholder button.
+      try {
+        await this.rescan();
+        await this.migrateMovedSkillIds();
+      } catch (err) {
+        console.error("[skill-layer] startup scan failed:", err);
+      }
       this.recreatePinnedRibbons();
       // Reveal hidden dot-folders if the toggle is on (deferred to layout-ready,
       // like the reference plugin, so the file explorer exists to repopulate).
@@ -1970,11 +1978,53 @@ export default class SkillLayerPlugin extends Plugin {
     }
   }
 
+  /**
+   * Re-point persisted skill ids whose file is no longer detected at that path
+   * but IS detected under another path that resolves to the same real file —
+   * e.g. after `.claude/skills/<name>` became a symlink into `.agents/skills`.
+   * Without this, pins, right-click entries, schedules and per-skill overrides
+   * silently orphan. Run after a scan, before the pinned ribbons are built.
+   */
+  private async migrateMovedSkillIds(): Promise<void> {
+    const detected = new Set<string>([
+      ...this.skills.map((s) => s.id),
+      ...this.commands.map((c) => c.id),
+    ]);
+    const orphans = collectSkillIds(this.settings).filter((id) => !detected.has(id));
+    if (orphans.length === 0) return;
+
+    const real = async (p: string): Promise<string | null> => {
+      // Ids are normalizePath()'d, which strips the leading "/" on POSIX.
+      const abs = nodePath.isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) ? p : `/${p}`;
+      try {
+        return await fs.promises.realpath(abs);
+      } catch {
+        return null;
+      }
+    };
+    const byReal = new Map<string, string>();
+    for (const s of this.skills) {
+      const r = await real(s.path);
+      if (r && !byReal.has(r)) byReal.set(r, s.id);
+    }
+    const mapping = new Map<string, string>();
+    for (const id of orphans) {
+      const r = await real(id);
+      const next = r ? byReal.get(r) : undefined;
+      if (next && next !== id) mapping.set(id, next);
+    }
+    const changes = remapSkillIds(this.settings, mapping);
+    if (changes === 0) return;
+    await this.saveSettings();
+    console.info(
+      `[skill-layer] re-pointed ${mapping.size} moved skill id(s) (${changes} setting(s)).`,
+    );
+  }
+
   private placeholderSkill(id: string): Skill {
-    const base = id.replace(/\\/g, "/").split("/").pop() ?? id;
     return {
       id,
-      name: base,
+      name: placeholderSkillName(id),
       description: "(skill not currently detected)",
       path: id,
       vaultPath: null,

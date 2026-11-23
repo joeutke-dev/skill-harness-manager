@@ -2430,5 +2430,44 @@ console.log("\n[terminal] interactive argv + keep-open");
 }
 
 // =====================================================================
+// 0.5.3: re-pointing persisted skill ids after a skill path moves.
+{
+  const remapOut = join(builtDir, "remapIds.mjs");
+  await esbuild.build({
+    entryPoints: [join(here, "..", "src", "remapIds.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: remapOut,
+    logLevel: "silent",
+  });
+  const R = await import(pathToFileURL(remapOut).href);
+  const A = "V/.claude/skills/a/SKILL.md";
+  const A2 = "V/.agents/skills/a/SKILL.md";
+  const B = "V/.claude/skills/b/SKILL.md";
+  const s = {
+    pinnedSkillIds: [A, B, A2],
+    rightClickSkillIds: [A],
+    editorMenuSkillIds: [],
+    skillIcons: { [A]: "lucide-eye", [A2]: "lucide-star", [B]: "lucide-x" },
+    skillAgent: {},
+    skillHarness: { [A]: "genie" },
+    skillClaudeAgent: {},
+    skillLaunchMode: {},
+    schedules: [{ task: { kind: "skill", skillId: A } }, { task: { kind: "prompt" } }],
+  };
+  check("remap: collect ids", deepEq(R.collectSkillIds(s).sort(), [A, A2, B].sort()));
+  const n = R.remapSkillIds(s, new Map([[A, A2]]));
+  check("remap: lists rewritten + deduped", deepEq(s.pinnedSkillIds, [A2, B]) && deepEq(s.rightClickSkillIds, [A2]));
+  check("remap: map moved, existing new value wins", s.skillIcons[A2] === "lucide-star" && !(A in s.skillIcons) && s.skillHarness[A2] === "genie");
+  check("remap: schedule skillId rewritten, prompt task untouched", s.schedules[0].task.skillId === A2 && !("skillId" in s.schedules[1].task));
+  eq("remap: change count", n, 5);
+  eq("remap: empty mapping is a no-op", R.remapSkillIds(s, new Map()), 0);
+  eq("placeholder: SKILL.md → folder", R.placeholderSkillName("Users/x/.claude/skills/daily-note/SKILL.md"), "daily-note");
+  eq("placeholder: other file → basename", R.placeholderSkillName("Users/x/commands/run-it.md"), "run-it");
+  eq("placeholder: windows path", R.placeholderSkillName("C:\\v\\skills\\foo\\skill.md"), "foo");
+}
+
+// =====================================================================
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
