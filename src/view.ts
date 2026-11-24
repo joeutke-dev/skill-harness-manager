@@ -5,7 +5,13 @@ import type SkillLayerPlugin from "./main";
 import { DEFAULT_TAB, SkillLayerTab, TABS } from "./tabs";
 import { Skill } from "./types";
 import type { CustomHarness } from "./launch";
-import { LaunchedSession, relativeTime, resumeTargetLabel } from "./sessions";
+import {
+  formatSessionTimestamp,
+  LaunchedSession,
+  relativeTime,
+  resumeTargetLabel,
+  sessionWindowLabel,
+} from "./sessions";
 import {
   describeTrigger,
   formatWhen,
@@ -257,13 +263,13 @@ export class SkillBrowserView extends ItemView {
   private tabFooterText(tab: SkillLayerTab): string {
     switch (tab) {
       case "sessions":
-        return "Runs you've started, with live status. Cleared after 12 hours.";
+        return `Skill sessions from the last ${sessionWindowLabel(this.plugin.settings.sessionWindowHours)} (up to 7 days).`;
       case "schedules":
-        return "Run a skill or prompt in the background, on repeat or once.";
+        return "Schedule a skill to run in the background.";
       case "config":
-        return "Harnesses are the CLIs that run your skills; agents are assistants they can run as.";
+        return "Register a Harness or Agent to run your skills.";
       default:
-        return "Your skills and commands. Run them, pin them to the ribbon, or add them to the right-click menu.";
+        return "Register your skill folders here. Run and schedule from this tab, pin them to the ribbon or add them to your right-click menu.";
     }
   }
 
@@ -481,14 +487,17 @@ export class SkillBrowserView extends ItemView {
   }
 
   /** The Sessions tab: every launched session with its live status, grouped
-   *  Needs attention → Running → Finished (newest first in each). Pruned live
-   *  (dropped after 12h). Statuses come from the plugin's session monitor. */
+   *  Needs attention → Running → Finished (newest first in each). Filtered to
+   *  the Settings window (kept 7 days). Statuses come from the session monitor. */
   private renderSessionsTab(c: HTMLElement): void {
     const sessions = this.plugin.livePrunedSessions();
     if (sessions.length === 0) {
       this.renderEmptyState(
         c,
-        "No sessions yet.",
+        this.plugin.settings.sessions.length === 0
+          ? "No sessions yet."
+          : `No sessions in the last ${sessionWindowLabel(this.plugin.settings.sessionWindowHours)}. ` +
+              "Widen the window in Settings to see older runs.",
       );
       return;
     }
@@ -550,12 +559,18 @@ export class SkillBrowserView extends ItemView {
 
     main.createDiv({ cls: "skill-layer-row-desc", text: d.detail });
 
+    // Clear absolute start (and end) time stamps for the run.
+    const stamp = main.createDiv({ cls: "skill-layer-row-path skill-layer-session-stamp" });
+    stamp.createSpan({ text: `Started ${formatSessionTimestamp(s.startedAt)}` });
+    if (s.endedAt !== undefined) {
+      stamp.createSpan({ text: ` · Ended ${formatSessionTimestamp(s.endedAt)}` });
+    }
+
     // Times are live: the plugin's 1s ticker rewrites the data-shm-* spans.
     const timing = main.createDiv({
       cls: "skill-layer-row-path",
       attr: { title: new Date(s.startedAt).toLocaleString() },
     });
-    timing.createSpan({ text: "Started " });
     timing.createSpan({
       text: relativeTime(s.startedAt, now),
       attr: { "data-shm-ago": String(s.startedAt) },

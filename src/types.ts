@@ -177,10 +177,16 @@ export interface SkillLayerSettings {
   showHiddenFolders: boolean;
   /**
    * Sessions the plugin has launched (M20), newest-appended. Each is a resumable
-   * omnigent/claude/codex conversation shown in the Sessions tab. Pruned on view
-   * (dropped when older than 12h or no longer resumable). Plugin-local state.
+   * omnigent/claude/codex conversation shown in the Sessions tab. Kept for 7
+   * days, then pruned (with its logs). Plugin-local state.
    */
   sessions: LaunchedSession[];
+  /**
+   * How far back the Sessions tab shows runs, in hours (1–168). Only a VIEW
+   * filter: sessions are always kept for 7 days, so widening it brings older
+   * runs back. Validated on load by `normalizeSessionWindowHours`.
+   */
+  sessionWindowHours: number;
   /**
    * Scheduled skill / prompt runs (Schedules tab). They fire only while Obsidian
    * is open; missed runs can be caught up on wake. Validated on load by
@@ -287,6 +293,7 @@ export const DEFAULT_SETTINGS: SkillLayerSettings = {
   appendVaultAnchor: true,
   showHiddenFolders: false,
   sessions: [],
+  sessionWindowHours: 12,
   schedules: [],
   stallMinutes: 5,
   longRunMinutes: 30,

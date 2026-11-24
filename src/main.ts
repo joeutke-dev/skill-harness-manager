@@ -130,7 +130,9 @@ import { SkillLayerSettingTab } from "./settingsTab";
 import {
   buildResumeArgv,
   buildTerminalScript,
+  isInSessionWindow,
   LaunchedSession,
+  normalizeSessionWindowHours,
   scrubClaudeSessionEnv,
   SESSION_MAX_AGE_MS,
   sessionToolFromCommand,
@@ -471,6 +473,7 @@ export default class SkillLayerPlugin extends Plugin {
     // themselves (anything other than the old default) is left untouched.
     if (this.settings.panelWidth === 420) this.settings.panelWidth = 520;
     this.settings.schedules = normalizeSchedules(this.settings.schedules);
+    this.settings.sessionWindowHours = normalizeSessionWindowHours(this.settings.sessionWindowHours);
   }
 
   async saveSettings(): Promise<void> {
@@ -2922,10 +2925,11 @@ export default class SkillLayerPlugin extends Plugin {
   }
 
   /**
-   * Prune sessions older than 12h, persisting if anything changed. Returns the
-   * survivors, newest-first. Called by the Sessions tab on render so the list is
-   * always live. (Resumability can't be verified without a captured conversation
-   * id — a future iteration; for now age is the sole prune criterion.)
+   * Prune sessions older than the 7-day retention, persisting if anything
+   * changed, then return the ones inside the Sessions-tab window
+   * (`sessionWindowHours`, plus any still running), newest-first. Called by the
+   * Sessions tab on render so the list is always live. The window only filters
+   * the view: widening it in Settings brings older (≤ 7 days) runs back.
    */
   livePrunedSessions(): LaunchedSession[] {
     const now = Date.now();
@@ -2939,7 +2943,14 @@ export default class SkillLayerPlugin extends Plugin {
       this.settings.sessions = kept;
       void this.saveSettings();
     }
-    return [...kept].sort((a, b) => b.startedAt - a.startedAt);
+    return kept
+      .filter((s) => this.isSessionVisible(s, now))
+      .sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /** Whether a session falls inside the Sessions-tab window (or is still running). */
+  isSessionVisible(s: LaunchedSession, now = Date.now()): boolean {
+    return isInSessionWindow(s, now, this.settings.sessionWindowHours, this.isSessionLive(s));
   }
 
   /** Remove one tracked session (the Sessions-tab "Forget" action). */
@@ -3248,7 +3259,7 @@ export default class SkillLayerPlugin extends Plugin {
     }
   }
 
-  private refreshSessionViews(): void {
+  refreshSessionViews(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(SKILL_LAYER_VIEW)) {
       if (leaf.view instanceof SkillBrowserView) leaf.view.refreshSessions();
     }
@@ -3260,7 +3271,10 @@ export default class SkillLayerPlugin extends Plugin {
     if (!el) return;
     let running = 0;
     let attention = 0;
+    const now = Date.now();
     for (const s of this.settings.sessions) {
+      // Match the Sessions tab: runs outside its window aren't counted.
+      if (!this.isSessionVisible(s, now)) continue;
       const d = this.describeSession(s);
       if (!d.finished) running++;
       if (sessionGroup(d, s.acknowledged) === "attention") attention++;

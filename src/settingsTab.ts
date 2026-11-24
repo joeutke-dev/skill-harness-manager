@@ -1,5 +1,10 @@
 import { App, PluginSettingTab, Setting, setIcon } from "obsidian";
 import type SkillLayerPlugin from "./main";
+import {
+  normalizeSessionWindowHours,
+  SESSION_WINDOW_OPTIONS_HOURS,
+  sessionWindowLabel,
+} from "./sessions";
 
 /**
  * The Skill and Harness Manager settings page: general preferences only (toggles,
@@ -195,6 +200,25 @@ export class SkillLayerSettingTab extends PluginSettingTab {
     // Headless runs are tracked in the Sessions tab; these are the defaults the
     // launch popup starts from (it can override them per run).
     new Setting(containerEl).setName("Session monitoring").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show sessions from the last")
+      .setDesc(
+        "How far back the Sessions tab lists runs. Sessions are always kept for 7 days, " +
+          "so widening this brings older runs back. Running sessions are always shown.",
+      )
+      .addDropdown((d) => {
+        const current = normalizeSessionWindowHours(settings.sessionWindowHours);
+        const options: number[] = [...SESSION_WINDOW_OPTIONS_HOURS];
+        if (!options.includes(current)) options.push(current);
+        for (const h of options.sort((a, b) => a - b)) d.addOption(String(h), sessionWindowLabel(h));
+        d.setValue(String(current)).onChange(async (v) => {
+          settings.sessionWindowHours = normalizeSessionWindowHours(Number(v));
+          await this.plugin.saveSettings();
+          this.plugin.refreshSessionViews();
+          this.plugin.updateSessionStatusBar();
+        });
+      });
 
     const minutes = (
       name: string,

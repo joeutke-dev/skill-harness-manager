@@ -24,7 +24,7 @@ import { isValidOmnigentServer, shellSingleQuote } from "./launch";
 // back to a terminal hint to set a Resume command for the harness.
 export type SessionTool = "omnigent" | "claude" | "codex" | "isaac" | "custom";
 
-/** One tracked launch. Persisted in settings; pruned after 12h. */
+/** One tracked launch. Persisted in settings; pruned after 7 days. */
 export interface LaunchedSession {
   /** Stable de-dupe key (tool + launch time + nonce). */
   key: string;
@@ -122,12 +122,68 @@ export function scrubClaudeSessionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return out;
 }
 
-/** Sessions older than this are dropped from the UI (and storage). */
-export const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+/**
+ * Sessions are RETAINED (in storage, with their logs) for 7 days, then dropped.
+ * What the Sessions tab SHOWS is a shorter, user-chosen window inside that
+ * (`sessionWindowHours`), so widening the window brings older runs back.
+ */
+export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Whether a session has aged out (≥ 12h since launch). */
+/** Whether a session has aged out of storage (≥ 7 days since launch). */
 export function isSessionExpired(s: LaunchedSession, now: number): boolean {
   return now - s.startedAt >= SESSION_MAX_AGE_MS;
+}
+
+/** The longest Sessions-tab window, in hours (= the 7-day retention). */
+export const SESSION_WINDOW_MAX_HOURS = SESSION_MAX_AGE_MS / (60 * 60 * 1000);
+
+/** Default Sessions-tab window, in hours (the old fixed 12h cutoff). */
+export const DEFAULT_SESSION_WINDOW_HOURS = 12;
+
+/** Window choices offered in Settings, in hours. */
+export const SESSION_WINDOW_OPTIONS_HOURS = [1, 3, 6, 12, 24, 48, 72, 120, 168] as const;
+
+/** A stored window value made safe: a whole number of hours in 1–168. */
+export function normalizeSessionWindowHours(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return DEFAULT_SESSION_WINDOW_HOURS;
+  return Math.min(SESSION_WINDOW_MAX_HOURS, Math.max(1, Math.round(n)));
+}
+
+/** "1 hour", "12 hours", "1 day", "7 days" (whole days are shown as days). */
+export function sessionWindowLabel(hours: number): string {
+  const h = normalizeSessionWindowHours(hours);
+  if (h % 24 === 0) {
+    const d = h / 24;
+    return `${d} day${d === 1 ? "" : "s"}`;
+  }
+  return `${h} hour${h === 1 ? "" : "s"}`;
+}
+
+/**
+ * Whether a session is shown in the Sessions tab: started within the window,
+ * or still running (a live run never drops out of view mid-run).
+ */
+export function isInSessionWindow(
+  s: LaunchedSession,
+  now: number,
+  windowHours: number,
+  live = false,
+): boolean {
+  if (live) return true;
+  return now - s.startedAt < normalizeSessionWindowHours(windowHours) * 60 * 60 * 1000;
+}
+
+/** A clear absolute timestamp, e.g. "Tue, Nov 24, 9:07:12 AM". */
+export function formatSessionTimestamp(t: number): string {
+  return new Date(t).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 /** Map a custom-harness command's binary to a supported tool, or null. */
@@ -359,5 +415,6 @@ export function relativeTime(startedAt: number, now: number): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m ago`;
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  return `${Math.floor(h / 24)}d ${h % 24}h ago`;
 }

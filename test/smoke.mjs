@@ -179,6 +179,10 @@ await esbuild.build({
 const {
   SESSION_MAX_AGE_MS,
   isSessionExpired,
+  isInSessionWindow,
+  normalizeSessionWindowHours,
+  sessionWindowLabel,
+  formatSessionTimestamp,
   sessionToolFromCommand,
   buildResumeArgv,
   buildTerminalScript,
@@ -1987,16 +1991,29 @@ console.log("\n[u] sessions: resume argv / terminal script / labels / prune");
   check("win errorlevel guard", win.content.includes("if not errorlevel 1 goto :done"));
   check("win hint stripped of specials", win.content.includes("echo set a resume cmd  Settings ") && !win.content.includes("("));
 
-  // isSessionExpired: 12h boundary.
+  // isSessionExpired: 7-day retention boundary.
   const now = 1_000_000_000_000;
   check("fresh session not expired", isSessionExpired({ startedAt: now - 1000 }, now) === false);
-  check("11h59m not expired", isSessionExpired({ startedAt: now - (SESSION_MAX_AGE_MS - 60_000) }, now) === false);
-  check("12h+ expired", isSessionExpired({ startedAt: now - SESSION_MAX_AGE_MS - 1 }, now) === true);
+  check("6d23h59m not expired", isSessionExpired({ startedAt: now - (SESSION_MAX_AGE_MS - 60_000) }, now) === false);
+  check("7d+ expired", isSessionExpired({ startedAt: now - SESSION_MAX_AGE_MS - 1 }, now) === true);
 
   // relativeTime formatting.
   eq("relativeTime seconds", relativeTime(now - 5000, now), "5s ago");
   eq("relativeTime minutes", relativeTime(now - 5 * 60_000, now), "5m ago");
   eq("relativeTime hours", relativeTime(now - (2 * 60 + 15) * 60_000, now), "2h 15m ago");
+  eq("relativeTime days", relativeTime(now - (50 * 60 + 5) * 60_000, now), "2d 2h ago");
+  check("retention is 7 days", SESSION_MAX_AGE_MS === 7 * 24 * 60 * 60 * 1000);
+  eq("window default on junk", normalizeSessionWindowHours("x"), 12);
+  eq("window clamps high", normalizeSessionWindowHours(500), 168);
+  eq("window clamps low", normalizeSessionWindowHours(0), 1);
+  eq("window label hours", sessionWindowLabel(12), "12 hours");
+  eq("window label 1 hour", sessionWindowLabel(1), "1 hour");
+  eq("window label 1 day", sessionWindowLabel(24), "1 day");
+  eq("window label days", sessionWindowLabel(168), "7 days");
+  check("in window", isInSessionWindow({ startedAt: now - 60 * 60_000 }, now, 3) === true);
+  check("outside window", isInSessionWindow({ startedAt: now - 4 * 60 * 60_000 }, now, 3) === false);
+  check("live run stays visible", isInSessionWindow({ startedAt: now - 4 * 60 * 60_000 }, now, 3, true) === true);
+  check("timestamp formats", /\d/.test(formatSessionTimestamp(now)));
 }
 
 // =====================================================================
